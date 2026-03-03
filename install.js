@@ -44,21 +44,66 @@ for (const entry of skills) {
 
 // Scaffold CLAUDE.md if it doesn't exist
 if (!fs.existsSync(claudeMd)) {
-  const skillList = skillNames.map((s) => `- ${s}`).join("\n")
+  const skillList = skills
+    .map((s) => `- ${s.name.replace(".md", "")}`)
+    .join("\n")
+
   fs.writeFileSync(
     claudeMd,
     `# Claude Instructions
 
+## Approval Policy — NON-NEGOTIABLE
+
+Before ANY of the following, you MUST stop and ask for explicit approval:
+- Editing, creating, or deleting any file
+- Running any shell command
+- Installing any package
+- Making any git commit or push
+- Calling any external API or service
+- Activating any skill
+
+Never assume approval based on context. Always ask explicitly.
+If I say "go ahead" or "yes" to a plan, that is NOT approval to start executing.
+Ask again before each individual action.
+
 ## Skill Activation Policy
-Never activate skills automatically. Always ask: "Would you like me to activate the [skill-name] skill now?" and wait for explicit approval before proceeding.
+
+Never activate skills automatically. Always ask:
+"Would you like me to activate the [skill-name] skill now?"
+Only proceed after explicit approval.
 
 ## Available Skills
 ${skillList}
 `
   )
-  console.log("✓ Created CLAUDE.md")
+  console.log("✓ Created CLAUDE.md with approval policy")
 } else {
-  console.log("⚠ CLAUDE.md already exists, skipping.")
+  // CLAUDE.md exists — check if approval policy is already there
+  const existing = fs.readFileSync(claudeMd, "utf8")
+  if (!existing.includes("Approval Policy")) {
+    fs.appendFileSync(
+      claudeMd,
+      `
+
+## Approval Policy — NON-NEGOTIABLE
+
+Before ANY of the following, you MUST stop and ask for explicit approval:
+- Editing, creating, or deleting any file
+- Running any shell command
+- Installing any package
+- Making any git commit or push
+- Calling any external API or service
+- Activating any skill
+
+Never assume approval based on context. Always ask explicitly.
+If I say "go ahead" or "yes" to a plan, that is NOT approval to start executing.
+Ask again before each individual action.
+`
+    )
+    console.log("✓ Appended approval policy to existing CLAUDE.md")
+  } else {
+    console.log("⚠ CLAUDE.md already has approval policy, skipping.")
+  }
 }
 
 console.log("\n✅ cypher-claude-skills installed successfully.")
