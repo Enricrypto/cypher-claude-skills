@@ -9,7 +9,7 @@ Centralized Claude Code skills for Cypher projects. Install once per project and
 ### New project
 
 ```bash
-npm install --save-dev github:YOUR_USERNAME/cypher-claude-skills
+npm install --save-dev github:Enricrypto/cypher-claude-skills
 ```
 
 ### Existing project
