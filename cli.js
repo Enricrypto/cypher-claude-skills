@@ -46,11 +46,30 @@ const commands = {
 
   // Sync skills into current project (re-runs install)
   sync() {
+    function copyDir(src, dest) {
+      fs.mkdirSync(dest, { recursive: true })
+      for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
+        const srcPath = path.join(src, entry.name)
+        const destPath = path.join(dest, entry.name)
+        if (entry.isDirectory()) {
+          copyDir(srcPath, destPath)
+        } else {
+          fs.copyFileSync(srcPath, destPath)
+        }
+      }
+    }
+
     fs.mkdirSync(skillsDest, { recursive: true })
-    const skills = fs.readdirSync(skillsSrc)
-    for (const file of skills) {
-      fs.copyFileSync(path.join(skillsSrc, file), path.join(skillsDest, file))
-      console.log(`✓ Synced: ${file}`)
+    const skills = fs.readdirSync(skillsSrc, { withFileTypes: true })
+    for (const entry of skills) {
+      const srcPath = path.join(skillsSrc, entry.name)
+      const destPath = path.join(skillsDest, entry.name)
+      if (entry.isDirectory()) {
+        copyDir(srcPath, destPath)
+      } else {
+        fs.copyFileSync(srcPath, destPath)
+      }
+      console.log(`✓ Synced: ${entry.name}`)
     }
     console.log("\n✅ Skills synced successfully.")
   }
