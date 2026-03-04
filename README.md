@@ -9,18 +9,26 @@ Centralized Claude Code skills for Cypher projects. Install once per project and
 ### New project
 
 ```bash
-npm install --save-dev github:Enricrypto/cypher-claude-skills
+npm install --save-dev @cypher_digital/claude-skills
 ```
 
 ### Existing project
 
 ```bash
-npx cypher-skills init
+npx @cypher_digital/claude-skills init
 ```
 
 ### Update skills across all projects
 
 ```bash
+npx @cypher_digital/claude-skills sync
+```
+
+Or install globally once so the shorter command works everywhere:
+
+```bash
+npm install -g @cypher_digital/claude-skills
+# then from any project:
 npx cypher-skills sync
 ```
 
@@ -107,6 +115,25 @@ Forces Claude to verify its own work before declaring it done. Runs checks again
 ```
 "Verify this before we move on"
 "Activate verification-before-completion"
+```
+
+---
+
+#### `security-audit`
+
+**Source:** cypher-claude-skills (custom)
+
+Comprehensive, multi-layer security audit grounded in the 2026 threat landscape. Covers web/API security, infrastructure, AI agents, blockchain/smart contracts, and Living Off the Land (LOTL) attack patterns. Checks for OWASP Top 10, secrets exposure, dependency vulnerabilities, threat modeling, and more.
+
+**When to use:** Before any release, when working on financial platforms, DeFi protocols, trading systems, or APIs that handle money. Also activates proactively on high-value targets.
+
+**How to invoke:**
+
+```
+"Security audit this codebase"
+"Check for vulnerabilities"
+"Is this secure?"
+"Audit my code"
 ```
 
 ---
@@ -491,7 +518,9 @@ Structured commit message discipline. Enforces conventional commits format with 
 npx cypher-skills add <skill-name>
 
 # Then edit skills/<skill-name>.md with your instructions
-# Commit and push — all projects get it on next sync
+# Bump version and publish — all projects get it on next sync
+npm version patch
+npm publish --access public
 ```
 
 ---
@@ -509,6 +538,7 @@ npx cypher-skills sync
 
 | Skill                             | Trigger phrase                      |
 | --------------------------------- | ----------------------------------- |
+| `security-audit`                  | "Security audit this codebase"      |
 | `plan-exit-review`                | "Review this plan"                  |
 | `systematic-debugging`            | "Debug this systematically"         |
 | `verification-before-completion`  | "Verify before we move on"          |

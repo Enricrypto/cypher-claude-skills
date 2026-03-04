@@ -1,8 +1,13 @@
 {
-  "name": "@cypher/claude-skills",
+  "name": "@cypher_digital/claude-skills",
   "version": "1.0.0",
   "description": "Centralized Claude Code skills for Cypher projects",
   "main": "install.js",
+  "files": [
+    "skills/",
+    "cli.js",
+    "install.js"
+  ],
   "bin": {
     "cypher-skills": "./cli.js"
   },
