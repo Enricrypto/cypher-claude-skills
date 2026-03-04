@@ -109,19 +109,24 @@ Issues found:      X
   Medium:          X  (unused exports, dead branches)
   Low:             X  (debug logs, commented-out blocks)
 Safe to delete:    X  (confirmed no callers/references)
+Deferred:          X  (future phase — do not delete)
 Needs review:      X  (possibly used via dynamic dispatch, reflection, or macros)
 ```
 
 ### Step 2: Findings
 
-For each issue:
+For each issue, before classifying it as safe to delete, ask the user:
+"Is this code part of a planned next phase or future feature?"
+
+Then present the finding:
 
 ```
 [SEVERITY] CATEGORY — file:line
 Description: What this code is and why it appears dead.
 Evidence: How you confirmed it's unused (no callers, no references, unreachable path).
 Risk if kept: What happens if this stays (confusion, misleading logic, wasted gas/compute).
-Action: DELETE / INVESTIGATE / IGNORE WITH COMMENT
+Future phase? [YES / NO / UNKNOWN — ask user before proceeding]
+Action: DELETE / INVESTIGATE / DEFER / IGNORE WITH COMMENT
 ```
 
 ### Step 3: Deletion Plan
@@ -135,7 +140,32 @@ FILES TO CLEAN UP:
 [ ] contracts/Vault.sol — remove lines 44-46 (orphaned mapping `_oldBalances`)
 ```
 
-**Never apply deletions automatically.** Always present the plan and wait for explicit approval before using any edit tools.
+**Never apply deletions automatically.** Always present the plan and wait for explicit
+approval before using any edit tools.
+
+### Step 4: Deferred Code (Future Phases)
+
+For any finding where the user indicated the code is planned for a future phase,
+move it here instead of the deletion plan:
+
+```
+DEFERRED — DO NOT DELETE:
+[ ] src/hooks/useV2Migration.ts — lines 22-67
+    Reason: User confirmed this is for v2 migration (next phase)
+    Suggested action: Add a comment // TODO(phase-2): remove after migration complete
+    and leave in place.
+
+[ ] programs/vault/src/lib.rs — lines 200-215 (ix handler `stake_v2`)
+    Reason: User confirmed this will be wired up in the next sprint.
+    Suggested action: Add #[allow(dead_code)] with a comment explaining why.
+```
+
+For each deferred item, suggest adding a comment so future-you (or the team) knows
+why the code exists and when it will be used. Examples:
+
+- TypeScript: `// TODO(phase-2): wire up when [feature] ships`
+- Rust: `// TODO(phase-2): used in next sprint for [feature]` + `#[allow(dead_code)]`
+- Solidity: `// NOTE: reserved for v2 — do not remove`
 
 ---
 
@@ -153,12 +183,24 @@ FILES TO CLEAN UP:
 ## Important Constraints
 
 1. **Never delete automatically.** Present findings, wait for approval.
-2. **Do not flag dynamic usage as dead.** If a function could be called via reflection, dynamic dispatch, or a string-based router, note it as "needs review" not "dead".
-3. **Do not flag test code as dead** unless it's in a production file with no `#[cfg(test)]` gate.
-4. **Do not conflate dead code with bad code.** A function that works correctly but is verbose is not your concern here.
-5. **Respect `#[allow(dead_code)]` and `// eslint-disable` suppressions** — flag them in a separate section so the user can decide if the suppression is still warranted.
-6. **For Solidity storage variables** — confirm via constructor and all write paths before declaring dead. Some mappings are written by external calls.
-7. **Gas impact note** — for Solidity findings, note if removing the dead code would reduce deployment gas or runtime gas.
+2. **Do not flag dynamic usage as dead.** If a function could be called via reflection,
+   dynamic dispatch, or a string-based router, note it as "needs review" not "dead".
+3. **Do not flag test code as dead** unless it's in a production file with no
+   `#[cfg(test)]` gate.
+4. **Do not conflate dead code with bad code.** A function that works correctly but
+   is verbose is not your concern here.
+5. **Respect `#[allow(dead_code)]` and `// eslint-disable` suppressions** — flag them
+   in a separate section so the user can decide if the suppression is still warranted.
+6. **For Solidity storage variables** — confirm via constructor and all write paths
+   before declaring dead. Some mappings are written by external calls.
+7. **Gas impact note** — for Solidity findings, note if removing the dead code would
+   reduce deployment gas or runtime gas.
+8. **Future phase check — ALWAYS ask before flagging for deletion.** Before marking
+   any dead code as safe to delete, ask:
+   "Is this code part of a planned next phase or future feature?"
+   If the user says yes, move it to the DEFERRED section instead of the deletion plan.
+   Never assume code is permanently dead just because it has no current callers.
+   If the user is unsure, default to DEFER rather than DELETE.
 
 ---
 
