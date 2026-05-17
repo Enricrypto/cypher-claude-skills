@@ -1,6 +1,6 @@
 # cypher-claude-skills
 
-Centralized Claude Code skills for Cypher projects. Install once per project and get a full suite of AI workflow skills covering code review, architecture, testing, blockchain development, and frontend design.
+Centralized Claude Code skills for Cypher projects. Install once per project and get a full suite of AI workflow skills covering code review, architecture, testing, security, blockchain development, frontend design, and video production.
 
 ---
 
@@ -115,25 +115,6 @@ Forces Claude to verify its own work before declaring it done. Runs checks again
 ```
 "Verify this before we move on"
 "Activate verification-before-completion"
-```
-
----
-
-#### `security-audit`
-
-**Source:** cypher-claude-skills (custom)
-
-Comprehensive, multi-layer security audit grounded in the 2026 threat landscape. Covers web/API security, infrastructure, AI agents, blockchain/smart contracts, and Living Off the Land (LOTL) attack patterns. Checks for OWASP Top 10, secrets exposure, dependency vulnerabilities, threat modeling, and more.
-
-**When to use:** Before any release, when working on financial platforms, DeFi protocols, trading systems, or APIs that handle money. Also activates proactively on high-value targets.
-
-**How to invoke:**
-
-```
-"Security audit this codebase"
-"Check for vulnerabilities"
-"Is this secure?"
-"Audit my code"
 ```
 
 ---
@@ -253,19 +234,19 @@ Enforces strict RED → GREEN → REFACTOR cycle. Write failing test first, watc
 
 ---
 
-#### `webapp-testing`
+#### `web3-testing`
 
-**Source:** [anthropics/skills](https://github.com/anthropics/skills)
+**Source:** [wshobson/agents](https://github.com/wshobson/agents)
 
-Testing patterns for TypeScript and Node.js web applications. Covers unit, integration, and e2e testing strategies, mock patterns, and test organization.
+Smart contract testing with Hardhat and Foundry. Covers unit tests, integration tests, mainnet forking, fuzz testing, and invariant testing.
 
-**When to use:** Setting up or improving tests in a TypeScript/Node.js project.
+**When to use:** Writing or improving smart contract tests.
 
 **How to invoke:**
 
 ```
-"Help me test this using webapp-testing"
-"What's the right testing strategy for this?"
+"Help me test this contract using web3-testing"
+"Set up Foundry tests for this"
 ```
 
 ---
@@ -305,6 +286,31 @@ REST and GraphQL API design best practices. Covers endpoint naming, versioning, 
 "Review this API design"
 "Help me design this endpoint properly"
 ```
+
+---
+
+#### `frontend-architecture`
+
+**Source:** cypher-claude-skills (custom)
+
+Project-agnostic frontend architecture reference for React Native (Expo) and Next.js projects. Defines a strict 4-layer model (Presentation → Application → Domain → Infrastructure), 6 enforced rules, data flow patterns, file naming conventions, and a "where does this go?" decision checklist.
+
+**When to use:** Starting a new React Native or Next.js project, adding a feature and unsure which layer it belongs in, reviewing a PR for architectural correctness, or onboarding a collaborator.
+
+**How to invoke:**
+
+```
+"Where should this code go in the architecture?"
+"Review this for architectural correctness"
+"Activate frontend-architecture"
+```
+
+**Layers:**
+
+- **Presentation** — Screens, pages, pure UI components (`app/`, `components/`)
+- **Application** — Use-case hooks, business logic, orchestration (`hooks/use-cases/`)
+- **Domain** — Entities, value objects, validation rules — zero framework dependencies (`domain/`)
+- **Infrastructure** — API clients, state management, external services (`services/`, `store/`)
 
 ---
 
@@ -401,23 +407,6 @@ Smart contract security patterns. Covers reentrancy, access control, integer ove
 
 ---
 
-#### `web3-testing`
-
-**Source:** [wshobson/agents](https://github.com/wshobson/agents)
-
-Smart contract testing with Hardhat and Foundry. Covers unit tests, integration tests, mainnet forking, fuzz testing, and invariant testing.
-
-**When to use:** Writing or improving smart contract tests.
-
-**How to invoke:**
-
-```
-"Help me test this contract using web3-testing"
-"Set up Foundry tests for this"
-```
-
----
-
 #### `solana-dev` _(directory skill)_
 
 **Source:** [solana-foundation/solana-dev-skill](https://github.com/solana-foundation/solana-dev-skill)
@@ -490,6 +479,161 @@ Production-grade frontend design skill. Avoids generic AI aesthetics (Inter font
 
 ---
 
+### Video Production
+
+---
+
+#### `remotion-best-practices` _(directory skill)_
+
+**Source:** cypher-claude-skills (custom)
+
+Domain-specific knowledge for building videos with Remotion — React-based programmatic video. Covers composition setup, frame-based animation with `useCurrentFrame()` and `interpolate()`, `<Sequence>` timing patterns, asset loading via `staticFile()`, captions, FFmpeg integration, silence detection, audio visualization, 3D content with Three.js, transitions, and more.
+
+**Key rules:**
+- CSS transitions and Tailwind animation classes are **forbidden** — they won't render correctly
+- All animation must use `useCurrentFrame()` and `interpolate()`
+- Assets go in `public/` and are referenced with `staticFile()`
+
+**When to use:** Any time you are writing or modifying Remotion code.
+
+**How to invoke:**
+
+```
+"Build this video component using remotion-best-practices"
+"Activate remotion-best-practices"
+```
+
+---
+
+#### `create-onboarding-video` _(directory skill)_
+
+**Source:** cypher-claude-skills (custom)
+
+End-to-end workflow for producing short, punchy iOS app onboarding videos in Remotion. Each video showcases a feature in action by animating **isolated pieces of the UI** — not full screens — with UI-like transitions (springs, masked reveals, shared-element morphs). Designed to feel like an App Store preview.
+
+**Workflow:**
+1. **Intake** — collect 2–4 stills per screen (resting, mid-interaction, result states) + intent
+2. **Shot planning** — identify the single UI piece that proves the feature works per beat
+3. **Build** — Remotion compositions with spring-based motion, cursor-led taps, fixed caption band
+4. **Iterate** — render preview, adjust pacing, restage beats
+
+**Key rules:**
+- Never animate the whole screen — crop to the component that carries the beat
+- Cursor must lead every tap interaction along a single straight path
+- Captions anchor to a fixed top position, rise in from below, stay visible the entire beat
+- Always delegates Remotion code to `remotion-best-practices`
+
+**When to use:** Creating app onboarding videos, App Store previews, or feature demo clips from screenshots.
+
+**How to invoke:**
+
+```
+"Create an onboarding video for this feature"
+"Build an App Store preview using these screenshots"
+"Activate create-onboarding-video"
+```
+
+---
+
+### Security
+
+---
+
+#### `security-audit`
+
+**Source:** cypher-claude-skills (custom)
+
+Comprehensive, multi-layer security audit grounded in the 2026 threat landscape. Covers web/API security, infrastructure, AI agents, blockchain/smart contracts, and Living Off the Land (LOTL) attack patterns. Checks for OWASP Top 10, secrets exposure, dependency vulnerabilities, threat modeling, and more.
+
+**When to use:** Before any release, when working on financial platforms, DeFi protocols, trading systems, or APIs that handle money.
+
+**How to invoke:**
+
+```
+"Security audit this codebase"
+"Check for vulnerabilities"
+"Is this secure?"
+"Audit my code"
+```
+
+---
+
+#### `security-engineer` _(agent skill)_
+
+**Source:** cypher-claude-skills (custom)
+
+Expert application security engineer agent specializing in threat modeling, vulnerability assessment, secure code review, and security architecture. Uses STRIDE analysis, OWASP Top 10, and CWE Top 25 as frameworks. Delivers concrete, actionable remediation — not just vulnerability reports.
+
+**Capabilities:**
+- Threat modeling with STRIDE analysis and trust boundary mapping
+- Secure code review with prioritized findings (Critical / High / Medium / Low)
+- Security architecture design: zero-trust, defense-in-depth, OAuth 2.0/OIDC, secrets management
+- CI/CD security pipeline setup (SAST, DAST, SCA, secrets scanning)
+- Cloud security posture assessment (AWS, GCP, Azure)
+
+**When to use:** Designing security architecture, reviewing code for vulnerabilities, setting up security pipelines, or responding to an incident.
+
+**How to invoke:**
+
+```
+"Act as security-engineer and threat model this system"
+"Review this auth implementation as security-engineer"
+"Design a zero-trust architecture for this service"
+```
+
+---
+
+#### `threat-detection-engineer` _(agent skill)_
+
+**Source:** cypher-claude-skills (custom)
+
+Expert detection engineer agent specializing in SIEM rule development, MITRE ATT&CK coverage mapping, threat hunting, and detection-as-code pipelines. Writes Sigma rules compiled to Splunk SPL, Microsoft Sentinel KQL, and Elastic EQL. Prioritizes signal quality over quantity — a noisy SIEM is worse than no SIEM.
+
+**Capabilities:**
+- Sigma detection rule authoring with ATT&CK mapping and false positive documentation
+- MITRE ATT&CK coverage gap assessment and detection roadmaps
+- Threat hunting hypotheses, hunt queries, and hunt-to-detection conversion
+- Detection-as-code CI/CD pipelines (validate → compile → test → deploy)
+- Alert tuning: false positive reduction, threshold tuning, contextual enrichment
+
+**When to use:** Building or improving a detection program, writing SIEM rules, mapping ATT&CK coverage, or running a threat hunt.
+
+**How to invoke:**
+
+```
+"Act as threat-detection-engineer and write a rule for this technique"
+"Map our ATT&CK coverage and identify gaps"
+"Write a threat hunt for lateral movement"
+```
+
+---
+
+### AI Agent Skills
+
+---
+
+#### `code-reviewer` _(agent skill)_
+
+**Source:** cypher-claude-skills (custom)
+
+Expert code reviewer agent who provides constructive, actionable feedback focused on correctness, security, maintainability, and performance — not style preferences. Reviews like a mentor, not a gatekeeper: every comment teaches something.
+
+**Priority system:**
+- 🔴 **Blocker** — security vulnerabilities, data loss risks, race conditions, breaking API contracts
+- 🟡 **Suggestion** — missing input validation, unclear naming, missing tests, performance issues
+- 💭 **Nit** — style inconsistencies, minor naming improvements, docs gaps
+
+**When to use:** When you want a thorough, structured code review from a dedicated reviewer persona — more focused than `code-review-excellence` which is a methodology skill.
+
+**How to invoke:**
+
+```
+"Act as code-reviewer and review these changes"
+"Review this PR as code-reviewer"
+```
+
+---
+
 ### Git Workflow
 
 ---
@@ -536,27 +680,32 @@ npx cypher-skills sync
 
 ## Skill Activation Quick Reference
 
-| Skill                             | Trigger phrase                      |
-| --------------------------------- | ----------------------------------- |
-| `security-audit`                  | "Security audit this codebase"      |
-| `plan-exit-review`                | "Review this plan"                  |
-| `systematic-debugging`            | "Debug this systematically"         |
-| `verification-before-completion`  | "Verify before we move on"          |
-| `dead-code-audit`                 | "Audit for dead code"               |
-| `code-review-excellence`          | "Do a thorough code review"         |
-| `requesting-code-review`          | "Prepare this for review"           |
-| `receiving-code-review`           | "Help me respond to this review"    |
-| `finishing-a-development-branch`  | "Finish this branch"                |
-| `test-driven-development`         | "Use TDD for this"                  |
-| `webapp-testing`                  | "Help me test this"                 |
-| `architecture-patterns`           | "Design this architecture"          |
-| `api-design-principles`           | "Review this API design"            |
-| `typescript-advanced-types`       | "Help me type this"                 |
-| `nodejs-backend-patterns`         | "Structure this Node.js service"    |
-| `python-performance-optimization` | "Optimize this Python code"         |
-| `defi-protocol-templates`         | "Implement this DeFi protocol"      |
-| `solidity-security`               | "Security review this contract"     |
-| `web3-testing`                    | "Test this smart contract"          |
-| `solana-dev`                      | "Help me build this Anchor program" |
-| `frontend-design`                 | "Build this UI component"           |
-| `git-commit`                      | "Write a commit message"            |
+| Skill | Type | Trigger phrase |
+|---|---|---|
+| `plan-exit-review` | Workflow | "Review this plan" |
+| `systematic-debugging` | Workflow | "Debug this systematically" |
+| `verification-before-completion` | Workflow | "Verify before we move on" |
+| `dead-code-audit` | Workflow | "Audit for dead code" |
+| `code-review-excellence` | Workflow | "Do a thorough code review" |
+| `requesting-code-review` | Workflow | "Prepare this for review" |
+| `receiving-code-review` | Workflow | "Help me respond to this review" |
+| `finishing-a-development-branch` | Workflow | "Finish this branch" |
+| `test-driven-development` | Workflow | "Use TDD for this" |
+| `web3-testing` | Workflow | "Test this smart contract" |
+| `architecture-patterns` | Workflow | "Design this architecture" |
+| `api-design-principles` | Workflow | "Review this API design" |
+| `frontend-architecture` | Workflow | "Where should this code go?" |
+| `typescript-advanced-types` | Workflow | "Help me type this" |
+| `nodejs-backend-patterns` | Workflow | "Structure this Node.js service" |
+| `python-performance-optimization` | Workflow | "Optimize this Python code" |
+| `defi-protocol-templates` | Workflow | "Implement this DeFi protocol" |
+| `solidity-security` | Workflow | "Security review this contract" |
+| `solana-dev` | Workflow | "Help me build this Anchor program" |
+| `frontend-design` | Workflow | "Build this UI component" |
+| `remotion-best-practices` | Workflow | "Build this Remotion composition" |
+| `create-onboarding-video` | Workflow | "Create an onboarding video" |
+| `security-audit` | Workflow | "Security audit this codebase" |
+| `git-commit` | Workflow | "Write a commit message" |
+| `code-reviewer` | Agent | "Act as code-reviewer and review this" |
+| `security-engineer` | Agent | "Act as security-engineer" |
+| `threat-detection-engineer` | Agent | "Act as threat-detection-engineer" |
