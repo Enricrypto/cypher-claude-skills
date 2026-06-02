@@ -4,6 +4,8 @@ const path = require("path")
 const projectRoot = process.env.INIT_CWD || process.cwd()
 const skillsDest = path.join(projectRoot, ".claude", "skills")
 const skillsSrc = path.join(__dirname, "skills")
+const agentsDest = path.join(projectRoot, ".claude", "agents")
+const agentsSrc = path.join(__dirname, "agents")
 const claudeMd = path.join(projectRoot, "CLAUDE.md")
 
 // Recursively copy a directory
@@ -40,6 +42,17 @@ for (const entry of skills) {
   }
 
   skillNames.push(entry.name.replace(".md", ""))
+}
+
+// Install agents into .claude/agents/
+if (fs.existsSync(agentsSrc)) {
+  fs.mkdirSync(agentsDest, { recursive: true })
+  for (const entry of fs.readdirSync(agentsSrc, { withFileTypes: true })) {
+    const srcPath = path.join(agentsSrc, entry.name)
+    const destPath = path.join(agentsDest, entry.name)
+    fs.copyFileSync(srcPath, destPath)
+    console.log(`✓ Installed agent: ${entry.name}`)
+  }
 }
 
 // Scaffold CLAUDE.md if it doesn't exist

@@ -53,6 +53,78 @@ You must explicitly approve before any skill runs. This applies to all skills in
 
 ---
 
+## Feature Factory
+
+The Feature Factory is a 7-agent chain that ships features correctly the first time. Instead of one AI session trying to be product analyst + architect + backend engineer + frontend engineer + QA + reviewer simultaneously, each agent gets one job, a clean context, and only the tools it needs.
+
+### How to start
+
+```
+Read .claude/skills/feature-factory/SKILL.md
+```
+
+Then invoke Agent 1 (Researcher) with your feature prompt and follow the chain.
+
+### The chain
+
+```
+Feature idea
+    ↓
+[01] Researcher      → Researcher Report
+    ↓
+[02] Story Writer    → User Story
+    ↓
+⏸  CHECKPOINT 1: Approve the story
+    ↓
+[03] Spec Writer     → Technical Brief
+    ↓
+⏸  CHECKPOINT 2: Approve the brief
+    ↓
+[04] Backend Builder → Backend Summary + API Contract
+    ↓
+[05] Frontend Builder → Frontend Summary
+    ↓
+[06] Test Verifier   → Acceptance Test Report
+    ↓
+[07] Validator       → Validation Report
+    ↓
+⏸  CHECKPOINT 3: Open the PR
+```
+
+### Three human checkpoints
+
+| # | When | What you approve |
+|---|---|---|
+| 1 | After Story Writer | The user story and acceptance criteria |
+| 2 | After Spec Writer | The technical blueprint before any file is touched |
+| 3 | After Validator | The PR once all tests pass and validation is clean |
+
+### Skill assignments per agent
+
+Each builder agent loads these skills automatically:
+
+| Agent | Skills |
+|---|---|
+| Researcher | `architecture-patterns` |
+| Spec Writer | `architecture-patterns` · `api-design-principles` |
+| Backend Builder | `nodejs-backend-patterns` · `api-design-principles` · `test-driven-development` |
+| Frontend Builder | `frontend-architecture` · `frontend-design` · `test-driven-development` |
+| Test Verifier | `test-driven-development` · `verification-before-completion` |
+| Validator | `code-review-excellence` · `security-audit` |
+
+Override per-project by adding an `## Active Skills` section to your `CLAUDE.md`.
+
+### When to use the full chain
+
+| Use full chain | Skip it (inline fix) |
+|---|---|
+| New user-facing behaviour | Typo or copy correction |
+| New API endpoint | Single-line bug fix |
+| Database schema change | Config tweak |
+| Change touching > 3 files | One-line routing or styling fix |
+
+---
+
 ## Skills Reference
 
 ### Planning & Review
@@ -682,6 +754,7 @@ npx cypher-skills sync
 
 | Skill | Type | Trigger phrase |
 |---|---|---|
+| `feature-factory` | Chain (7 agents) | "Read .claude/skills/feature-factory/SKILL.md" |
 | `plan-exit-review` | Workflow | "Review this plan" |
 | `systematic-debugging` | Workflow | "Debug this systematically" |
 | `verification-before-completion` | Workflow | "Verify before we move on" |
