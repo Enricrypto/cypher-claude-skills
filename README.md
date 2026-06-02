@@ -1,6 +1,6 @@
 # cypher-claude-skills
 
-Centralized Claude Code skills for Cypher projects. Install once per project and get a full suite of AI workflow skills covering code review, architecture, testing, security, blockchain development, frontend design, and video production.
+A complete Claude Code toolkit for shipping software correctly. Install once per project and get a full suite of AI workflow skills covering architecture, testing, security, frontend design, blockchain development, and video production — plus the **Feature Factory**, a 7-agent chain that turns a rough idea into a merged PR without shortcuts.
 
 ---
 
@@ -9,25 +9,25 @@ Centralized Claude Code skills for Cypher projects. Install once per project and
 ### New project
 
 ```bash
-npm install --save-dev @cypher_digital/claude-skills
+npm install --save-dev @cypher-digital/claude-skills
 ```
 
 ### Existing project
 
 ```bash
-npx @cypher_digital/claude-skills init
+npx @cypher-digital/claude-skills init
 ```
 
 ### Update skills across all projects
 
 ```bash
-npx @cypher_digital/claude-skills sync
+npx @cypher-digital/claude-skills sync
 ```
 
 Or install globally once so the shorter command works everywhere:
 
 ```bash
-npm install -g @cypher_digital/claude-skills
+npm install -g @cypher-digital/claude-skills
 # then from any project:
 npx cypher-skills sync
 ```
@@ -35,9 +35,9 @@ npx cypher-skills sync
 ### CLI commands
 
 ```bash
-npx cypher-skills init    # Install all skills into current project
+npx cypher-skills init    # Install all skills and agents into current project
 npx cypher-skills list    # List all available skills
-npx cypher-skills sync    # Re-sync skills into current project
+npx cypher-skills sync    # Re-sync skills and agents into current project
 npx cypher-skills add <name>  # Scaffold a new skill file
 ```
 
@@ -55,64 +55,227 @@ You must explicitly approve before any skill runs. This applies to all skills in
 
 ## Feature Factory
 
-The Feature Factory is a 7-agent chain that ships features correctly the first time. Instead of one AI session trying to be product analyst + architect + backend engineer + frontend engineer + QA + reviewer simultaneously, each agent gets one job, a clean context, and only the tools it needs.
+The Feature Factory is a 7-agent chain that ships features correctly the first time.
 
-### How to start
+**The problem it solves:** A single AI session cannot reliably be product analyst + architect + backend engineer + frontend engineer + QA + reviewer simultaneously. Mistakes compound silently when those roles collapse into one context. The factory splits the work — each agent gets one job, a clean context, and only the tools it needs.
+
+### How to activate
 
 ```
 Read .claude/skills/feature-factory/SKILL.md
 ```
 
-Then invoke Agent 1 (Researcher) with your feature prompt and follow the chain.
+Then describe your feature to Agent 1 (Researcher) and follow the chain.
+
+---
 
 ### The chain
 
 ```
 Feature idea
     ↓
-[01] Researcher      → Researcher Report
+[01] Researcher        → maps the codebase, flags risks, open questions
     ↓
-[02] Story Writer    → User Story
+[02] Story Writer      → user story + acceptance criteria
     ↓
-⏸  CHECKPOINT 1: Approve the story
+⏸  CHECKPOINT 1 — approve the story before any technical decisions
     ↓
-[03] Spec Writer     → Technical Brief
+[03] Spec Writer       → technical blueprint (data model, API, frontend, tests)
     ↓
-⏸  CHECKPOINT 2: Approve the brief
+⏸  CHECKPOINT 2 — approve the brief before any file is touched
     ↓
-[04] Backend Builder → Backend Summary + API Contract
+[04] Backend Builder   → migrations, services, routes, unit tests
     ↓
-[05] Frontend Builder → Frontend Summary
+[05] Frontend Builder  → components, hooks, loading/error/empty states, UI tests
     ↓
-[06] Test Verifier   → Acceptance Test Report
-    ↓
-[07] Validator       → Validation Report
-    ↓
-⏸  CHECKPOINT 3: Open the PR
+[06] Test Verifier     → acceptance tests mapped to each story criterion
+    ↓ (loop back to builder if ❌ failures)
+[07] Validator         → gap report: completeness, security, code quality
+    ↓ (loop back to builder if Critical issues)
+⏸  CHECKPOINT 3 — open the PR
 ```
 
-### Three human checkpoints
+---
 
-| # | When | What you approve |
+### How each agent works and which skills it uses
+
+#### [01] Researcher — read-only, tools: Read, Grep, Glob
+
+The Researcher maps the codebase before a single line of code is written. It produces a **Researcher Report** that every downstream agent depends on. If the Researcher misses something, every agent after it inherits that blind spot.
+
+**Loads:** `architecture-patterns`
+
+Why: Understanding Clean Architecture, Hexagonal, and DDD patterns lets the Researcher identify which layer existing code lives in, spot pattern violations, and flag whether a proposed feature fits the existing architecture or will require a refactor.
+
+**Produces:**
+- Relevant files list (path + role)
+- Existing patterns to follow (naming, error handling, test conventions)
+- Closest existing feature to reuse from
+- Risks and flags (multi-tenancy, auth boundaries, race conditions, timezone handling)
+- Open questions — never guesses, always flags
+
+---
+
+#### [02] Story Writer — read-only, tools: Read
+
+Turns the rough feature description into a precise, testable user story. No technical decisions happen here — only clarity about the user problem, expected behaviour, and boundaries.
+
+**Loads:** no skills — reasoning only
+
+**Produces:**
+- User story (`As a… / I want… / so that…`)
+- Numbered acceptance criteria (Given/When/Then — each one directly testable)
+- Edge cases (in scope or explicitly out of scope)
+- Open questions for product or tech to resolve
+
+> ⏸ **CHECKPOINT 1** — the story is the contract. Read every acceptance criterion carefully before approving. Correcting a story takes minutes. Correcting the wrong feature after builders have run takes hours.
+
+---
+
+#### [03] Spec Writer — read-only, tools: Read, Grep, Glob
+
+Translates the approved story into a concrete technical blueprint. Every builder agent reads this before touching a file.
+
+**Loads:** `architecture-patterns` · `api-design-principles`
+
+Why: `architecture-patterns` ensures the spec respects layering (no business logic in routes, no framework dependencies in the domain). `api-design-principles` drives correct endpoint design — resource-oriented naming, proper HTTP semantics, consistent error shapes, and pagination from day one.
+
+**Produces:**
+- Data model changes (tables, columns, indexes, migrations, foreign keys)
+- Background / async flow (if applicable)
+- API contract (method + path, auth, request/response shapes, all error codes)
+- Frontend changes (pages, components, hooks, all three states: loading / empty / error)
+- Full test list (unit, integration, acceptance — one per criterion)
+- Complete file list with reasons — nothing surprises the builders
+- Risks and constraints from the Researcher Report
+
+> ⏸ **CHECKPOINT 2** — last chance to catch wrong assumptions before any file changes. Read the file list. Read the API contract. Read the data model. Only approve when satisfied.
+
+---
+
+#### [04] Backend Builder — tools: Read, Write, Edit, Bash
+
+Implements the backend exactly as specified in the approved brief. Scope ends at the API contract.
+
+**Loads:** `nodejs-backend-patterns` · `api-design-principles` · `test-driven-development`
+
+Why:
+- `nodejs-backend-patterns` enforces the layered structure (controllers stay thin, business logic goes in services, repositories handle data access) and provides patterns for middleware, error handling, auth, and database integration.
+- `api-design-principles` keeps the implemented endpoints consistent with the spec — correct HTTP methods, status codes, and error response shapes.
+- `test-driven-development` enforces RED → GREEN → REFACTOR: every new behaviour gets a failing test written first, watched fail, then implemented. No production code without a failing test first.
+
+**Builds:** migrations · service layer · routes/controllers · background jobs · unit tests
+
+**Does not touch:** any frontend file, component, page, or client-side hook
+
+**Produces:** Backend Builder Summary with every file changed, every pattern reused, the API contract, and test results.
+
+---
+
+#### [05] Frontend Builder — tools: Read, Write, Edit, Bash
+
+Implements the UI exactly as specified, consuming the API contract the Backend Builder produced. Never invents endpoints.
+
+**Loads:** `frontend-architecture` · `frontend-design` · `test-driven-development`
+
+Why:
+- `frontend-architecture` enforces the 4-layer model (Presentation → Application → Domain → Infrastructure). Screens stay thin and wire-only. Business logic goes in use-case hooks. Domain rules live in framework-free domain files. Services are thin API wrappers.
+- `frontend-design` prevents generic AI aesthetics (Inter font, purple gradients, cards on cards). Every UI decision — spacing, radius, shadow, typography, motion — is evaluated against a production design standard.
+- `test-driven-development` applies the same RED → GREEN → REFACTOR discipline to UI components and hooks.
+
+**Builds:** components · pages · use-case hooks · state management · loading/empty/error states · form validation · UI tests
+
+**If the API contract doesn't match what the UI needs:** flags the mismatch explicitly and loops back to the Backend Builder — never silently works around it.
+
+**Does not touch:** any backend file, service, route, migration, or worker
+
+---
+
+#### [06] Test Verifier — tools: Read, Write, Edit, Bash
+
+Proves the feature does what the story said it should. Writes acceptance tests — not unit tests. The builders already wrote unit tests; this agent verifies from the outside, the way a real user would experience it.
+
+**Loads:** `test-driven-development` · `verification-before-completion`
+
+Why:
+- `test-driven-development` keeps tests focused on behaviour, not implementation — tests exercise the feature through the API or UI, not internal functions.
+- `verification-before-completion` enforces the iron law: no completion claim without running the suite and reading the output. Every criterion is either ✅ Covered / ❌ Failing / ⚠️ Not coverable — never assumed passing.
+
+**For each acceptance criterion:**
+- ✅ **Covered** — test written and passes
+- ❌ **Failing** — test written, fails, reports which builder owns the fix
+- ⚠️ **Not coverable** — explains why automated verification isn't possible
+
+**Does not modify** any implementation file. Does not patch around failures. Routes them back.
+
+---
+
+#### [07] Validator — read-only, tools: Read, Grep, Glob
+
+Compares what was actually built against what was approved. Finds everything the other agents missed. Reports it honestly by severity. Never fixes anything.
+
+**Loads:** `code-review-excellence` · `security-audit`
+
+Why:
+- `code-review-excellence` provides a structured review methodology: architectural fit, logic correctness, test quality, maintainability, naming — with severity labels (🔴 blocking / 🟡 important / 🟢 nit).
+- `security-audit` runs a full threat-surface check: secrets exposure, broken auth, injection vulnerabilities, missing input validation, tenant isolation gaps, supply chain concerns, and OWASP Top 10 — grounded in the 2026 threat landscape.
+
+**Checks:**
+- Completeness — every acceptance criterion and brief section implemented?
+- Test coverage — every failure path and edge case tested?
+- Security — auth checks, tenant isolation, input validation, no secrets in logs
+- Code quality — logic in the right layer, no duplicate code, patterns consistent with the codebase
+- Operational concerns — timezone handling, retry/idempotency, multi-tenant gaps
+
+**Severity levels:**
+- **Critical** — must fix before merge (security hole, data loss, auth gap, failing criterion)
+- **Important** — should fix before merge (missing test, pattern violation)
+- **Minor** — reviewer's call (naming, refactor opportunity)
+
+> ⏸ **CHECKPOINT 3** — review the Validation Report. No Critical issues → open the PR.
+
+---
+
+### Artifacts that flow between agents
+
+| From | To | Artifact |
 |---|---|---|
-| 1 | After Story Writer | The user story and acceptance criteria |
-| 2 | After Spec Writer | The technical blueprint before any file is touched |
-| 3 | After Validator | The PR once all tests pass and validation is clean |
+| Researcher | All downstream agents | Researcher Report |
+| Story Writer | Spec Writer, Test Verifier, Validator | User Story + acceptance criteria |
+| Spec Writer | Both Builders, Test Verifier, Validator | Technical Brief |
+| Backend Builder | Frontend Builder, Test Verifier, Validator | Backend Summary + API Contract |
+| Frontend Builder | Test Verifier, Validator | Frontend Summary |
+| Test Verifier | Validator | Acceptance Test Report |
 
-### Skill assignments per agent
+Each agent must read all upstream artifacts before starting.
 
-Each builder agent loads these skills automatically:
+---
 
-| Agent | Skills |
+### Loop-back rules
+
+| Situation | Action |
 |---|---|
-| Researcher | `architecture-patterns` |
-| Spec Writer | `architecture-patterns` · `api-design-principles` |
-| Backend Builder | `nodejs-backend-patterns` · `api-design-principles` · `test-driven-development` |
-| Frontend Builder | `frontend-architecture` · `frontend-design` · `test-driven-development` |
-| Test Verifier | `test-driven-development` · `verification-before-completion` |
-| Validator | `code-review-excellence` · `security-audit` |
+| Test Verifier finds ❌ failing criterion | Loop back to the builder who owns that layer |
+| Validator finds Critical issue | Loop back to the builder who owns the file |
+| Validator finds Important issue | Your call — fix before PR or note in PR description |
+| Wrong architectural assumption mid-chain | Kill the session. Start fresh with the correct assumption baked into the first prompt. |
 
-Override per-project by adding an `## Active Skills` section to your `CLAUDE.md`.
+---
+
+### Overriding skill assignments per project
+
+The default skill assignments above apply to all projects. To override for a specific project, add this to the project's `CLAUDE.md`:
+
+```markdown
+## Active Skills
+Backend: nodejs-backend-patterns, api-design-principles, test-driven-development
+Frontend: frontend-architecture, frontend-design
+Validator: code-review-excellence, security-audit
+```
+
+The agents will use this list instead of the feature-factory defaults.
+
+---
 
 ### When to use the full chain
 
@@ -125,7 +288,22 @@ Override per-project by adding an `## Active Skills` section to your `CLAUDE.md`
 
 ---
 
+### Branch cleanup after merge
+
+After the PR merges, always run:
+
+```bash
+git checkout main
+git pull origin main
+git branch -d feat/<task-name>
+git push origin --delete feat/<task-name>
+```
+
+---
+
 ## Skills Reference
+
+The skills below are standalone — usable independently or as part of the Feature Factory chain. Each one can be activated on its own for any task that matches its description.
 
 ### Planning & Review
 
@@ -178,7 +356,9 @@ Structured pre-implementation plan review. Challenges scope, reviews architectur
 
 **Source:** [obra/superpowers](https://github.com/obra/superpowers)
 
-Forces Claude to verify its own work before declaring it done. Runs checks against the original spec, tests, and edge cases before marking a task complete.
+Forces Claude to verify its own work before declaring it done. Runs the actual verification command, reads the full output, and only then makes a completion claim. No "should work" — evidence only.
+
+**Used by Feature Factory:** Test Verifier (Agent 6)
 
 **When to use:** Before closing any task or telling Claude a feature is done.
 
@@ -222,6 +402,8 @@ Scans the codebase for dead, redundant, or hallucinated code — unused imports,
 **Source:** [wshobson/agents](https://github.com/wshobson/agents)
 
 Structured code review methodology. Covers architectural concerns, security, performance, and maintainability. Uses labeled feedback (🔴 blocking, 🟡 important, 🟢 nit) and collaborative language.
+
+**Used by Feature Factory:** Validator (Agent 7)
 
 **When to use:** When reviewing a PR or asking Claude to review your own code.
 
@@ -295,6 +477,8 @@ End-of-branch checklist: verifies tests, presents merge/PR/keep/discard options,
 
 Enforces strict RED → GREEN → REFACTOR cycle. Write failing test first, watch it fail, write minimal code to pass, refactor. Deletes code written before tests exist.
 
+**Used by Feature Factory:** Backend Builder (Agent 4) · Frontend Builder (Agent 5) · Test Verifier (Agent 6)
+
 **When to use:** Any time you're implementing a new feature or fixing a bug.
 
 **How to invoke:**
@@ -333,6 +517,8 @@ Smart contract testing with Hardhat and Foundry. Covers unit tests, integration 
 
 Clean Architecture, Hexagonal Architecture, and Domain-Driven Design patterns for building maintainable, testable, and scalable backend systems.
 
+**Used by Feature Factory:** Researcher (Agent 1) · Spec Writer (Agent 3)
+
 **When to use:** Designing a new system, refactoring a monolith, or establishing architecture standards.
 
 **How to invoke:**
@@ -350,6 +536,8 @@ Clean Architecture, Hexagonal Architecture, and Domain-Driven Design patterns fo
 
 REST and GraphQL API design best practices. Covers endpoint naming, versioning, error responses, pagination, authentication patterns, and OpenAPI documentation.
 
+**Used by Feature Factory:** Spec Writer (Agent 3) · Backend Builder (Agent 4)
+
 **When to use:** Designing or reviewing an API.
 
 **How to invoke:**
@@ -366,6 +554,8 @@ REST and GraphQL API design best practices. Covers endpoint naming, versioning, 
 **Source:** cypher-claude-skills (custom)
 
 Project-agnostic frontend architecture reference for React Native (Expo) and Next.js projects. Defines a strict 4-layer model (Presentation → Application → Domain → Infrastructure), 6 enforced rules, data flow patterns, file naming conventions, and a "where does this go?" decision checklist.
+
+**Used by Feature Factory:** Frontend Builder (Agent 5)
 
 **When to use:** Starting a new React Native or Next.js project, adding a feature and unsure which layer it belongs in, reviewing a PR for architectural correctness, or onboarding a collaborator.
 
@@ -412,6 +602,8 @@ Advanced TypeScript type system patterns: generics, conditional types, mapped ty
 **Source:** [wshobson/agents](https://github.com/wshobson/agents)
 
 Production Node.js patterns: Express/Fastify setup, middleware, error handling, async patterns, database integration, background jobs, and WebSockets.
+
+**Used by Feature Factory:** Backend Builder (Agent 4)
 
 **When to use:** Building or reviewing a Node.js backend service.
 
@@ -518,6 +710,8 @@ Comprehensive Solana development skill from the Solana Foundation. Covers Anchor
 
 Production-grade frontend design skill. Avoids generic AI aesthetics (Inter font, purple gradients, cards on cards). Commits to a bold aesthetic direction and implements it with precision.
 
+**Used by Feature Factory:** Frontend Builder (Agent 5)
+
 **Reference files loaded on demand:**
 
 - `reference/typography.md` — modular scales, font pairing, web font loading
@@ -616,6 +810,8 @@ End-to-end workflow for producing short, punchy iOS app onboarding videos in Rem
 **Source:** cypher-claude-skills (custom)
 
 Comprehensive, multi-layer security audit grounded in the 2026 threat landscape. Covers web/API security, infrastructure, AI agents, blockchain/smart contracts, and Living Off the Land (LOTL) attack patterns. Checks for OWASP Top 10, secrets exposure, dependency vulnerabilities, threat modeling, and more.
+
+**Used by Feature Factory:** Validator (Agent 7)
 
 **When to use:** Before any release, when working on financial platforms, DeFi protocols, trading systems, or APIs that handle money.
 
@@ -752,33 +948,33 @@ npx cypher-skills sync
 
 ## Skill Activation Quick Reference
 
-| Skill | Type | Trigger phrase |
-|---|---|---|
-| `feature-factory` | Chain (7 agents) | "Read .claude/skills/feature-factory/SKILL.md" |
-| `plan-exit-review` | Workflow | "Review this plan" |
-| `systematic-debugging` | Workflow | "Debug this systematically" |
-| `verification-before-completion` | Workflow | "Verify before we move on" |
-| `dead-code-audit` | Workflow | "Audit for dead code" |
-| `code-review-excellence` | Workflow | "Do a thorough code review" |
-| `requesting-code-review` | Workflow | "Prepare this for review" |
-| `receiving-code-review` | Workflow | "Help me respond to this review" |
-| `finishing-a-development-branch` | Workflow | "Finish this branch" |
-| `test-driven-development` | Workflow | "Use TDD for this" |
-| `web3-testing` | Workflow | "Test this smart contract" |
-| `architecture-patterns` | Workflow | "Design this architecture" |
-| `api-design-principles` | Workflow | "Review this API design" |
-| `frontend-architecture` | Workflow | "Where should this code go?" |
-| `typescript-advanced-types` | Workflow | "Help me type this" |
-| `nodejs-backend-patterns` | Workflow | "Structure this Node.js service" |
-| `python-performance-optimization` | Workflow | "Optimize this Python code" |
-| `defi-protocol-templates` | Workflow | "Implement this DeFi protocol" |
-| `solidity-security` | Workflow | "Security review this contract" |
-| `solana-dev` | Workflow | "Help me build this Anchor program" |
-| `frontend-design` | Workflow | "Build this UI component" |
-| `remotion-best-practices` | Workflow | "Build this Remotion composition" |
-| `create-onboarding-video` | Workflow | "Create an onboarding video" |
-| `security-audit` | Workflow | "Security audit this codebase" |
-| `git-commit` | Workflow | "Write a commit message" |
-| `code-reviewer` | Agent | "Act as code-reviewer and review this" |
-| `security-engineer` | Agent | "Act as security-engineer" |
-| `threat-detection-engineer` | Agent | "Act as threat-detection-engineer" |
+| Skill | Type | Used in Feature Factory | Trigger phrase |
+|---|---|---|---|
+| `feature-factory` | Chain (7 agents) | — | `Read .claude/skills/feature-factory/SKILL.md` |
+| `architecture-patterns` | Workflow | Researcher · Spec Writer | "Design this architecture" |
+| `api-design-principles` | Workflow | Spec Writer · Backend Builder | "Review this API design" |
+| `nodejs-backend-patterns` | Workflow | Backend Builder | "Structure this Node.js service" |
+| `frontend-architecture` | Workflow | Frontend Builder | "Where should this code go?" |
+| `frontend-design` | Workflow | Frontend Builder | "Build this UI component" |
+| `test-driven-development` | Workflow | Backend · Frontend · Test Verifier | "Use TDD for this" |
+| `verification-before-completion` | Workflow | Test Verifier | "Verify before we move on" |
+| `code-review-excellence` | Workflow | Validator | "Do a thorough code review" |
+| `security-audit` | Workflow | Validator | "Security audit this codebase" |
+| `plan-exit-review` | Workflow | — | "Review this plan" |
+| `systematic-debugging` | Workflow | — | "Debug this systematically" |
+| `dead-code-audit` | Workflow | — | "Audit for dead code" |
+| `requesting-code-review` | Workflow | — | "Prepare this for review" |
+| `receiving-code-review` | Workflow | — | "Help me respond to this review" |
+| `finishing-a-development-branch` | Workflow | — | "Finish this branch" |
+| `web3-testing` | Workflow | — | "Test this smart contract" |
+| `typescript-advanced-types` | Workflow | — | "Help me type this" |
+| `python-performance-optimization` | Workflow | — | "Optimize this Python code" |
+| `defi-protocol-templates` | Workflow | — | "Implement this DeFi protocol" |
+| `solidity-security` | Workflow | — | "Security review this contract" |
+| `solana-dev` | Workflow | — | "Help me build this Anchor program" |
+| `remotion-best-practices` | Workflow | — | "Build this Remotion composition" |
+| `create-onboarding-video` | Workflow | — | "Create an onboarding video" |
+| `git-commit` | Workflow | — | "Write a commit message" |
+| `code-reviewer` | Agent | — | "Act as code-reviewer and review this" |
+| `security-engineer` | Agent | — | "Act as security-engineer" |
+| `threat-detection-engineer` | Agent | — | "Act as threat-detection-engineer" |
