@@ -1,5 +1,5 @@
 {
-  "name": "@cypher_digital/claude-skills",
+  "name": "@cypher-digital/claude-skills",
   "version": "1.1.0",
   "description": "Centralized Claude Code skills for Cypher projects",
   "main": "install.js",
