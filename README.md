@@ -529,13 +529,14 @@ Production-grade Playwright E2E test suite architecture. Covers config setup, fi
 
 - **Config** — 3 browser projects (chromium, mobile-chrome, firefox), retries on CI, workers optimization
 - **Fixtures** — auth (login via API), seed (global + per-test), helpers (TOTP, SMS mock, clock, webhooks)
+- **⚠️ CRITICAL: Fixture Organization** — Fixtures MUST be in `e2e/tests/fixtures.ts` (test directory root), NOT in parent `e2e/` directory. This is the official Playwright pattern used by Stripe, Microsoft, and all major projects. Parent directory imports cause module resolution failures that cannot be fixed by pre-compilation or tsx loaders — only reorganization solves it. See "Fixture Organization (Critical Pattern)" section in skill.
 - **POMs** — base class with stable data-testid selectors, page-specific methods, no assertions
 - **Data isolation** — global seed for read-only tests, per-suite seed for mutations, cleanup patterns
 - **Mocking** — Playwright clock for timers, speakeasy for TOTP, local code generation for SMS OTP, manual webhooks
 - **Flakiness prevention** — explicit waits, no arbitrary sleep(), network wait patterns, navigation handling
 - **CI integration** — Docker Compose healthchecks, artifact uploads, cleanup on always()
 
-**Skill includes:** 10 detailed sections with code examples, common pitfalls, and testing checklist.
+**Skill includes:** 11 detailed sections with code examples, common pitfalls + fixture organization, and testing checklist.
 
 ---
 

@@ -21,6 +21,52 @@ Every Playwright E2E suite consists of:
 6. **Test Specs** — actual test cases using fixtures and POMs
 7. **CI Workflow** — GitHub Actions job with Docker integration
 
+## Fixture Organization (Critical Pattern)
+
+**IMPORTANT:** Fixtures MUST be placed in the test directory root, not the parent directory. This is the official Playwright pattern used by Stripe, Microsoft, and all major projects.
+
+### Correct Structure
+```
+frontend/
+├── e2e/
+│   ├── global-setup.ts
+│   ├── global-teardown.ts
+│   └── tests/
+│       ├── fixtures.ts          ← CORRECT: fixtures at tests root
+│       ├── 01-age-gate/
+│       │   └── *.spec.ts
+│       ├── 02-public-browse/
+│       │   └── *.spec.ts
+│       └── ...
+└── playwright.config.ts
+```
+
+### Imports in Test Files
+```typescript
+// tests/01-age-gate/age-gate.spec.ts
+import { loginAsAdvertiser, cleanup } from '../fixtures'  // ✓ Works
+```
+
+### Why Parent Directory Fails
+```
+frontend/
+├── e2e/
+│   ├── fixtures.ts              ← WRONG: fixtures in parent
+│   └── tests/
+│       ├── 01-age-gate/
+│       │   └── *.spec.ts
+```
+
+Tests in nested directories cannot reliably import from the parent:
+```typescript
+// tests/01-age-gate/age-gate.spec.ts
+import { loginAsAdvertiser } from '../fixtures'  // ✗ "Cannot find module"
+```
+
+**Why this breaks:** Playwright's module loader resolves imports relative to the test file's location. When fixtures.ts is in `e2e/` and the test is in `e2e/tests/01-age-gate/`, the relative path `../fixtures` resolves incorrectly. Pre-compilation to JavaScript, tsx loaders, and NODE_PATH do NOT fix this — only moving fixtures to the correct location (test directory root) solves it.
+
+**Rule:** Fixtures must be at the same level as or below the deepest test directory. The test directory root is the standard location. Always co-locate fixtures with tests.
+
 ## 1. Playwright Config (playwright.config.ts)
 
 ```typescript
@@ -144,6 +190,8 @@ export default globalTeardown
 ## 3. Fixtures (Custom Functions)
 
 Custom fixtures are **async functions that return test data or auth tokens**. They are NOT Playwright's built-in fixtures — they're reusable test helpers.
+
+**File location:** Save all fixtures as `e2e/tests/fixtures.ts` (same directory as your test subdirectories). Never place in the parent `e2e/` directory — this prevents import resolution errors.
 
 ### auth.fixture.ts
 ```typescript
@@ -660,6 +708,7 @@ jobs:
 | Admin login fails | Verify TOTP secret is set; use `generateTOTPCode()` |
 | SMS OTP tests call Twilio | Mock SMS; generate code locally in tests |
 | Cleanup doesn't run | Use `try...finally` or `test.afterEach()` |
+| "Cannot find module '../fixtures'" | **CRITICAL:** Move `fixtures.ts` from `e2e/` to `e2e/tests/`. Playwright's module loader resolves imports relative to test files. Fixtures in parent directories cause resolution failures. Pre-compilation and tsx loaders do NOT fix this — reorganization is the only solution. See "Fixture Organization (Critical Pattern)" section. |
 
 ## Testing Checklist
 
