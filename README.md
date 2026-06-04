@@ -507,6 +507,38 @@ Smart contract testing with Hardhat and Foundry. Covers unit tests, integration 
 
 ---
 
+#### `e2e-testing-playwright`
+
+**Source:** cypher-claude-skills (custom)
+
+Production-grade Playwright E2E test suite architecture. Covers config setup, fixture patterns (auth, seed, helpers), Page Object Models (POMs), test data isolation strategies, mocking patterns (TOTP, SMS, timers, payment webhooks), flakiness prevention, and CI integration with Docker.
+
+**Used by Feature Factory:** Test Verifier (Agent 7)
+
+**When to use:** Writing end-to-end test suites for web applications. Especially valuable for multi-browser testing, complex auth flows, payment testing, and test data isolation.
+
+**How to invoke:**
+
+```
+"Build E2E tests using e2e-testing-playwright"
+"Set up Playwright with proper fixtures and POMs"
+"Help me write non-flaky Playwright tests"
+```
+
+**Key patterns covered:**
+
+- **Config** — 3 browser projects (chromium, mobile-chrome, firefox), retries on CI, workers optimization
+- **Fixtures** — auth (login via API), seed (global + per-test), helpers (TOTP, SMS mock, clock, webhooks)
+- **POMs** — base class with stable data-testid selectors, page-specific methods, no assertions
+- **Data isolation** — global seed for read-only tests, per-suite seed for mutations, cleanup patterns
+- **Mocking** — Playwright clock for timers, speakeasy for TOTP, local code generation for SMS OTP, manual webhooks
+- **Flakiness prevention** — explicit waits, no arbitrary sleep(), network wait patterns, navigation handling
+- **CI integration** — Docker Compose healthchecks, artifact uploads, cleanup on always()
+
+**Skill includes:** 10 detailed sections with code examples, common pitfalls, and testing checklist.
+
+---
+
 ### Architecture
 
 ---
