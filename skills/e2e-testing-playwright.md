@@ -77,10 +77,11 @@ export default defineConfig({
   fullyParallel: false,  // Global setup must run once first
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 1 : 0,
-  workers: process.env.CI ? 4 : 1,
+  workers: process.env.CI ? 1 : 2,  // Reduced from 4-6 to prevent resource exhaustion
   reporter: 'html',
-  timeout: 30_000,       // 30s per test
-  expect: { timeout: 5_000 },  // 5s for assertions
+  timeout: 60_000,       // 60s per test (dev mode compilation takes 15-25s)
+  navigationTimeout: 60_000,  // Extended for slow frontends
+  expect: { timeout: 15_000 },  // 15s for assertions (dev mode can be slow)
   use: {
     baseURL: 'http://localhost:3000',
     trace: 'on-first-retry',
@@ -103,6 +104,10 @@ export default defineConfig({
 ```
 
 **Key decisions:**
+- `workers: 2` — prevents browser context exhaustion. 6+ workers on auth/concurrent tests cause resource limits (Firefox context closes). Reduced workers trade speed for stability.
+- `timeout: 60_000` — development frontends (Next.js, Vite, etc) have on-demand compilation (15-25s per page). 30s is too aggressive; 60s allows compilation + network + interaction.
+- `navigationTimeout: 60_000` — matches test timeout for slow page loads
+- `expect: { timeout: 15_000 }` — assertions also need extra time in dev environments
 - `fullyParallel: false` — ensures global setup runs once before all tests
 - `reuseExistingServer: false` — fresh Docker container per run (no stale state)
 - `retries: 1 on CI, 0 locally` — catch flakiness in CI; fail fast locally
@@ -186,6 +191,59 @@ export default globalTeardown
 - Setup runs once before all tests (efficient)
 - Teardown runs once after all tests (cleanup is isolated)
 - Both run even if tests fail (via `always()` in CI)
+
+## 2.5. Environment-Based Configuration (Test vs Development vs Production)
+
+Rate limiting, email services, and feature flags should differ by environment. Pattern:
+
+```typescript
+// backend/appsettings.json (production)
+{
+  "RateLimit": {
+    "Login": { "PermitLimit": 10 },      // Strict: prevent brute force
+    "Register": { "PermitLimit": 5 },
+    "Forgot": { "PermitLimit": 3 }
+  }
+}
+
+// backend/appsettings.Development.json
+// Inherits production defaults (or override for convenience)
+
+// backend/appsettings.Test.json (NEW: for E2E tests)
+{
+  "RateLimit": {
+    "Login": { "PermitLimit": 1000 },    // Relaxed: test doesn't brute-force
+    "Register": { "PermitLimit": 1000 },
+    "Forgot": { "PermitLimit": 1000 }
+  },
+  "Auth__EmailVerificationRequired": false  // Auto-verify in test
+}
+```
+
+**Why this matters:** E2E tests create artificial workloads (many rapid registration attempts, concurrent login flows). Treating test traffic the same as production traffic causes flakiness. Create a dedicated Test environment with relaxed limits.
+
+**Implementation example (.NET):**
+```csharp
+// Program.cs
+if (builder.Environment.IsDevelopment() || builder.Environment.IsEnvironment("Test"))
+{
+  builder.Services.AddScoped<IEmailSender, DevEmailSender>();
+  builder.Services.AddScoped<ISmsSender, DevSmsSender>();
+}
+else
+{
+  throw new InvalidOperationException("Production senders must be configured");
+}
+```
+
+**Docker Compose override for tests:**
+```yaml
+# docker-compose.test.yml
+api:
+  environment:
+    ASPNETCORE_ENVIRONMENT: Test  # ← Switches to appsettings.Test.json
+    RATE_LIMIT_LOGIN: "1000"      # Can also override via env vars
+```
 
 ## 3. Fixtures (Custom Functions)
 
@@ -340,6 +398,87 @@ export async function mockSMSSend(phone: string): Promise<{ code: string }> {
   return { code }
 }
 ```
+
+### Fixture Delays for Eventual Consistency
+
+When concurrent tests hit the same API endpoints rapidly (multiple registrations, login attempts), backends need time to settle database writes and clear caches. Add small delays after operations:
+
+```typescript
+// In loginAsAdvertiser() fixture
+export async function loginAsAdvertiser(page: Page, email?: string, password?: string) {
+  const testEmail = email || generateTestEmail()
+  const testPassword = password || 'Test@12345!'
+
+  // Call registration endpoint
+  const registerRes = await page.request.post('http://localhost:5001/api/v1/auth/register', {
+    data: { email: testEmail, password: testPassword, ... }
+  })
+  
+  if (!registerRes.ok()) throw new Error(`Register failed: ${registerRes.status()}`)
+
+  // Add delay to allow backend to settle after registration
+  // (DB write, cache invalidation, email queue processing)
+  await new Promise(resolve => setTimeout(resolve, 500))
+
+  // Now retry login
+  const loginRes = await page.request.post('http://localhost:5001/api/v1/auth/login', {
+    data: { email: testEmail, password: testPassword }
+  })
+  // ...
+}
+```
+
+**When to add delays:**
+- After `POST` (create) operations that write to DB
+- Between related operations in same test (register → login → verify)
+- When running 2+ concurrent workers against auth endpoints
+- If you see transient 401/403 errors that don't retry
+
+**Typical delays:**
+- 200-500ms after registration
+- 100-200ms after cache-heavy operations
+- 0ms for read-only operations
+
+## 3.5. Wait State Patterns (Critical for Dev Environments)
+
+### waitForLoadState Strategy
+
+In development environments with on-demand compilation (Next.js, Vite, etc), `waitForLoadState('networkidle')` can hang indefinitely because:
+- Frontend is still compiling (counts as ongoing network activity)
+- Background polling requests never complete
+- Development servers have continuous hot-reload activity
+
+**Solution: Use `'load'` instead of `'networkidle'` in dev:**
+
+```typescript
+// BasePage.ts
+async goto(path: string): Promise<void> {
+  // Give frontend plenty of time to compile and serve
+  await this.page.goto(path, { timeout: 60000 })
+  
+  // Use 'load' not 'networkidle' — fires after DOM ready, doesn't wait for all background activity
+  await this.page.waitForLoadState('load', { timeout: 60000 })
+}
+
+async waitForNav(action: () => Promise<void>): Promise<void> {
+  // Navigation waits should also use 'load'
+  await Promise.all([
+    this.page.waitForLoadState('load'),
+    action()
+  ])
+}
+```
+
+### Why `'load'` Works Better Than `'networkidle'`
+
+| Load State | When it fires | Dev env behavior | When to use |
+|---|---|---|---|
+| `'load'` | DOM ready (DOMContentLoaded event) | Fires immediately after HTML loads; doesn't wait for compilation or background requests | ✅ Dev environments, most tests |
+| `'networkidle'` | No network activity for 500ms | **Hangs** if frontend is compiling or has background polling | ❌ Dev environments; ✅ Production only |
+| `'domcontentloaded'` | DOM tree built | Too early; interactive elements may not be ready | ❌ Rarely correct |
+| `'commit'` | Response received | Too early; DOM not yet built | ❌ Rarely correct |
+
+**Rule:** In development with slow compilation, always use `'load'`. In production builds (CI with `npm run build`), `'networkidle'` is acceptable.
 
 ## 4. Page Object Models (POMs)
 
@@ -696,6 +835,116 @@ jobs:
         run: docker compose down --volumes
 ```
 
+## 9.5. Test Data Requirements & Validation
+
+Test data must match backend validation exactly. Common issues:
+
+```typescript
+// ❌ BAD: Phone doesn't match backend regex /^\d{10,11}$/
+const testData = {
+  phone: '+55 11 98765-4321',  // Has spaces and dashes
+}
+
+// ✅ GOOD: Digits only
+const testData = {
+  phone: '11987654321',  // Exactly 11 digits (Brazil example)
+}
+```
+
+```typescript
+// ❌ BAD: Password missing special character
+const password = 'Test@12345'  // Has uppercase, number, but missing special char
+
+// ✅ GOOD: Password meets all requirements
+const password = 'Test@12345!'  // Uppercase + number + special char + 10+ chars
+```
+
+```typescript
+// ❌ BAD: Missing required fields that backend validates
+const registerData = {
+  email: 'test@test.com',
+  password: 'Test@12345!',
+  // Missing: fingerprintId, category, etc.
+}
+
+// ✅ GOOD: Include all required fields
+const registerData = {
+  email: 'test@test.com',
+  password: 'Test@12345!',
+  phone: '11987654321',
+  displayName: 'Test User',
+  fingerprintId: `e2e-${Date.now()}`,  // Unique ID for device fingerprinting
+  category: 'Acompanhantes',  // Category enum
+  lgpdConsent: true,
+}
+```
+
+**Pattern: Test data factory with defaults + overrides**
+
+```typescript
+export function createAdvertiserAccount(overrides?: Record<string, unknown>) {
+  return {
+    email: generateTestEmail(),
+    password: 'Test@12345!',
+    phone: '11987654321',
+    displayName: 'Test User',
+    fingerprintId: `e2e-${Date.now()}`,
+    category: 'Acompanhantes',
+    lgpdConsent: true,
+    ...overrides,  // Allow tests to override specific fields
+  }
+}
+
+// Usage:
+const accountA = createAdvertiserAccount()  // All defaults
+const accountB = createAdvertiserAccount({ phone: '85987654321' })  // Custom phone
+```
+
+## 9.7. API Routing in Fixtures (Backend vs Frontend URLs)
+
+When fixtures call backend APIs, use **full backend URLs**, not relative paths. Relative paths resolve to the `baseURL` from playwright.config.ts (frontend), not the backend.
+
+```typescript
+// playwright.config.ts
+use: {
+  baseURL: 'http://localhost:3000',  // Frontend URL
+  // ...
+}
+```
+
+```typescript
+// ❌ BAD: Relative path resolves to frontend baseURL
+const res = await page.request.post('/api/v1/auth/login', {
+  data: { email, password }
+})
+// Tries: http://localhost:3000/api/v1/auth/login (frontend, 404)
+
+// ✅ GOOD: Full backend URL
+const res = await page.request.post('http://localhost:5001/api/v1/auth/login', {
+  data: { email, password }
+})
+// Hits: http://localhost:5001/api/v1/auth/login (backend API, 200)
+```
+
+**In your fixtures.ts:**
+```typescript
+export async function loginAsAdvertiser(page: Page, email?: string, password?: string) {
+  // ✅ Full backend URL
+  const res = await page.request.post('http://localhost:5001/api/v1/auth/login', {
+    data: { email: email || generateTestEmail(), password: password || 'Test@12345!' }
+  })
+  
+  if (!res.ok()) throw new Error(`Login failed: ${res.status()}`)
+  const data = await res.json()
+  return { email, password, jwt: data.accessToken }
+}
+```
+
+**When to use each:**
+- Frontend navigation: `page.goto('/painel/login')` (uses baseURL)
+- Backend API calls: `page.request.post('http://localhost:5001/api/v1/...')` (full URL)
+- Frontend assets: relative path OK (images, CSS from baseURL)
+
 ## 10. Common Pitfalls & Solutions
 
 | Pitfall | Solution |
@@ -708,6 +957,9 @@ jobs:
 | Admin login fails | Verify TOTP secret is set; use `generateTOTPCode()` |
 | SMS OTP tests call Twilio | Mock SMS; generate code locally in tests |
 | Cleanup doesn't run | Use `try...finally` or `test.afterEach()` |
+| API calls return 404 or timeout | Use full backend URL (`http://localhost:5001/api/...`), not relative path. Relative paths resolve to frontend baseURL. |
+| Tests timeout waiting for page load | Use `waitForLoadState('load')` not `'networkidle'` in dev environments. Dev servers have on-demand compilation (15-25s); networkidle hangs. |
+| Browser context closes during concurrent tests | Reduce `workers` from 6 to 2-3. Auth tests create resource-heavy browser contexts. High worker counts cause Firefox/Chrome context exhaustion. |
 | "Cannot find module '../fixtures'" | **CRITICAL:** Move `fixtures.ts` from `e2e/` to `e2e/tests/`. Playwright's module loader resolves imports relative to test files. Fixtures in parent directories cause resolution failures. Pre-compilation and tsx loaders do NOT fix this — reorganization is the only solution. See "Fixture Organization (Critical Pattern)" section. |
 
 ## Testing Checklist
