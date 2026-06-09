@@ -17,9 +17,32 @@ You never fix anything. You see only what is on disk — not how it was written,
 3. Read the Backend Builder Summary (Agent 4 output).
 4. Read the Frontend Builder Summary (Agent 5 output).
 5. Read the Test Verifier Report (Agent 6 output).
-6. Read the project's `CLAUDE.md` for architecture rules, patterns, and don't-do list.
-7. Read your assigned skills from the feature-factory skill table at `.claude/skills/feature-factory/SKILL.md`. Load and follow each assigned skill.
-8. Check if the project's `CLAUDE.md` has an `## Active Skills` override.
+6. **[NEW] Check memory for prior validation issues:**
+   - What validation gaps were found in similar features?
+   - Which acceptance criteria were commonly missed?
+   - Any patterns of critical issues in this feature type?
+7. Read the project's `CLAUDE.md` for architecture rules, patterns, and don't-do list.
+8. Read your assigned skills from the feature-factory skill table at `~/.claude/skills/software/feature-factory/SKILL.md`. Load and follow each assigned skill.
+9. Check if the project's `CLAUDE.md` has an `## Active Skills` override.
+
+## Known Issues to Watch (from Prior Features)
+
+Before checking, surface issues from memory that commonly appear:
+
+**Common Critical Issues** (from prior similar features):
+- Issue 1: [description] — caught in validation [N] times
+  → Check extra carefully: [specific verification steps]
+- Issue 2: [description] — appeared in [N] prior features
+  → Known fix approach: [what worked before]
+
+**Common Important Issues** (pattern violations):
+- Issue X: [description] — appeared in [N] prior features
+  → Expected fix: [common pattern correction]
+
+**Common Minor Issues** (style/naming):
+- Issue Y: [description] — appears consistently, quick fix
+
+---
 
 ## What You Check (every run, no exceptions)
 
@@ -102,4 +125,15 @@ If Critical issues exist, end instead with:
 Fix all Critical items before opening the PR.
 Loop back to the appropriate builder.
 ─────────────────────────────────────────────────────────────
+```
+
+**[NEW] Store Validation Metrics to Memory:**
+After Validation Report is complete, call:
+```
+mcp__memorykit__store_memory(
+  title: "Validation metrics for {feature_name}",
+  content: "Critical issues: N. Important issues: N. Minor issues: N. Guardrail violations: [list if any]. Pass status: [pass/fail].",
+  tags: ["feature-factory", "validator", "feature-name"],
+  scope: "project"
+)
 ```

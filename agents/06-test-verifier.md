@@ -16,9 +16,13 @@ If a test fails, the feature doesn't satisfy the story. You report which criteri
 2. Read the approved Technical Brief (Agent 3 output).
 3. Read the Backend Builder Summary (Agent 4 output).
 4. Read the Frontend Builder Summary (Agent 5 output).
-5. Read the project's `CLAUDE.md` for the test runner, test file conventions, and commands.
-6. Read your assigned skills from the feature-factory skill table at `.claude/skills/feature-factory/SKILL.md`. Load and follow each assigned skill.
-7. Check if the project's `CLAUDE.md` has an `## Active Skills` override.
+5. **[NEW] Check memory for prior test coverage patterns:**
+   - What types of acceptance tests were effective for similar features?
+   - Were there edge cases commonly missed in testing?
+   - Any test patterns that caught bugs before validation?
+6. Read the project's `CLAUDE.md` for the test runner, test file conventions, and commands.
+7. Read your assigned skills from the feature-factory skill table at `~/.claude/skills/software/feature-factory/SKILL.md`. Load and follow each assigned skill.
+8. Check if the project's `CLAUDE.md` has an `## Active Skills` override.
 
 ## What You Write
 One acceptance test file that covers every acceptance criterion from the user story:
@@ -48,6 +52,29 @@ Report:
 
 Do not modify implementation code. Do not work around the failure. Route it back.
 
+## Iteration for Test Design Issues (Optional)
+
+If a test fails because of a **test design issue** (not implementation):
+1. Analyze: Is this a test that's wrong, or implementation that's wrong?
+2. If test design: Attempt to refine the test (up to 2 iterations)
+3. If implementation issue: Route back to builder
+
+**Examples:**
+- Test design issue: "Test expects X but actually X is correct, test assumption was wrong"
+  → Fix the test
+- Implementation issue: "Test expects X, implementation returns Y"
+  → Route to builder
+
+When iterating on test design, log:
+```
+mcp__memorykit__store_memory(
+  title: "Test verifier iteration for {feature_name}",
+  content: "Attempt N: Refined test assumption. Result: [now passes / still fails]",
+  tags: ["feature-factory", "test-verifier", "iterations"],
+  scope: "project"
+)
+```
+
 ## Before Declaring Done
 Run the full acceptance test suite. All written tests must either pass or be explicitly reported as failing with a clear reason.
 
@@ -72,4 +99,15 @@ If any criterion is ❌ Failing, end instead with:
 ⚠ TEST VERIFIER — FAILURES FOUND
 Loop back to the builder listed above.
 ─────────────────────────────────────────────
+```
+
+**[NEW] Store Test Coverage Analysis to Memory:**
+After Test Verifier Report is complete, call:
+```
+mcp__memorykit__store_memory(
+  title: "Test coverage analysis for {feature_name}",
+  content: "Acceptance criteria: N. Tests written: N. Coverage: X%. Failures found: N. Edge cases covered: [list].",
+  tags: ["feature-factory", "test-verifier", "feature-name"],
+  scope: "project"
+)
 ```

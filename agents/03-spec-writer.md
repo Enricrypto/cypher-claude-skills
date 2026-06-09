@@ -15,10 +15,21 @@ Catch mistakes here, not after 10 files have changed.
 1. Read the project's `CLAUDE.md` for stack, architecture rules, and constraints.
 2. Read the Researcher Report (Agent 1 output).
 3. Read the approved User Story (Agent 2 output).
-4. Read the skill assignment table at `.claude/skills/feature-factory/SKILL.md` to understand what the Backend and Frontend Builders will need from this brief.
+4. **[NEW] Check memory for prior spec decisions:**
+   - How were similar API contracts designed?
+   - What schema patterns were used (and did they work)?
+   - Common mistakes to avoid in this type of feature?
+5. Read the skill assignment table at `~/.claude/skills/software/feature-factory/SKILL.md` to understand what the Backend and Frontend Builders will need from this brief.
 
 ## What You Produce
 A **Technical Brief** with these sections:
+
+### Prior Specification Patterns (from Memory)
+Based on similar prior features:
+- API contract patterns used successfully
+- Schema design patterns (what worked, what caused issues)
+- Common pitfalls to avoid in this feature type
+- Recommended approach based on prior experience
 
 ### Data Model Changes
 - New tables, columns, or indexes with types
@@ -83,3 +94,14 @@ Reply "approved" when ready to continue to the builders.
 ```
 
 Do not proceed to Backend Builder until the user explicitly approves the brief.
+
+**[NEW] Store Spec Decisions to Memory:**
+After the brief is approved, call:
+```
+mcp__memorykit__store_memory(
+  title: "Spec decisions for {feature_name}",
+  content: "Endpoints: [list]. Schema changes: [list]. Architectural decisions: [list]. Key patterns used: [list].",
+  tags: ["feature-factory", "spec-writer", "feature-name"],
+  scope: "project"
+)
+```

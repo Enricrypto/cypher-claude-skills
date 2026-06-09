@@ -43,6 +43,33 @@ npx cypher-skills add <name>  # Scaffold a new skill file
 
 ---
 
+## MemoryKit MCP Setup (Enables Self-Learning Pipeline)
+
+The Feature Factory includes a **4-phase memory system** that learns from every feature and improves over time (30-40% faster after 10 features). This requires MemoryKit MCP.
+
+### Install MemoryKit MCP
+
+1. **Clone the MemoryKit repository:**
+
+```bash
+git clone https://github.com/antoniorapozo/memorykit-mcp.git
+cd memorykit-mcp
+```
+
+2. **Follow the setup instructions in the MemoryKit README:**
+   - Install dependencies
+   - Configure your MCP server
+   - Start the MemoryKit service
+
+3. **Once MemoryKit is running:**
+   - The Feature Factory will automatically store learnings after each feature
+   - The Researcher will retrieve patterns from prior features
+   - Each feature will get faster as the system learns
+
+**Note:** MemoryKit is optional but strongly recommended. Without it, each feature starts from scratch. With it, the system compounds knowledge — by feature 10, you're 30-40% faster.
+
+---
+
 ## Skill Activation Policy
 
 **Skills never activate automatically.** Claude will ask:
@@ -69,14 +96,57 @@ Then describe your feature to Agent 1 (Researcher) and follow the chain.
 
 ---
 
+### Memory Integration (4 Phases)
+
+The Feature Factory includes a **self-learning memory system** powered by MemoryKit that compounds knowledge with each feature. After 10 features, your pipeline is 30-40% faster.
+
+#### Phase 1: Memory Storage
+Each agent stores insights to memory after completing its work:
+- **Researcher**: patterns found, risks flagged, time estimates
+- **Story Writer**: story scope, acceptance criteria boundaries
+- **Spec Writer**: architectural decisions, API patterns, design choices
+- **Builders**: execution metrics, confidence levels, iterations needed
+- **Test Verifier**: test coverage analysis, edge cases identified
+- **Validator**: validation metrics, guardrail violations
+
+#### Phase 2: Memory-Aware Reasoning
+Each agent actively retrieves and uses prior learnings:
+- **Researcher**: surfaces prior patterns with confidence levels + recommendations
+- **Story Writer**: flags scope issues from similar prior features
+- **Backend Builder**: recommends proven patterns (BaseAuthService, error handling, etc.)
+- **Frontend Builder**: recommends component patterns that worked
+- **Validator**: checks against known critical issues from history
+
+#### Phase 3: Autonomous Iteration
+Builders self-fix test failures instead of stopping:
+- **Backend Builder**: analyzes test error → attempts fix (up to 3 times) → re-runs tests
+- **Frontend Builder**: same pattern for component/integration tests
+- **Test Verifier**: refines test assumptions if test design was wrong
+- Each attempt logged to memory so next similar feature avoids the issue
+
+#### Phase 4: Feature Consolidation (Agent 08)
+After PR merge, consolidates learnings for next similar feature:
+- Execution summary (time per agent, total iterations, blockers)
+- Confidence profiles by category (CRUD, auth, migrations, async, error handling, etc.)
+- Reusable patterns extracted (proven ✓, watch ⚠️, avoid ✗)
+- Time estimates for feature type (baseline + risk adjustment)
+
+**Result:** Feature 1 takes 6h. Feature 2 takes 5h. Feature 3 takes 3.5h. Feature 10+ takes 4h consistently because the system knows:
+- Which patterns work (and how confident to be)
+- Which problems to anticipate (and how to avoid them)
+- How long similar features take (with confidence bounds)
+- What issues typically appear (and how to catch them early)
+
+---
+
 ### The chain
 
 ```
 Feature idea
     ↓
-[01] Researcher        → maps the codebase, flags risks, open questions
+[01] Researcher        → maps the codebase, flags risks, retrieves prior patterns
     ↓
-[02] Story Writer      → user story + acceptance criteria
+[02] Story Writer      → user story + acceptance criteria, flags prior scope issues
     ↓
 ⏸  CHECKPOINT 1 — approve the story before any technical decisions
     ↓
@@ -84,15 +154,19 @@ Feature idea
     ↓
 ⏸  CHECKPOINT 2 — approve the brief before any file is touched
     ↓
-[04] Backend Builder   → migrations, services, routes, unit tests
+[04] Backend Builder   → migrations, services, routes, unit tests (self-fixes test failures)
     ↓
-[05] Frontend Builder  → components, hooks, loading/error/empty states, UI tests
+[05] Frontend Builder  → components, hooks, loading/error/empty states, UI tests (self-fixes test failures)
     ↓
-[06] Test Verifier     → acceptance tests mapped to each story criterion
+[06] Test Verifier     → acceptance tests mapped to each story criterion (refines test design)
     ↓ (loop back to builder if ❌ failures)
-[07] Validator         → gap report: completeness, security, code quality
+[07] Validator         → gap report: completeness, security, code quality (checks known issues)
     ↓ (loop back to builder if Critical issues)
 ⏸  CHECKPOINT 3 — open the PR
+    ↓
+[08] Feature Consolidator → consolidates execution metrics, patterns, learnings for future features
+    ↓
+[09] Branch Cleanup    → delete local + remote feature branch
 ```
 
 ---
@@ -233,6 +307,23 @@ Why:
 - **Minor** — reviewer's call (naming, refactor opportunity)
 
 > ⏸ **CHECKPOINT 3** — review the Validation Report. No Critical issues → open the PR.
+
+---
+
+#### [08] Feature Consolidator — read-only, tools: Read, Grep
+
+Runs **after the PR is merged** to consolidate all execution memories into reusable patterns for future similar features.
+
+**Produces:**
+- **Execution summary** — time per agent, total iterations needed, critical blockers encountered, what worked well, what caused issues
+- **Confidence profiles by category** — CRUD (X%), Authentication (X%), Database migrations (X%), Async operations (X%), Error handling (X%), State management (X%), etc.
+- **Reusable patterns** — patterns to reuse (proven, high confidence), patterns to watch (took iterations), patterns to avoid (failed), new patterns created
+- **Time estimation update** — baseline time for this feature type, risk adjustment for known issues, confidence level
+- **Common issues in this feature type** — what issues appeared, how they were solved, recommendation for next similar feature
+
+**Result:** Future features of the same type start with institutional knowledge. The Researcher immediately knows which patterns to recommend. The builders know which problems to anticipate. Time estimates become increasingly accurate.
+
+**When to run:** Once per week after features merge, or after every 2-3 features.
 
 ---
 

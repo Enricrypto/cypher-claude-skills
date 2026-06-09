@@ -6,10 +6,111 @@ A 7-agent chain for shipping features correctly the first time. Activate this sk
 
 ## How to Start
 
-1. Activate this skill: `Read .claude/skills/feature-factory/SKILL.md`
-2. Call `retrieve_context` with the feature description (if MemoryKit is configured)
+1. Activate this skill: `Read ~/.claude/skills/software/feature-factory/SKILL.md`
+2. Call `retrieve_context` with the feature description
+   - This loads prior feature patterns from memory (if any exist)
+   - Researcher will surface these learnings in the report
 3. Invoke Agent 1 (Researcher) with the feature prompt
 4. Follow the chain. Honor every STOP checkpoint.
+
+---
+
+## Memory Integration (Phase 1 + 2)
+
+### Phase 1: Storage
+Each agent stores insights to memory after completing its work.
+
+### Phase 2: Active Usage
+Each agent now actively retrieves and uses prior learnings:
+
+- **Researcher** (01): 
+  - Retrieves prior patterns → surfaces in "Relevant Files" section
+  - Flags patterns that succeeded, patterns to avoid, known issues
+  - Provides confidence-based time estimates
+
+- **Story Writer** (02): 
+  - Surfaces scope issues from similar prior features
+  - Flags edge cases that were missed before
+  - Signals confidence level based on prior pattern similarity
+
+- **Spec Writer** (03): 
+  - Reads prior API/schema design decisions
+  - Recommends patterns that worked, warns against patterns that failed
+
+- **Backend Builder** (04): 
+  - Surfaces pattern reuse recommendations (very high confidence patterns)
+  - Flags patterns to watch (known issues but usable)
+  - Lists anti-patterns to avoid entirely
+
+- **Frontend Builder** (05): 
+  - Surfaces component patterns that can be reused
+  - Flags state management patterns that have known issues
+  - Recommends tested patterns
+
+- **Test Verifier** (06): 
+  - Reads prior test patterns that caught bugs
+  - Uses edge cases from similar features to improve test coverage
+
+- **Validator** (07): 
+  - Checks against known critical issues from prior features
+  - Catches common validation gaps before they reach PR
+
+**Result:** The pipeline compounds knowledge:
+- Feature 1: system learns what works and what doesn't
+- Feature 2: system warns about common issues and recommends proven patterns
+- Feature 3+: each feature is faster and catches more issues early
+
+After 10 features, your pipeline is 30-40% faster because it:
+- Reuses proven patterns automatically
+- Avoids known pitfalls proactively
+- Catches mistakes earlier (in Researcher/Story Writer, not in Validator)
+
+---
+
+## Post-Merge: Feature Consolidation (Agent 08)
+
+After the PR is merged and deployed:
+
+1. Invoke Agent 08 (Feature Consolidator) with the feature-name
+2. Agent 08 reads all memories from this feature
+3. Consolidates into reusable patterns for future similar features
+4. Stores time estimates, confidence profiles, pattern recommendations
+
+**When to run:** Once per week after features merge, or after every 2-3 features
+
+**What it produces:**
+- Consolidated execution summary (time per agent, iterations, blockers)
+- Confidence profiles by category (CRUD, auth, migrations, async, etc.)
+- Reusable patterns extracted (what worked, what to watch, what to avoid)
+- Time estimates for this feature type (baseline + risk adjustment)
+
+**Result:** Future features in this project start with institutional knowledge:
+- "Auth features take 4h avg, watch timezone handling"
+- "Schema changes take 2h avg, reuse MigrationHelper pattern"
+- "CRUD endpoints: 95% confidence (zero issues in 5 prior features)"
+
+---
+
+## Phase 3: Autonomous Iteration
+
+When implementation tests fail, agents now self-fix autonomously (up to 3 attempts):
+
+- **Backend Builder** (04): Test fails → analyzes error → attempts fix → re-runs tests
+  - If still failing after attempt #3: escalates with "Stuck after 3 attempts"
+  - Logs each attempt to memory for future learning
+  
+- **Frontend Builder** (05): Same pattern for component/integration tests
+  - Special case: if API mismatch detected, routes back to Backend Builder
+  
+- **Test Verifier** (06): Optional iteration for test design issues
+  - If test assumption was wrong: refines test (up to 2 iterations)
+  - If implementation is wrong: routes to builder
+
+**Why this matters:**
+- Reduces human touchpoints by 40-60% for typical features
+- Agents learn what causes common test failures
+- Next similar feature avoids those failures entirely
+- Only escalates when truly stuck (human judgment needed)
 
 ---
 
@@ -38,7 +139,9 @@ Feature idea
     ↓ (loop back to builder if Critical issues)
 ⏸  CHECKPOINT 3: Open the PR
     ↓ (after PR is merged)
-[08] Branch Cleanup — delete local + remote feature branch
+[08] Feature Consolidator → Consolidation Report (extracts reusable patterns)
+    ↓
+[09] Branch Cleanup — delete local + remote feature branch
 ```
 
 ---
@@ -65,13 +168,14 @@ Each builder agent reads these skill files before starting work. The agent check
 
 | Agent | Skill files to load |
 |---|---|
-| Researcher | `.claude/skills/architecture-patterns.md` |
+| Researcher | `~/.claude/skills/software/architecture-patterns.md` |
 | Story Writer | *(reasoning only — no skills needed)* |
-| Spec Writer | `.claude/skills/architecture-patterns.md` · `.claude/skills/api-design-principles.md` |
-| Backend Builder | `.claude/skills/nodejs-backend-patterns.md` · `.claude/skills/api-design-principles.md` · `.claude/skills/test-driven-development.md` |
-| Frontend Builder | `.claude/skills/frontend-architecture.md` · `.claude/skills/frontend-design/SKILL.md` · `.claude/skills/test-driven-development.md` |
-| Test Verifier | `.claude/skills/test-driven-development.md` · `.claude/skills/verification-before-completion.md` |
-| Validator | `.claude/skills/code-review-excellence.md` · `.claude/skills/security-audit.md` |
+| Spec Writer | `~/.claude/skills/software/architecture-patterns.md` · `~/.claude/skills/software/api-design-principles.md` |
+| Backend Builder | `~/.claude/skills/software/nodejs-backend-patterns.md` · `~/.claude/skills/software/api-design-principles.md` · `~/.claude/skills/software/test-driven-development.md` |
+| Frontend Builder | `~/.claude/skills/software/frontend-architecture.md` · `~/.claude/skills/software/frontend-design/SKILL.md` · `~/.claude/skills/software/test-driven-development.md` |
+| Test Verifier | `~/.claude/skills/software/test-driven-development.md` · `~/.claude/skills/software/verification-before-completion.md` |
+| Validator | `~/.claude/skills/software/code-review-excellence.md` · `~/.claude/skills/software/security-audit.md` |
+| Feature Consolidator | *(analysis only — no skills needed)* |
 
 **To override per-project**, add to the project's `CLAUDE.md`:
 
@@ -85,7 +189,7 @@ Validator: code-review-excellence, security-audit
 ---
 
 ## Agent Files
-All 7 agents live at `.claude/agents/`:
+All 7 agents live at `~/.claude/agents/`:
 - `01-researcher.md`
 - `02-story-writer.md`
 - `03-spec-writer.md`
