@@ -1,6 +1,8 @@
 # cypher-claude-skills
 
-A complete Claude Code toolkit for shipping software correctly. Install once per project and get a full suite of AI workflow skills covering architecture, testing, security, frontend design, blockchain development, and video production — plus the **Feature Loop**, a fully-automated 5-stage, 10-agent system that turns a feature idea into merged, tested code in ~10 minutes (by feature #5).
+**A repository of reusable Claude Code skills and agents.** Activate directly in Claude Code via `Read`. The **Feature Loop** — a 5-stage, 10-agent orchestration system — runs in the Claude Code window to turn feature ideas into merged, tested code in ~10 minutes (by feature #5).
+
+No CLI tool. No npm package. Pure Claude Code skills that you control.
 
 ---
 
@@ -38,42 +40,33 @@ Read: DELIVERY_SUMMARY.md
 
 ---
 
-## Installation
+## How to Use
 
-### New project
+This is a **Claude Code skill repository**. No installation needed. Activate skills directly in Claude Code:
 
-```bash
-npm install --save-dev @cypher-digital/claude-skills
+### Activate a Skill
+
+In Claude Code, type:
+
+```
+Read ~/.claude/skills/software/feature-loop/SKILL.md
 ```
 
-### Existing project
+Then Claude will ask if you want to activate the skill. Approve, and the skill is live.
+
+### Available Skills
+
+- **feature-loop** — The 5-stage, 10-agent Feature Loop system (primary)
+- Plus 20+ other skills (api-design, code-review, security-audit, etc.)
+
+### Clone the Repository
 
 ```bash
-npx @cypher-digital/claude-skills init
+# Add these skills to your local Claude Code environment
+git clone https://github.com/Enricrypto/cypher-claude-skills.git ~/.claude/skills/custom
 ```
 
-### Update skills across all projects
-
-```bash
-npx @cypher-digital/claude-skills sync
-```
-
-Or install globally once so the shorter command works everywhere:
-
-```bash
-npm install -g @cypher-digital/claude-skills
-# then from any project:
-npx cypher-skills sync
-```
-
-### CLI commands
-
-```bash
-npx cypher-skills init    # Install all skills and agents into current project
-npx cypher-skills list    # List all available skills
-npx cypher-skills sync    # Re-sync skills and agents into current project
-npx cypher-skills add <name>  # Scaffold a new skill file
-```
+Then activate any skill by reading its SKILL.md file in Claude Code.
 
 ---
 
