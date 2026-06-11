@@ -18,7 +18,17 @@ START: User runs e2e-playwright /path/to/project
   │   Memory: Stores audit findings
   │   ↓
   │   
-  ├─ [02-FIXER AGENT]
+  ├─ [02-AUDIT REVIEWER AGENT] ⭐ NEW
+  │   Reads: AUDIT_REPORT.md
+  │   Validates: Completeness of audit (spot-check critical areas)
+  │   Outputs: AUDIT_VALIDATION_REPORT.md (approve or reject audit)
+  │   Memory: Stores validation results
+  │   ↓
+  │   If REJECTED → Auditor re-checks flagged areas
+  │   If APPROVED → Continue to Fixer
+  │   ↓
+  │   
+  ├─ [03-FIXER AGENT]
   │   Reads: AUDIT_REPORT.md
   │   Actions: Auto-fixes identified issues (config, infrastructure)
   │   Commits: Each fix with git commit
@@ -114,8 +124,28 @@ START: User runs e2e-playwright /path/to/project
 
 ---
 
-### Agent 2: Fixer (Phase -1)
+### Agent 2: Audit Reviewer (Phase -1)
 **Input:** AUDIT_REPORT.md + project path
+**Output:** AUDIT_VALIDATION_REPORT.md
+**Time:** 5 minutes
+**Responsibility:** Validate audit completeness (critical quality gate)
+
+**Skills Loaded:**
+- architecture-patterns
+- api-design-principles
+- e2e-best-practices
+
+**What It Validates:**
+- Frontend checks: TypeScript, error handling, validation, hooks, loading states
+- Backend checks: Input validation, error format, authentication, migrations
+- Infrastructure checks: Health checks, env vars, rate limiting, test setup
+
+**Success:** AUDIT_VALIDATION_REPORT.md shows APPROVED (or flags gaps for re-audit)
+
+---
+
+### Agent 3: Fixer (Phase -1)
+**Input:** AUDIT_REPORT.md + AUDIT_VALIDATION_REPORT.md (must be APPROVED) + project path
 **Output:** FIX_REPORT.md + git commits
 **Time:** 10-15 minutes
 **Responsibility:** Automatically fix infrastructure issues
@@ -142,7 +172,7 @@ START: User runs e2e-playwright /path/to/project
 
 ---
 
-### Agent 3: Verifier (Phase -1)
+### Agent 4: Verifier (Phase -1)
 **Input:** FIX_REPORT.md + project path
 **Output:** VERIFICATION_REPORT.md
 **Time:** 5 minutes
@@ -165,7 +195,7 @@ START: User runs e2e-playwright /path/to/project
 
 ---
 
-### Agent 4: Planner (Phase 3)
+### Agent 5: Planner (Phase 3)
 **Input:** Verified codebase + app running
 **Output:** TEST_PLAN.md
 **Time:** 10-15 minutes
@@ -190,7 +220,7 @@ START: User runs e2e-playwright /path/to/project
 
 ---
 
-### Agent 5: Generator (Phase 3)
+### Agent 6: Generator (Phase 3)
 **Input:** TEST_PLAN.md + codebase
 **Output:** test-files.spec.ts + POM classes
 **Time:** 15-20 minutes
@@ -217,7 +247,7 @@ START: User runs e2e-playwright /path/to/project
 
 ---
 
-### Agent 6: Healer (Phase 3, if needed)
+### Agent 7: Healer (Phase 3, if needed)
 **Input:** Test failure output
 **Output:** HEALED_TESTS.md + fixed test code
 **Time:** 5 minutes per test (up to 3 attempts)
@@ -248,7 +278,7 @@ START: User runs e2e-playwright /path/to/project
 
 ---
 
-### Agent 7: Consolidator (End)
+### Agent 8: Consolidator (End)
 **Input:** All prior reports
 **Output:** CONSOLIDATION_REPORT.md + MemoryKit learning
 **Time:** 10 minutes
@@ -406,16 +436,17 @@ Expected time per phase:
 | Phase | Activity | Budget |
 |-------|----------|--------|
 | **-1** | Auditor | 6-8 min |
+| | Audit Reviewer | 4-5 min ⭐ NEW |
 | | Fixer | 8-10 min |
 | | Verifier | 4-5 min |
-| | Subtotal | **18-23 min** |
+| | Subtotal | **22-28 min** |
 | **3** | Planner | 10-15 min |
 | | Generator | 15-20 min |
 | | Executor | 2-3 min |
 | | Healer (if needed) | 5-10 min |
 | | Subtotal | **32-48 min** |
 | **Post** | Consolidator | 8-10 min |
-| | **TOTAL** | **58-81 min** |
+| | **TOTAL** | **62-86 min** |
 
-**Avg:** 65 minutes end-to-end
-**By Feature 5:** 55 minutes (faster with patterns)
+**Avg:** 70 minutes end-to-end (includes critical audit validation)
+**By Feature 5:** 60 minutes (faster with patterns)
