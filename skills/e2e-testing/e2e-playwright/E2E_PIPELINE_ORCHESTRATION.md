@@ -178,7 +178,47 @@ Generate production-ready Playwright E2E tests based on validated audit.
 
 **Total:** ~80 tests across all features
 
-### Step 3: Run Healer Agent (if needed)
+### Step 2b: Run Test Auditor Agent (CRITICAL)
+**Input:** Generated test files  
+**Output:** `TEST_AUDIT_REPORT.md` (verification results)
+
+```bash
+# Spawn: Test Auditor Agent
+# Task: Verify tests match actual code before execution
+# Checks:
+#   1. All selectors exist in actual HTML
+#   2. All API endpoints exist with correct methods
+#   3. Test data matches database schema
+#   4. All assertions match actual behavior
+#   5. No "ghost" features (testing non-existent things)
+```
+
+**Purpose:** Catch preventable test failures before execution
+- ❌ "Element not found" → Caught at audit
+- ❌ "Endpoint 404" → Caught at audit  
+- ❌ "Validation failed" → Caught at audit
+
+**Output:** `TEST_AUDIT_REPORT.md` with:
+- ✅ Selector verification (all selectors resolvable)
+- ✅ Endpoint verification (all endpoints exist, correct methods/params)
+- ✅ Test data validation (all data matches schema)
+- ✅ Assertion verification (all assertions match code behavior)
+- ✅ Ghost feature detection (no tests for non-existent features)
+
+**Decision:**
+- **PASS** → Proceed to Step 3 (Run Tests)
+- **FAIL** → Generator re-creates tests, Test Auditor re-audits
+
+### Step 3: Run Tests
+
+```bash
+# Execute the audited tests
+npm run test:e2e
+```
+
+**Expected:** All tests pass (audit caught all preventable failures)
+
+### Step 4: Run Healer Agent (if needed)
 **Input:** Test failure reports  
 **Output:** Fixed test code
 
@@ -333,9 +373,16 @@ echo "📊 Summary: ~80 tests generated and passing"
 **Output:** `e2e/tests/**/*.spec.ts`  
 **Time:** ~60 min
 
+#### Test Auditor Agent
+**File:** `agents/phase-3b-test-auditor.md`  
+**Responsibility:** Verify tests match actual code before execution  
+**Input:** Generated test files  
+**Output:** `TEST_AUDIT_REPORT.md`  
+**Time:** ~30 min
+
 #### Healer Agent
 **File:** `agents/phase-3-healer.md` (TBD)  
-**Responsibility:** Fix failing tests  
+**Responsibility:** Fix failing tests (post-execution)  
 **Input:** Test failure logs  
 **Output:** Corrected test code  
 **Time:** ~30 min (on-demand)
@@ -399,8 +446,10 @@ Phase 3 Output:
 | 0 | Infrastructure Fixes | 20 min | ⏳ Optional |
 | 3 | Planner | 45 min | ⏳ Ready |
 | 3 | Generator | 60 min | ⏳ Ready |
+| 3b | **Test Auditor** (NEW) | 30 min | ⏳ Ready |
+| 3 | Run Tests | 15 min | ⏳ Ready |
 | 3 | Healer (if needed) | 30 min | ⏳ On-demand |
-| **Total** | **Full Pipeline** | **~3 hours** | ✅ Ready to start |
+| **Total** | **Full Pipeline** | **~3.5 hours** | ✅ Ready to start |
 
 ---
 

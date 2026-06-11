@@ -1,0 +1,11 @@
+{
+  "servers": {
+    "memorykit": {
+      "type": "stdio",
+      "command": "memorykit",
+      "env": {
+        "MEMORYKIT_PROJECT": "${workspaceFolder}"
+      }
+    }
+  }
+}
