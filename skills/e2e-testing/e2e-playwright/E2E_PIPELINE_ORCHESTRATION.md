@@ -15,16 +15,16 @@ Complete end-to-end pipeline for generating production-ready Playwright tests fo
 │                    E2E TESTING PIPELINE                         │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
-│  PHASE -1: AUDIT PREPARATION                                    │
+│  PHASE 0: AUDIT PREPARATION                                     │
 │  ├─ Auditor Agent         → Generate comprehensive audit        │
 │  ├─ Audit Reviewer Agent  → Validate completeness               │
 │  └─ Gap Remediation Agent → Fix discrepancies                   │
 │                                                                 │
-│  PHASE 0: INFRASTRUCTURE FIX                                    │
+│  PHASE 1: INFRASTRUCTURE FIX                                    │
 │  ├─ Fixer Agent           → Apply infrastructure fixes          │
 │  └─ Verifier Agent        → Confirm fixes work                  │
 │                                                                 │
-│  PHASE 3: TEST GENERATION                                       │
+│  PHASE 2: TEST GENERATION                                       │
 │  ├─ Planner Agent         → Map test scenarios                  │
 │  ├─ Generator Agent       → Create test files                   │
 │  └─ Healer Agent          → Fix failures                        │
@@ -37,7 +37,7 @@ Complete end-to-end pipeline for generating production-ready Playwright tests fo
 
 ---
 
-## Phase -1: Audit Preparation
+## Phase 0: Audit Preparation
 
 ### Purpose
 Validate that the audit is comprehensive and accurate before any fixes or test generation.
@@ -103,7 +103,7 @@ Validate that the audit is comprehensive and accurate before any fixes or test g
 
 ---
 
-## Phase 0: Infrastructure Fix (Optional)
+## Phase 1: Infrastructure Fix (Optional)
 
 ### Purpose
 Apply infrastructure fixes identified during audit (optional, not blocking).
@@ -124,7 +124,7 @@ Apply infrastructure fixes identified during audit (optional, not blocking).
 
 ---
 
-## Phase 3: Test Generation
+## Phase 2: Test Generation
 
 ### Purpose
 Generate production-ready Playwright E2E tests based on validated audit.
@@ -277,7 +277,7 @@ npm run test:e2e
 ### Option A: Manual Sequential (Recommended for First Run)
 
 ```bash
-# Phase -1: Audit Prep
+# Phase 0: Audit Prep
 1. Spawn: Audit Reviewer Agent
    Input: docs/E2E_TEST_CATEGORIES.md
    Output: docs/AUDIT_VALIDATION_REPORT.md
@@ -288,12 +288,12 @@ npm run test:e2e
 
 3. Manual: Apply corrections to E2E_TEST_CATEGORIES.md
 
-# Phase 0: Infrastructure (Optional)
+# Phase 1: Infrastructure (Optional)
 4. Spawn: Fixer Agent
    Task: Apply infrastructure fixes
    Output: Updated configuration
 
-# Phase 3: Test Generation
+# Phase 2: Test Generation
 5. Spawn: Planner Agent
    Input: docs/E2E_TEST_CATEGORIES.md
    Output: docs/TEST_PLAN.md
@@ -330,13 +330,13 @@ echo "  2. Gap Remediation..."
 echo "  3. Apply Corrections..."
 # Manual step: apply fixes to E2E_TEST_CATEGORIES.md
 
-# Phase 0: Infrastructure (Optional)
+# Phase 1: Infrastructure (Optional)
 if [ "$RUN_FIXER" = "true" ]; then
   echo "🔧 Phase 0: Infrastructure Fix"
   # Spawn Fixer Agent
 fi
 
-# Phase 3: Test Generation
+# Phase 2: Test Generation
 echo "✅ Phase 3: Test Generation"
 echo "  1. Planner..."
 # Spawn Planner Agent
@@ -464,7 +464,7 @@ Phase 3 Output:
 - ✅ Docker health checks present
 - ✅ Test database isolated
 
-### Phase 3: Test Generation
+### Phase 2: Test Generation
 - ✅ TEST_PLAN.md documents all scenarios
 - ✅ 80+ test files generated
 - ✅ All tests pass locally (npm run test:e2e)

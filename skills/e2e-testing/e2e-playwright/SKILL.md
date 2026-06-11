@@ -12,16 +12,16 @@
 Guides you through the complete E2E testing pipeline:
 
 ```
-Phase -1: Audit Preparation (✅ DONE)
+Phase 0: Audit Preparation (✅ DONE)
   → Auditor: Generate audit
   → Reviewer: Validate completeness
   → Remediation: Fix gaps
   → Apply corrections
 
-Phase 0: Infrastructure Fix (OPTIONAL)
+Phase 1: Infrastructure Fix (OPTIONAL)
   → Fixer: Apply config fixes
 
-Phase 3: Test Generation
+Phase 2: Test Generation
   → Planner: Map test scenarios
   → Generator: Create test files
   → Healer: Fix failures (on-demand)
