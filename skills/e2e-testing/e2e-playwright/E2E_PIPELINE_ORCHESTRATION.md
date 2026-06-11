@@ -239,6 +239,37 @@ npm run test:e2e
 - ❌ Test data collision → ✅ Ensure UUIDs used
 - ❌ Missing cleanup → ✅ Add try...finally
 
+### Step 5: Run Verifier Agent (CRITICAL)
+**Input:** Fixed test code from Healer  
+**Output:** `VERIFICATION_REPORT.md` (confirmation all fixes work)
+
+```bash
+# Spawn: Verifier Agent
+# Task: Verify that Healer's fixes actually work
+# Checks:
+#   1. Code: Verify fixes applied to actual files
+#   2. Local: Re-run all tests, confirm pass
+#   3. Environment: Test in dev, test, staging
+#   4. Cross-browser: Verify all 3 browsers pass
+#   5. Regressions: Confirm no new failures
+#   6. Functionality: Manually verify key user flows
+```
+
+**Purpose:** Don't just trust Healer said "I fixed it". Verify it's actually fixed and working.
+
+**Output:** `VERIFICATION_REPORT.md` with:
+- ✅ All fixes applied (code review)
+- ✅ All tests passing (80/80)
+- ✅ All environments working
+- ✅ All browsers working
+- ✅ Zero regressions
+- ✅ Key flows manually verified
+- ✅ Clear "READY FOR PRODUCTION" decision
+
+**Decision:**
+- **PASS** → Ready to merge and deploy
+- **FAIL** → Report back to Healer, re-fix, re-verify
+
 ---
 
 ## Quick Start: Run Full Pipeline
@@ -387,6 +418,13 @@ echo "📊 Summary: ~80 tests generated and passing"
 **Output:** Corrected test code  
 **Time:** ~30 min (on-demand)
 
+#### Verifier Agent
+**File:** `agents/phase-3-verifier.md`  
+**Responsibility:** Verify all fixes are applied and working  
+**Input:** Fixed test code from Healer  
+**Output:** `VERIFICATION_REPORT.md`  
+**Time:** ~45 min
+
 ---
 
 ## Files Generated at Each Phase
@@ -446,10 +484,11 @@ Phase 3 Output:
 | 0 | Infrastructure Fixes | 20 min | ⏳ Optional |
 | 3 | Planner | 45 min | ⏳ Ready |
 | 3 | Generator | 60 min | ⏳ Ready |
-| 3b | **Test Auditor** (NEW) | 30 min | ⏳ Ready |
+| 3b | Test Auditor | 30 min | ⏳ Ready |
 | 3 | Run Tests | 15 min | ⏳ Ready |
 | 3 | Healer (if needed) | 30 min | ⏳ On-demand |
-| **Total** | **Full Pipeline** | **~3.5 hours** | ✅ Ready to start |
+| 3 | **Verifier (NEW)** | **45 min** | ⏳ Ready |
+| **Total** | **Full Pipeline** | **~4 hours** | ✅ Ready to start |
 
 ---
 
