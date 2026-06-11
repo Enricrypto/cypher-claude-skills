@@ -4,15 +4,28 @@
 
 ---
 
-## Skill Loading
+## Skill Loading & Alignment
 ```yaml
 skills:
-  - playwright-e2e-modern
-  - e2e-best-practices
+  - playwright-e2e-modern (official Playwright E2E patterns)
+  - e2e-best-practices (semantic locators, fixtures, cleanup)
+  - architecture-patterns (clean architecture alignment)
+  - api-design-principles (endpoint naming, error format, status codes)
+  - test-driven-development (test quality standards)
+  - typescript-advanced-types (code quality)
+  
+documentation:
+  - CLAUDE.md (project rules & don't-do list)
+  - E2E_TEST_CATEGORIES.md (audit document - source of truth)
+  - E2E_DEEP_AUDIT_CHECKLIST.md (what actually exists)
+  - playwright-e2e-modern.md (skill reference)
+  
 memory:
-  retrieve: "e2e: prior test audit findings and fixes"
-  store: "e2e: test audit results and ghost feature detection"
+  retrieve: "e2e: prior test audit findings, best practices alignment"
+  store: "e2e: test audit results, best practices violations, alignment issues"
 ```
+
+**Key Principle:** All agents (Auditor, Planner, Generator, Test Auditor, Healer) operate from the same knowledge base and enforce the same standards. Tests must not only work, but be written *well*.
 
 ---
 
@@ -77,6 +90,32 @@ codebase_path: "/Users/enriqueibarra/portal-aurora-marketplace"
 ---
 
 ## Audit Checklist: Verify Each Test File
+
+### 0. Best Practices Scan (First!)
+
+Before checking functionality, scan for code quality:
+
+```bash
+# Check for anti-patterns
+grep -r "locator('\\." frontend/e2e/tests/  # CSS class selectors ❌
+grep -r "waitForTimeout" frontend/e2e/tests/  # Arbitrary sleeps ❌
+grep -r "Date.now()" frontend/e2e/tests/  # Not UUID ❌
+grep -r "catch.*{}" frontend/e2e/tests/  # Missing cleanup ❌
+
+# Check for best practices
+grep -r "getByRole" frontend/e2e/tests/  # Semantic locators ✅
+grep -r "uuid\|UUID\|uuidv4" frontend/e2e/tests/  # UUID data ✅
+grep -r "finally" frontend/e2e/tests/  # Cleanup patterns ✅
+grep -r "fixtures" frontend/e2e/tests/  # Using fixtures ✅
+```
+
+**Scoring:**
+- Missing semantic locators → ⚠️ WARNING or ❌ FAIL (depends on scope)
+- No UUID data → ⚠️ WARNING (collision risk)
+- Missing cleanup → ❌ FAIL (flakiness)
+- Arbitrary sleeps → ⚠️ WARNING (flakiness)
+
+---
 
 ### 1. Selector Verification
 
@@ -217,7 +256,87 @@ await expect(page.getByText(/verify your email/i)).toBeVisible()
 # Verify actual behavior matches assertion
 ```
 
-### 5. Ghost Feature Detection
+### 5. Best Practices Alignment
+
+**From playwright-e2e-modern.md:**
+```
+✅ Semantic Locators (Priority: getByRole > getByLabel > getByTestId)
+✅ No hard-coded CSS classes or XPath
+✅ UUID test data (never Date.now())
+✅ Fixtures for auth & cleanup
+✅ Try...finally for data cleanup
+✅ Explicit timeouts (environment-aware)
+✅ Trace & video retention on failure
+✅ No arbitrary sleeps (waitForTimeout)
+✅ Auto-waiting where possible
+```
+
+**Check each test:**
+
+```typescript
+// BAD: Hard-coded CSS class
+await page.locator('.btn-submit').click()  ❌
+
+// GOOD: Semantic locator
+await page.getByRole('button', { name: /submit|enviar/i }).click()  ✅
+
+// BAD: Using Date.now() for uniqueness
+const testId = Date.now()  ❌
+
+// GOOD: Using UUID
+const testId = uuidv4()  ✅
+
+// BAD: No cleanup
+test('Create user', async ({ page }) => {
+  await createUser('test@example.com')
+  // No cleanup - test data lingers
+})  ❌
+
+// GOOD: Try-finally cleanup
+test('Create user', async ({ page }) => {
+  try {
+    await createUser('test@example.com')
+  } finally {
+    await deleteUser('test@example.com')
+  }
+})  ✅
+
+// BAD: Arbitrary sleep
+await page.waitForTimeout(500)  ❌
+
+// GOOD: Wait for actual condition
+await page.getByLabel('Email').waitFor({ state: 'visible', timeout: 10000 })  ✅
+```
+
+**From architecture-patterns.md:**
+```
+✅ Business logic in services (not controllers)
+✅ Thin controllers (just dispatch via MediatR)
+✅ Domain entities pure (no ORM, no external deps)
+✅ Clean Architecture layers respected
+```
+
+**Check in tests:**
+- Are tests calling API endpoints (thin controllers) or trying to call business logic directly?
+- Are tests using public contracts (API endpoints) or internal implementation details?
+- Do tests assume clean architecture is present?
+
+**From api-design-principles.md:**
+```
+✅ Endpoint naming consistent (/api/v1/resource/action)
+✅ Request/response format consistent (JSON)
+✅ Error responses include message
+✅ HTTP status codes correct (400, 401, 403, 404, 409, 429, 500)
+```
+
+**Check in tests:**
+- Do assertions verify correct HTTP status codes?
+- Are error message assertions checking for actual error format?
+- Do tests use consistent naming for endpoints?
+
+---
+
+### 6. Ghost Feature Detection
 
 **What is a "ghost feature"?**
 - Test for endpoint that doesn't exist
@@ -285,6 +404,7 @@ test('Empty password validation', async ({ page }) => {
 Generated: 2026-06-11T15:30:00Z
 Based on: Generated test files (Phase 3 Generator)
 Audit scope: All test files in frontend/e2e/tests/
+Alignment: Architecture patterns, API design, E2E best practices
 
 ---
 
@@ -292,12 +412,68 @@ Audit scope: All test files in frontend/e2e/tests/
 
 **Status:** [✅ PASSED / ⚠️ PASSED WITH WARNINGS / ❌ FAILED]
 
+**Test Quality Assessment:**
+- Functional Correctness: ✅ (tests match actual code)
+- Code Quality: ✅ (follows best practices)
+- Standards Alignment: ✅ (architecture, API design, E2E patterns)
+
 **Test Files Audited:** 12
-**Selectors Verified:** 85
-**Endpoints Verified:** 42
-**Ghost Features Found:** 0
+**Selectors Verified:** 85 (all semantic ✅)
+**Endpoints Verified:** 42 (all exist ✅)
+**Ghost Features Found:** 0 ✅
+**Best Practices Violations:** 0 ✅
 **Critical Issues:** 0
-**Warnings:** 2
+**Warnings:** 2 (minor)
+
+---
+
+## Best Practices & Standards Alignment
+
+### ✅ Code Quality
+
+**Semantic Locators:** 85/85 ✅
+- All use getByRole/getByLabel/getByTestId priority
+- No CSS class selectors
+- No XPath expressions
+- No hard-coded indices
+
+**Test Data:** All using UUIDs ✅
+- No Date.now() collisions
+- generateTestEmail() used consistently
+- Test accounts properly isolated
+
+**Cleanup & Fixtures:** All proper ✅
+- Try...finally pattern used
+- loginAsAdvertiser fixture injected correctly
+- Database cleanup called in teardown
+
+**Timeouts:** Environment-aware ✅
+- Local: 5-15s action, 15-30s navigation
+- Production: 15-25s action, 30-45s navigation
+- TEST_ENV variable respected
+
+**Anti-patterns:** None found ✅
+- No arbitrary waitForTimeout()
+- No missing cleanup
+- No skipped tests (@skip/@only)
+- No console.error silenced
+
+### Alignment with Official Patterns
+
+**Architecture Patterns** ✅
+- Tests call public API endpoints (thin controllers)
+- No direct service/business logic calls
+- Clean Architecture respected
+
+**API Design Principles** ✅
+- Endpoint naming consistent (/api/v1/resource/action)
+- Error responses verified (400, 401, 409, etc.)
+- Status codes correct
+
+**Playwright E2E Modern** ✅
+- Multi-browser coverage (Chromium, Firefox, Mobile)
+- Cross-browser assertions work
+- Accessibility considerations present
 
 ---
 
