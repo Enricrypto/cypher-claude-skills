@@ -143,27 +143,42 @@ Read: IMPLEMENTATION_ROADMAP.md
 # Target launch: July 1, 2026
 ```
 
-### Architecture
+### Architecture (5 Stages, 10 Agents)
 
 ```
-STAGE 1: DISCOVER (2-5 min)
-  └─ 01-Researcher: Map codebase + find patterns
-
-STAGE 2: PLAN (3-8 min)
-  ├─ 02-Story Writer: Define acceptance criteria
-  └─ 03-Spec Writer: Design technical blueprint
-
-STAGE 3: EXECUTE (5-15 min)
-  ├─ 04-Backend Builder: Generate services + routes
-  ├─ 05-Frontend Builder: Generate components + pages
-  ├─ 06-Test Verifier: Write acceptance tests
-  └─ 11-Reviewer Agent: Code peer review
-
-STAGE 4: VERIFY (7-13 min)
-  └─ 07-Validator: Check spec + guardrails compliance
-
-STAGE 5: DELIVER (5-10 min)
-  └─ 08-Feature Consolidator: Extract patterns + learn
+┌──────────────────────────────────────────────────────────────┐
+│           FEATURE FACTORY: 5 STAGES, 10 AGENTS               │
+├──────────────────────────────────────────────────────────────┤
+│                                                              │
+│ STAGE 1: DISCOVER (2-5 min)                                 │
+│ ├─ 01-Researcher: Map codebase + find patterns             │
+│ └─ Output: Researcher Report                                │
+│                                                              │
+│ STAGE 2: PLAN (3-8 min)                                    │
+│ ├─ 02-Story Writer: Define acceptance criteria             │
+│ ├─ 03-Spec Writer: Design technical blueprint              │
+│ └─ Output: User Story + Technical Brief                    │
+│                                                              │
+│ [CHECKPOINT 1: Approve story]                              │
+│ [CHECKPOINT 2: Approve spec]                               │
+│                                                              │
+│ STAGE 3: EXECUTE (5-15 min)                                │
+│ ├─ 04-Backend Builder: Services + API routes + tests       │
+│ ├─ 05-Frontend Builder: Components + pages + UI tests      │
+│ ├─ 06-Test Verifier: Acceptance tests                      │
+│ └─ Output: Code + tests ready for review                   │
+│                                                              │
+│ STAGE 4: VERIFY (7-13 min)                                 │
+│ ├─ 07-Validator: Gap report + security check              │
+│ └─ Output: Validation Report                               │
+│                                                              │
+│ [CHECKPOINT 3: Approve PR]                                 │
+│                                                              │
+│ STAGE 5: DELIVER (5-10 min)                                │
+│ ├─ 08-Feature Consolidator: Extract patterns + learn       │
+│ └─ Output: Reusable patterns + time estimates              │
+│                                                              │
+└──────────────────────────────────────────────────────────────┘
 ```
 
 ### Key Features
@@ -481,6 +496,159 @@ git push origin --delete feat/<task-name>
 
 ---
 
+## E2E Testing Pipeline System (NEW)
+
+The **E2E Testing Pipeline** is a complete orchestration system for building production-grade end-to-end test suites. It runs in three phases with dedicated agents for each step — audit → plan → generate → verify.
+
+### Why a Pipeline?
+
+Manual E2E test writing is slow and error-prone:
+- Tests don't match actual code → false confidence
+- Edge cases missed → bugs in production
+- Test infrastructure misconfigured → flaky tests on CI
+- No systematic approach to mocking, data isolation, or async handling
+
+The E2E Pipeline solves this with **8 specialized agents** that handle every aspect of test coverage and infrastructure.
+
+### How It Works
+
+```
+Phase 0: Audit Preparation (60 min)
+  ↓
+  ├─ Audit Reviewer: Validate codebase audit completeness (95%+ target)
+  ├─ Gap Remediation: Fix audit discrepancies
+  └─ Apply Corrections: Update audit docs
+  
+Phase 1: Infrastructure Fix (OPTIONAL, 20 min)
+  ↓
+  └─ Fixer: Apply config/env corrections (rate limiting, healthchecks, etc.)
+  
+Phase 2: Test Generation (2.5 hours)
+  ↓
+  ├─ Planner: Map test scenarios from audit
+  ├─ Generator: Create Playwright test files
+  ├─ Test Auditor: Verify tests match actual code (Phase 2 audit)
+  ├─ Run Tests: Execute test suite
+  ├─ Healer: Fix any failing tests (on-demand, looping)
+  └─ Verifier: Confirm all fixes work end-to-end
+```
+
+**Output:** Production-ready test suite (~80 tests, 3 browser projects, all AC covered)
+
+### Quick Start
+
+```bash
+Read ~/.claude/skills/software/e2e-pipeline/E2E_PIPELINE_ORCHESTRATION.md
+```
+
+This file contains:
+- ✅ Complete 8-phase structure with agent definitions
+- ✅ Step-by-step execution guide with decision points
+- ✅ Success criteria for each phase
+- ✅ Timeline estimates and what to expect
+
+### Key Learnings (June 2026)
+
+**Critical Patterns:**
+- **Fixture Organization**: Fixtures MUST be at `e2e/tests/fixtures.ts` (test directory root), NOT parent `e2e/`. This is the official Playwright pattern used by Stripe and Microsoft. Parent imports cause unrecoverable module resolution failures — only reorganization fixes it.
+- **Environment-Based Rate Limiting**: Use separate rate limit configs for test vs production (`appsettings.Test.json`). Test env: 1000/window, Production: 10/5/3 per tier. Prevents flaky tests.
+- **Code-First Verification**: Always read component code BEFORE writing tests. Know when validation runs, where errors appear, what elements exist.
+- **Docker Networking**: Inside containers, use service names (`http://nginx`), not localhost. Each container's localhost is its own namespace.
+
+### Documentation
+
+- **Full Pipeline Guide**: `E2E_PIPELINE_ORCHESTRATION.md` (complete step-by-step)
+- **Phase 0 Audit Checklist**: `reference/E2E_DEEP_AUDIT_CHECKLIST.md`
+- **Playwright Patterns**: See `e2e-testing-playwright` skill below
+- **Test Categories & Plan**: `reference/TEST_PLAN.md` (post-audit)
+
+### Diagrams
+
+**E2E Pipeline Phase Flow:**
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    E2E TESTING PIPELINE (8 Phases)              │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  PHASE 0: AUDIT PREPARATION (60 min)                          │
+│  ┌─────────────────────────────────────────────────────────┐  │
+│  │ • Audit Reviewer:    Map routes, pages, components     │  │
+│  │ • Gap Remediation:   Fix audit discrepancies           │  │
+│  │ • Apply Corrections: Update E2E_TEST_CATEGORIES.md     │  │
+│  └──────────────────────────┬──────────────────────────────┘  │
+│                             │                                  │
+│  PHASE 1: INFRA FIX (20 min, OPTIONAL)                        │
+│  ┌──────────────────────────┴──────────────────────────────┐  │
+│  │ • Fixer: Rate limiting, healthchecks, test DB, env     │  │
+│  └──────────────────────────┬──────────────────────────────┘  │
+│                             │                                  │
+│  PHASE 2: TEST GENERATION (2.5 hours)                         │
+│  ┌──────────────────────────┴──────────────────────────────┐  │
+│  │ • Planner: Map test scenarios from audit               │  │
+│  │ • Generator: Create e2e/tests/**/*.spec.ts             │  │
+│  │ • Test Auditor: Verify tests match code (Phase 2 ✓)    │  │
+│  │ • Run: Execute test suite                              │  │
+│  │ • Healer: Fix failures (loop until ✓)                  │  │
+│  │ • Verifier: Confirm all fixes work                     │  │
+│  └──────────────────────────┬──────────────────────────────┘  │
+│                             │                                  │
+│  OUTPUT: ~80 tests passing, 3 browsers, all AC covered        │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Feature Factory + E2E Pipeline (Complete Feature Loop):**
+
+```
+Feature Idea
+    │
+    ├─ FEATURE FACTORY (5 Stages)
+    │  ├─ Stage 1: Researcher → Researcher Report
+    │  ├─ Stage 2: Story Writer → User Story + AC
+    │  │           [CHECKPOINT 1: Approve story]
+    │  ├─ Stage 3: Spec Writer → Technical Brief
+    │  │           [CHECKPOINT 2: Approve spec]
+    │  ├─ Stage 4: Backend Builder → API routes + services
+    │  │           Frontend Builder → UI components
+    │  │           Test Verifier → Acceptance tests
+    │  ├─ Stage 5: Validator → Gap report
+    │  │           [CHECKPOINT 3: Approve PR]
+    │  └─ Feature Consolidator → Extract patterns
+    │
+    ├─ FEATURE TESTED (After merge, OPTIONAL)
+    │  └─ E2E TESTING PIPELINE (8 Phases)
+    │     ├─ Phase 0: Audit codebase for test gaps
+    │     ├─ Phase 1: Fix infrastructure (rate limit, etc.)
+    │     ├─ Phases 2–7: Generate tests, validate, run, heal
+    │     └─ Output: Production-ready E2E test suite
+    │
+    └─ ✅ FEATURE SHIPPED (code + tests + docs)
+```
+
+### When to Use Feature Factory vs E2E Pipeline
+
+**Use Feature Factory when:**
+- Starting a new feature or sprint
+- Need to design API contracts before implementation
+- Want automated acceptance tests for user stories
+- Need code review and validation before merge
+- Building unit tests + integration tests for components
+
+**Use E2E Pipeline when:**
+- Feature is already merged and in production (or staging)
+- Want comprehensive cross-browser E2E coverage
+- Need to test complex user journeys (multi-step flows, auth, payments)
+- Want to build test infrastructure (fixtures, POMs, mocking)
+- Automating test generation from codebase audit
+
+**Use Both Together when:**
+- Feature Factory writes code + unit tests
+- E2E Pipeline builds comprehensive E2E test suite after merge
+- Combined: 100% AC coverage (unit + integration + E2E)
+
+---
+
 ## Skills Reference
 
 The skills below are standalone — usable independently or as part of the Feature Factory chain. Each one can be activated on its own for any task that matches its description.
@@ -670,6 +838,47 @@ Enforces strict RED → GREEN → REFACTOR cycle. Write failing test first, watc
 
 ---
 
+#### `e2e-pipeline` _(directory skill)_
+
+**Source:** cypher-claude-skills (custom)
+
+Complete E2E test suite orchestration system. Manages the full lifecycle from codebase audit through test generation, validation, and execution with dedicated agents for each phase.
+
+**Used by Feature Factory:** Test Verifier (Agent 6) — can invoke standalone or as part of feature factory
+
+**When to use:** Building production E2E test suites for web applications. Especially valuable when starting from scratch or when testing complex user flows (auth, payments, multi-step interactions).
+
+**How to invoke:**
+
+```
+"Help me build an E2E test suite"
+"Set up comprehensive E2E tests for this feature"
+Read ~/.claude/skills/software/e2e-pipeline/E2E_PIPELINE_ORCHESTRATION.md
+```
+
+**Workflow (8 phases):**
+
+1. **Phase 0** — Audit codebase for test coverage gaps
+2. **Phase 1** — Fix infrastructure (rate limiting, healthchecks, env config)
+3. **Phase 2** — Generate comprehensive test plan
+4. **Phases 3–5** — Create tests, validate against code, run suite
+5. **Phases 6–7** — Heal failures, verify all fixes work end-to-end
+6. **Phase 8** — Archive test suite and document patterns
+
+**Key features:**
+- **Code-first approach** — audit actual routes/pages/components before writing tests
+- **Two-phase validation** — Phase 0 (audit codebase), Phase 4 (audit generated tests)
+- **Automated healing** — on-demand test failure detection and repair
+- **Environment separation** — test vs production configs to prevent flakiness
+- **Docker integration** — runs inside Docker Compose with healthchecks
+- **Pattern documentation** — archives reusable test patterns for future features
+
+**Skill includes:** Full orchestration guide, agent definitions, execution checklist, timeline estimates.
+
+**Learn more:** Pair with `e2e-testing-playwright` for tactical Playwright patterns.
+
+---
+
 #### `web3-testing`
 
 **Source:** [wshobson/agents](https://github.com/wshobson/agents)
@@ -693,7 +902,7 @@ Smart contract testing with Hardhat and Foundry. Covers unit tests, integration 
 
 Production-grade Playwright E2E test suite architecture. Covers config setup, fixture patterns (auth, seed, helpers), Page Object Models (POMs), test data isolation strategies, mocking patterns (TOTP, SMS, timers, payment webhooks), flakiness prevention, and CI integration with Docker.
 
-**Used by Feature Factory:** Test Verifier (Agent 7)
+**Used by Feature Factory:** Test Verifier (Agent 6) · **Used by E2E Pipeline:** All phases (infrastructure → generation → verification)
 
 **When to use:** Writing end-to-end test suites for web applications. Especially valuable for multi-browser testing, complex auth flows, payment testing, and test data isolation.
 
@@ -709,14 +918,19 @@ Production-grade Playwright E2E test suite architecture. Covers config setup, fi
 
 - **Config** — 3 browser projects (chromium, mobile-chrome, firefox), retries on CI, workers optimization
 - **Fixtures** — auth (login via API), seed (global + per-test), helpers (TOTP, SMS mock, clock, webhooks)
-- **⚠️ CRITICAL: Fixture Organization** — Fixtures MUST be in `e2e/tests/fixtures.ts` (test directory root), NOT in parent `e2e/` directory. This is the official Playwright pattern used by Stripe, Microsoft, and all major projects. Parent directory imports cause module resolution failures that cannot be fixed by pre-compilation or tsx loaders — only reorganization solves it. See "Fixture Organization (Critical Pattern)" section in skill.
+- **⚠️ CRITICAL: Fixture Organization** — Fixtures MUST be in `e2e/tests/fixtures.ts` (test directory root), NOT in parent `e2e/` directory. This is the official Playwright pattern used by Stripe, Microsoft, and all major projects. Parent directory imports cause unrecoverable module resolution failures — only reorganization solves it. See "Fixture Organization (Critical Pattern)" section in skill.
 - **POMs** — base class with stable data-testid selectors, page-specific methods, no assertions
 - **Data isolation** — global seed for read-only tests, per-suite seed for mutations, cleanup patterns
 - **Mocking** — Playwright clock for timers, speakeasy for TOTP, local code generation for SMS OTP, manual webhooks
 - **Flakiness prevention** — explicit waits, no arbitrary sleep(), network wait patterns, navigation handling
+- **Environment-based rate limiting** — separate rate limit configs for test vs production; test env should allow high throughput to prevent flaky tests
+- **Code-first approach** — read component code before writing tests; know when validation runs, where errors appear, what elements exist
+- **Docker networking** — inside containers use service names (`http://nginx`), not localhost; each container's localhost is isolated
 - **CI integration** — Docker Compose healthchecks, artifact uploads, cleanup on always()
 
-**Skill includes:** 11 detailed sections with code examples, common pitfalls + fixture organization, and testing checklist.
+**Skill includes:** 11 detailed sections with code examples, critical patterns, common pitfalls, and testing checklist.
+
+**Learn more:** Pair with `e2e-pipeline` skill for full orchestration (audit → plan → generate → verify).
 
 ---
 
@@ -1161,33 +1375,35 @@ npx cypher-skills sync
 
 ## Skill Activation Quick Reference
 
-| Skill | Type | Used in Feature Factory | Trigger phrase |
-|---|---|---|---|
-| `feature-factory` | Chain (7 agents) | — | `Read .claude/skills/feature-factory/SKILL.md` |
-| `architecture-patterns` | Workflow | Researcher · Spec Writer | "Design this architecture" |
-| `api-design-principles` | Workflow | Spec Writer · Backend Builder | "Review this API design" |
-| `nodejs-backend-patterns` | Workflow | Backend Builder | "Structure this Node.js service" |
-| `frontend-architecture` | Workflow | Frontend Builder | "Where should this code go?" |
-| `frontend-design` | Workflow | Frontend Builder | "Build this UI component" |
-| `test-driven-development` | Workflow | Backend · Frontend · Test Verifier | "Use TDD for this" |
-| `verification-before-completion` | Workflow | Test Verifier | "Verify before we move on" |
-| `code-review-excellence` | Workflow | Validator | "Do a thorough code review" |
-| `security-audit` | Workflow | Validator | "Security audit this codebase" |
-| `plan-exit-review` | Workflow | — | "Review this plan" |
-| `systematic-debugging` | Workflow | — | "Debug this systematically" |
-| `dead-code-audit` | Workflow | — | "Audit for dead code" |
-| `requesting-code-review` | Workflow | — | "Prepare this for review" |
-| `receiving-code-review` | Workflow | — | "Help me respond to this review" |
-| `finishing-a-development-branch` | Workflow | — | "Finish this branch" |
-| `web3-testing` | Workflow | — | "Test this smart contract" |
-| `typescript-advanced-types` | Workflow | — | "Help me type this" |
-| `python-performance-optimization` | Workflow | — | "Optimize this Python code" |
-| `defi-protocol-templates` | Workflow | — | "Implement this DeFi protocol" |
-| `solidity-security` | Workflow | — | "Security review this contract" |
-| `solana-dev` | Workflow | — | "Help me build this Anchor program" |
-| `remotion-best-practices` | Workflow | — | "Build this Remotion composition" |
-| `create-onboarding-video` | Workflow | — | "Create an onboarding video" |
-| `git-commit` | Workflow | — | "Write a commit message" |
-| `code-reviewer` | Agent | — | "Act as code-reviewer and review this" |
-| `security-engineer` | Agent | — | "Act as security-engineer" |
-| `threat-detection-engineer` | Agent | — | "Act as threat-detection-engineer" |
+| Skill | Type | Used in Feature Factory | Standalone | Trigger phrase |
+|---|---|---|---|---|
+| `feature-factory` | Chain (7 agents) | — | ✅ | `Read .claude/skills/feature-factory/SKILL.md` |
+| `e2e-pipeline` | Orchestration (8 agents) | Test Verifier | ✅ | `Read .claude/skills/software/e2e-pipeline/E2E_PIPELINE_ORCHESTRATION.md` |
+| `architecture-patterns` | Workflow | Researcher · Spec Writer | ✅ | "Design this architecture" |
+| `api-design-principles` | Workflow | Spec Writer · Backend Builder | ✅ | "Review this API design" |
+| `nodejs-backend-patterns` | Workflow | Backend Builder | ✅ | "Structure this Node.js service" |
+| `frontend-architecture` | Workflow | Frontend Builder | ✅ | "Where should this code go?" |
+| `frontend-design` | Workflow | Frontend Builder | ✅ | "Build this UI component" |
+| `test-driven-development` | Workflow | Backend · Frontend · Test Verifier | ✅ | "Use TDD for this" |
+| `e2e-testing-playwright` | Workflow | Test Verifier, E2E Pipeline | ✅ | "Build E2E tests using Playwright" |
+| `verification-before-completion` | Workflow | Test Verifier | ✅ | "Verify before we move on" |
+| `code-review-excellence` | Workflow | Validator | ✅ | "Do a thorough code review" |
+| `security-audit` | Workflow | Validator | ✅ | "Security audit this codebase" |
+| `plan-exit-review` | Workflow | — | ✅ | "Review this plan" |
+| `systematic-debugging` | Workflow | — | ✅ | "Debug this systematically" |
+| `dead-code-audit` | Workflow | — | ✅ | "Audit for dead code" |
+| `requesting-code-review` | Workflow | — | ✅ | "Prepare this for review" |
+| `receiving-code-review` | Workflow | — | ✅ | "Help me respond to this review" |
+| `finishing-a-development-branch` | Workflow | — | ✅ | "Finish this branch" |
+| `web3-testing` | Workflow | — | ✅ | "Test this smart contract" |
+| `typescript-advanced-types` | Workflow | — | ✅ | "Help me type this" |
+| `python-performance-optimization` | Workflow | — | ✅ | "Optimize this Python code" |
+| `defi-protocol-templates` | Workflow | — | ✅ | "Implement this DeFi protocol" |
+| `solidity-security` | Workflow | — | ✅ | "Security review this contract" |
+| `solana-dev` | Workflow (dir) | — | ✅ | "Help me build this Anchor program" |
+| `remotion-best-practices` | Workflow (dir) | — | ✅ | "Build this Remotion composition" |
+| `create-onboarding-video` | Workflow (dir) | — | ✅ | "Create an onboarding video" |
+| `git-commit` | Workflow | — | ✅ | "Write a commit message" |
+| `code-reviewer` | Agent | — | ✅ | "Act as code-reviewer and review this" |
+| `security-engineer` | Agent | — | ✅ | "Act as security-engineer" |
+| `threat-detection-engineer` | Agent | — | ✅ | "Act as threat-detection-engineer" |
