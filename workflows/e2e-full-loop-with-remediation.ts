@@ -210,13 +210,12 @@ log('✅ Code quality verified')
 
 phase('Phase 2: Test Generation')
 
-const testRunCommand = `cd /Users/enriqueibarra/portal-aurora-marketplace/frontend && npm run test:e2e -- --grep "${args.feature}" 2>&1`
-
 log(`Running: npm run test:e2e -- --grep "${args.feature}"`)
 log('Waiting for test execution...')
 
 // In a real workflow, this would execute tests and capture results
 // For now, we'll document what happens next
+// Note: Tests are run from the frontend directory where package.json exists
 
 // ============================================================================
 // Phase 3: Remediation (Conditional)

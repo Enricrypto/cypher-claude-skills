@@ -227,17 +227,17 @@ When fixing tests:
 Example workflow:
 ```typescript
 // 1. RED: Run test, observe failure
-npm run test:e2e -- --grep "CP-HP-03"
+npm run test:e2e -- --grep "[TestName]"
 
 // 2. Understand the failure
-// Error: Webhook returns 400 Bad Request
-// Root cause: Wrong payload keys (campaignId vs ExternalReference)
+// Error: API returns 400 Bad Request
+// Root cause: Wrong payload keys or format
 
 // 3. GREEN: Apply minimal fix
-// Change: { campaignId } → { ExternalReference }
+// Change test payload to match actual backend schema
 
 // 4. Verify it passes
-npm run test:e2e -- --grep "CP-HP-03"
+npm run test:e2e -- --grep "[TestName]"
 
 // 5. REFACTOR: Clean up, check for duplication
 // Is this pattern used elsewhere? Should we extract a helper?
@@ -344,21 +344,21 @@ Results: [X]/[X] tests passing across chromium, firefox, mobile-chrome"
 
 **Example:**
 ```
-fix(e2e): resolve campaigns test failures - 66 tests passing
+fix(e2e): resolve [category] test failures - [X] tests passing
 
-Fixed campaigns E2E test suite (CP-HP, CP-ER, CP-EC):
+Fixed [category] E2E test suite ([Category]-HP, [Category]-ER, [Category]-EC):
 
 Root causes identified:
-- CP-HP-03: API payload mismatch (campaignId vs ExternalReference)
-- CP-ER-02: Auth context issue (token not updated after login)
-- CP-ER-04: Test expectation mismatch (backend ignores amountCents)
-- CP-ER-09: Test data incomplete (missing firstName field)
+- [Category]-HP-01: API payload mismatch (wrong JSON keys)
+- [Category]-ER-02: Auth context issue (token not preserved)
+- [Category]-EC-03: Test expectation mismatch (backend behavior different)
+- [Category]-EC-04: Test data incomplete (missing required fields)
 
 Changes applied:
-- Updated webhook payload to match Safe2Pay format
-- Fixed API login flow to preserve token context
-- Updated test data validation expectations
-- Added required fields to test data
+- Updated API payload to match actual backend schema
+- Fixed auth context preservation across API calls
+- Updated test expectations to match actual behavior
+- Added required fields to test data structures
 
 Methodology:
 - systematic-debugging: Diagnosed patterns across 3 browsers
@@ -366,8 +366,8 @@ Methodology:
 - code-review-excellence: Reviewed fixes for quality
 - verification-before-completion: Verified across all browsers
 
-Results: 66/66 tests passing (24 HP + 27 ER + 15 EC) across 3 browsers
-Time: 45 minutes
+Results: [X]/[X] tests passing ([X] HP + [X] ER + [X] EC) across 3 browsers
+Time: [duration]
 ```
 
 ---
@@ -380,59 +380,57 @@ git push origin [branch-name]
 
 ---
 
-## Real Example: Campaigns Tests
+## Generic Example: Fixing Test Category
 
-**Problem:** CP-HP-03 Pix Webhook test failing with 400 Bad Request
+**Problem:** Happy Path test failing with 400 Bad Request on API call
 
 ### Phase 1: Diagnosis
-- Run `npm run test:e2e -- --grep "CP-HP"` → 3 failures (chromium, firefox, mobile-chrome)
+- Run `npm run test:e2e -- --grep "[Category]-HP"` → 3 failures (chromium, firefox, mobile-chrome)
 - Same test fails on all 3 browsers → systemic issue, not browser-specific
 
 ### Phase 2: Analysis
-- Error: "Webhook call failed: httpStatus 400"
+- Error: "API call failed: httpStatus 400"
 - Root cause: Test sending wrong payload format
-  - Test sent: `{ campaignId, status: "Confirmed", amountCents }`
-  - Backend expected: `{ ExternalReference, Status: 3, TransactionId }`
+  - Test sent: `{ resourceId, action: "string", amount: 10000 }`
+  - Backend expected: `{ ExternalReference, ActionType: 3, TransactionId }`
 
 ### Phase 3: Fix
 ```typescript
 // Before (wrong)
-const webhookResponse = await api.post('/internal/webhooks/pix', {
-  campaignId,
-  status: 'Confirmed',
-  amountCents: 10000,
+const response = await api.post('/api/endpoint', {
+  resourceId,
+  action: 'Confirmed',
+  amount: 10000,
   transactionId: 'tx-' + Date.now(),
 });
 
-// After (correct)
-const webhookResponse = await api.post('/internal/webhooks/pix', {
-  ExternalReference: campaignId,
-  Status: 3,
+// After (correct - match actual backend schema)
+const response = await api.post('/api/endpoint', {
+  ExternalReference: resourceId,
+  ActionType: 3,  // Use correct enum value
   TransactionId: 'tx-' + Date.now(),
 });
 
-// Also: Added missing initiate-billing call
-const billingResponse = await api.post(
-  `/api/v1/advertiser/campaigns/${campaignId}/initiate-billing`,
-  { paymentMethod: 'PixAutomatico', amountCents: 10000 }
+// Also: Add missing setup step if required
+const setupResponse = await api.post(
+  `/api/resource/${resourceId}/initialize`,
+  { method: 'Standard', amount: 10000 }
 );
 ```
 
 ### Phase 4: Verify
-- Run tests again: ✅ All 24 CP-HP tests pass (8 tests × 3 browsers)
+- Run tests again: ✅ All tests pass (8 tests × 3 browsers)
 
 ### Phase 5-6: Commit & Push
 ```
-commit 5494530
-fix(e2e): resolve campaigns test failures - 66 tests passing
+fix(e2e): resolve [category] test failures - [X] tests passing
 
-Fixed campaigns E2E test suite (CP-HP, CP-ER, CP-EC):
-- CP-HP-03: Fixed Pix webhook payload to match Safe2Pay format
-- CP-ER-02: Fixed API login to ensure proper token
-- CP-ER-04: Updated validation test (backend ignores amountCents param)
-- CP-ER-09: Added required fields to test data
+Fixed [category] E2E test suite ([Category]-HP, [Category]-ER, [Category]-EC):
+- [Category]-HP-01: Fixed API payload format to match backend schema
+- [Category]-ER-02: Fixed auth context issue 
+- [Category]-EC-03: Added required setup step
 
-Results: 66/66 tests passing (24 HP + 27 ER + 15 EC) across 3 browsers
+Results: [X]/[X] tests passing across chromium, firefox, mobile-chrome
 ```
 
 ---

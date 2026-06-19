@@ -177,15 +177,15 @@ Confidence tiers:
 ```markdown
 # E2E Testing Consolidation Report
 
-Generated: 2026-06-11T16:00:00Z
-Project: Portal Aurora Marketplace - Advertiser Dashboard
-Feature: Dashboard listing, editing, and management
+Generated: [timestamp]
+Project: [Project Name] - [Feature Name]
+Feature: [Feature description]
 
 ---
 
 ## Executive Summary
 
-This was the 3rd E2E feature for Portal Aurora (1st: Auth, 2nd: Profiles).
+This is the E2E testing consolidation report for your feature.
 
 **Metrics:**
 - Phase -1 (Audit + Fix): 18 minutes
@@ -419,8 +419,8 @@ The following has been stored for future features:
 
 ```json
 {
-  "feature": "E2E Testing: Portal Aurora Dashboard",
-  "date": "2026-06-11",
+  "feature": "E2E Testing: [Feature Name]",
+  "date": "[timestamp]",
   "patterns": {
     "high_confidence": [
       "Docker health checks",

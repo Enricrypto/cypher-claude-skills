@@ -109,12 +109,12 @@ Test Auditor verifies THREE things:
 
 ```yaml
 generated_test_files:
-  - "frontend/e2e/tests/auth/advertiser-registration.spec.ts"
-  - "frontend/e2e/tests/listings/create-listing.spec.ts"
-  - ... (all generated test files)
+  - "frontend/e2e/tests/[category]/[test-name].spec.ts"
+  - All test files generated in appropriate feature categories
 
 audit_document: "docs/E2E_TEST_CATEGORIES.md"
-codebase_path: "/Users/enriqueibarra/portal-aurora-marketplace"
+codebase_root: "[project-root]"
+frontend_root: "[project-root]/frontend"
 ```
 
 ---

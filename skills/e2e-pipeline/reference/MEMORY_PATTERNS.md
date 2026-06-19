@@ -37,7 +37,7 @@ Feature 3 (Payments)
 **Auditor stores:**
 ```json
 {
-  "title": "E2E Audit: Portal Aurora Dashboard",
+  "title": "E2E Audit: [Feature Name]",
   "date": "2026-06-11",
   "audit_findings": {
     "critical": 2,
@@ -70,7 +70,7 @@ Feature 3 (Payments)
 **Fixer stores:**
 ```json
 {
-  "title": "E2E Fixes Applied: Portal Aurora Dashboard",
+  "title": "E2E Fixes Applied: [Feature Name]",
   "fixes_applied": [
     {
       "category": "config",
