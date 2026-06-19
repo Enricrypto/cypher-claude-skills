@@ -496,19 +496,19 @@ git push origin --delete feat/<task-name>
 
 ---
 
-## E2E Testing Pipeline System (NEW)
+## E2E Testing Loop (Updated with Auto-Remediation)
 
-The **E2E Testing Pipeline** is a complete orchestration system for building production-grade end-to-end test suites. It runs in three phases with dedicated agents for each step — audit → plan → generate → verify.
+The **E2E Testing Loop** is a complete orchestration system for building production-grade end-to-end test suites. It runs in four phases with dedicated agents for each step — audit → plan → generate → remediate → verify.
 
-### Why a Pipeline?
+### Why a Loop?
 
 Manual E2E test writing is slow and error-prone:
 - Tests don't match actual code → false confidence
 - Edge cases missed → bugs in production
 - Test infrastructure misconfigured → flaky tests on CI
-- No systematic approach to mocking, data isolation, or async handling
+- Failing tests require manual diagnosis and fixing (slow, error-prone)
 
-The E2E Pipeline solves this with **8 specialized agents** that handle every aspect of test coverage and infrastructure.
+The E2E Testing Loop solves this with **automated remediation** that systematically fixes failing tests:
 
 ### How It Works
 
@@ -528,17 +528,26 @@ Phase 2: Test Generation (2.5 hours)
   ├─ Planner: Map test scenarios from audit
   ├─ Generator: Create Playwright test files
   ├─ Test Auditor: Verify tests match actual code (Phase 2 audit)
-  ├─ Run Tests: Execute test suite
-  ├─ Healer: Fix any failing tests (on-demand, looping)
+  └─ Run Tests: Execute test suite
+  
+Phase 3: Remediation (AUTO if tests fail, 30-90 min)
+  ↓
+  ├─ Remediation Agent: 6-Phase Systematic Fix Methodology
+  │  ├─ Phase 1: DIAGNOSE (run tests, identify patterns)
+  │  ├─ Phase 2: ANALYZE (compare expected vs actual, categorize root causes)
+  │  ├─ Phase 3: FIX (apply fixes: API payloads, selectors, cleanup, timing, data)
+  │  ├─ Phase 4: VERIFY (re-run across all 3 browsers)
+  │  ├─ Phase 5: COMMIT (clear fix summary)
+  │  └─ Phase 6: PUSH (to remote branch)
   └─ Verifier: Confirm all fixes work end-to-end
 ```
 
-**Output:** Production-ready test suite (~80 tests, 3 browser projects, all AC covered)
+**Output:** Production-ready test suite (100% passing across 3 browsers, all AC covered)
 
 ### Quick Start
 
 ```bash
-Read ~/.claude/skills/software/e2e-pipeline/E2E_PIPELINE_ORCHESTRATION.md
+Read ~/.claude/skills/software/e2e-pipeline/E2E_LOOP_ORCHESTRATION.md
 ```
 
 This file contains:
@@ -554,56 +563,73 @@ This file contains:
 - **Environment-Based Rate Limiting**: Use separate rate limit configs for test vs production (`appsettings.Test.json`). Test env: 1000/window, Production: 10/5/3 per tier. Prevents flaky tests.
 - **Code-First Verification**: Always read component code BEFORE writing tests. Know when validation runs, where errors appear, what elements exist.
 - **Docker Networking**: Inside containers, use service names (`http://nginx`), not localhost. Each container's localhost is its own namespace.
+- **Systematic Test Remediation**: When tests fail, diagnose failures systematically (Phase 1), analyze root causes (Phase 2), apply fixes by category (Phase 3: API payloads, selectors, cleanup, timing, data), then verify across all browsers (Phase 4). This 6-phase methodology catches 95%+ of issues without re-running generation.
 
 ### Documentation
 
-- **Full Pipeline Guide**: `E2E_PIPELINE_ORCHESTRATION.md` (complete step-by-step)
+- **Full Loop Guide**: `E2E_LOOP_ORCHESTRATION.md` (complete step-by-step)
 - **Phase 0 Audit Checklist**: `reference/E2E_DEEP_AUDIT_CHECKLIST.md`
+- **Phase 3 Remediation**: `REMEDIATION_METHODOLOGY.md` (6-phase systematic fix guide)
+- **Error Categories**: `reference/ERROR_CATEGORIES.md` (error → root cause → fix mapping)
+- **Automated Workflow**: `workflows/e2e-full-loop-with-remediation.ts` (end-to-end automation)
 - **Playwright Patterns**: See `e2e-testing-playwright` skill below
 - **Test Categories & Plan**: `reference/TEST_PLAN.md` (post-audit)
 
 ### Diagrams
 
-**E2E Pipeline Phase Flow:**
+**E2E Loop Phase Flow:**
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                    E2E TESTING PIPELINE (8 Phases)              │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│  PHASE 0: AUDIT PREPARATION (60 min)                          │
-│  ┌─────────────────────────────────────────────────────────┐  │
-│  │ • Audit Reviewer:    Map routes, pages, components     │  │
-│  │ • Gap Remediation:   Fix audit discrepancies           │  │
-│  │ • Apply Corrections: Update E2E_TEST_CATEGORIES.md     │  │
-│  └──────────────────────────┬──────────────────────────────┘  │
-│                             │                                  │
-│  PHASE 1: INFRA FIX (20 min, OPTIONAL)                        │
-│  ┌──────────────────────────┴──────────────────────────────┐  │
-│  │ • Fixer: Rate limiting, healthchecks, test DB, env     │  │
-│  └──────────────────────────┬──────────────────────────────┘  │
-│                             │                                  │
-│  PHASE 2: TEST GENERATION (2.5 hours)                         │
-│  ┌──────────────────────────┴──────────────────────────────┐  │
-│  │ • Planner: Map test scenarios from audit               │  │
-│  │ • Generator: Create e2e/tests/**/*.spec.ts             │  │
-│  │ • Test Auditor: Verify tests match code (Phase 2 ✓)    │  │
-│  │ • Run: Execute test suite                              │  │
-│  │ • Healer: Fix failures (loop until ✓)                  │  │
-│  │ • Verifier: Confirm all fixes work                     │  │
-│  └──────────────────────────┬──────────────────────────────┘  │
-│                             │                                  │
-│  OUTPUT: ~80 tests passing, 3 browsers, all AC covered        │
-│                                                                 │
-└─────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│               E2E TESTING LOOP (4 Phases with Auto-Remediation)   │
+├──────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  PHASE 0: AUDIT PREPARATION (60 min)                           │
+│  ┌────────────────────────────────────────────────────────┐   │
+│  │ • Audit Reviewer:    Map routes, pages, components    │   │
+│  │ • Gap Remediation:   Fix audit discrepancies          │   │
+│  │ • Apply Corrections: Update E2E_TEST_CATEGORIES.md    │   │
+│  └─────────────────────────┬────────────────────────────┘   │
+│                            │                                  │
+│  PHASE 1: INFRA FIX (20 min, OPTIONAL)                       │
+│  ┌─────────────────────────┴────────────────────────────┐   │
+│  │ • Fixer: Rate limiting, healthchecks, test DB, env   │   │
+│  └─────────────────────────┬────────────────────────────┘   │
+│                            │                                  │
+│  PHASE 2: TEST GENERATION (2.5 hours)                        │
+│  ┌─────────────────────────┴────────────────────────────┐   │
+│  │ • Planner: Map test scenarios from audit             │   │
+│  │ • Generator: Create e2e/tests/**/*.spec.ts           │   │
+│  │ • Test Auditor: Verify tests match code (Phase 2 ✓)  │   │
+│  │ • Run: Execute test suite                            │   │
+│  └─────────────────────────┬────────────────────────────┘   │
+│                            │                                  │
+│         Tests FAIL?        │                                  │
+│            YES ↓           │ NO (tests pass)                  │
+│  ┌──────────────────────────────────────────────────────┐   │
+│  │ PHASE 3: REMEDIATION (AUTO, 30-90 min)              │   │
+│  │ ┌────────────────────────────────────────────────┐  │   │
+│  │ │ Remediation Agent: 6-Phase Systematic Fix      │  │   │
+│  │ │ • Phase 1: DIAGNOSE (cross-browser patterns)   │  │   │
+│  │ │ • Phase 2: ANALYZE (root causes)               │  │   │
+│  │ │ • Phase 3: FIX (API, selectors, data, timing)  │  │   │
+│  │ │ • Phase 4: VERIFY (all 3 browsers pass)        │  │   │
+│  │ │ • Phase 5: COMMIT (clear fix summary)          │  │   │
+│  │ │ • Phase 6: PUSH (to remote branch)             │  │   │
+│  │ └────────────────────────────────────────────────┘  │   │
+│  └─────────────────────────┬────────────────────────────┘   │
+│                            │                                  │
+│  OUTPUT: 100% tests passing, 3 browsers, all AC covered       │
+│                                                                  │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
-**Feature Factory + E2E Pipeline (Complete Feature Loop):**
+**Feature Loop + E2E Loop (Complete Automation):**
 
 ```
 Feature Idea
     │
-    ├─ FEATURE FACTORY (5 Stages)
+    ├─ FEATURE LOOP (5 Stages)
     │  ├─ Stage 1: Researcher → Researcher Report
     │  ├─ Stage 2: Story Writer → User Story + AC
     │  │           [CHECKPOINT 1: Approve story]
@@ -617,25 +643,28 @@ Feature Idea
     │  └─ Feature Consolidator → Extract patterns
     │
     ├─ FEATURE TESTED (After merge, OPTIONAL)
-    │  └─ E2E TESTING PIPELINE (8 Phases)
+    │  └─ E2E TESTING LOOP (4 Phases with Auto-Remediation)
     │     ├─ Phase 0: Audit codebase for test gaps
     │     ├─ Phase 1: Fix infrastructure (rate limit, etc.)
-    │     ├─ Phases 2–7: Generate tests, validate, run, heal
-    │     └─ Output: Production-ready E2E test suite
+    │     ├─ Phase 2: Generate tests
+    │     ├─ Phase 3: Auto-remediate failures (6-phase methodology)
+    │     │           → Diagnose → Analyze → Fix → Verify
+    │     │           → Commit → Push
+    │     └─ Output: Production-ready E2E test suite (100% passing)
     │
-    └─ ✅ FEATURE SHIPPED (code + tests + docs)
+    └─ ✅ FEATURE SHIPPED (code + unit tests + E2E tests + docs)
 ```
 
-### When to Use Feature Factory vs E2E Pipeline
+### When to Use Feature Loop vs E2E Loop
 
-**Use Feature Factory when:**
+**Use Feature Loop when:**
 - Starting a new feature or sprint
 - Need to design API contracts before implementation
 - Want automated acceptance tests for user stories
 - Need code review and validation before merge
 - Building unit tests + integration tests for components
 
-**Use E2E Pipeline when:**
+**Use E2E Loop when:**
 - Feature is already merged and in production (or staging)
 - Want comprehensive cross-browser E2E coverage
 - Need to test complex user journeys (multi-step flows, auth, payments)
@@ -643,8 +672,8 @@ Feature Idea
 - Automating test generation from codebase audit
 
 **Use Both Together when:**
-- Feature Factory writes code + unit tests
-- E2E Pipeline builds comprehensive E2E test suite after merge
+- Feature Loop writes code + unit tests
+- E2E Loop builds comprehensive E2E test suite after merge
 - Combined: 100% AC coverage (unit + integration + E2E)
 
 ---
