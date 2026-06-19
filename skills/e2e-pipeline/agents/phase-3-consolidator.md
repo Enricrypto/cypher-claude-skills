@@ -190,7 +190,7 @@ This is the E2E testing consolidation report for your feature.
 **Metrics:**
 - Phase -1 (Audit + Fix): 18 minutes
 - Phase 3 (Plan + Generate): 42 minutes
-- Total pipeline: 60 minutes
+- Total loop: 60 minutes
 - Tests generated: 12
 - Tests passing: 12/12 ✅
 - Confidence score: 93%
@@ -299,7 +299,7 @@ This is the E2E testing consolidation report for your feature.
 | | Executor | 3 min | Run tests first time |
 | | Healer | 5 min | Fix 2 failures (1 attempt each) |
 | | Consolidator | 10 min | This report |
-| **TOTAL** | | **68 min** | End-to-end pipeline |
+| **TOTAL** | | **68 min** | End-to-end loop |
 
 **Comparison:**
 - Feature 1 (Auth): 90 minutes (baseline, first feature)

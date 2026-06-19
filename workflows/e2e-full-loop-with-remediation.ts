@@ -1,19 +1,19 @@
 /**
- * E2E Full Pipeline with Automated Remediation
+ * E2E Full Loop with Automated Remediation
  *
- * Orchestrates complete E2E testing pipeline:
+ * Orchestrates complete E2E testing loop:
  * Phase 0: Code Audit
  * Phase 1: Infrastructure Fix (optional)
  * Phase 2: Test Generation
  * Phase 3: Remediation (auto-runs if tests fail)
  *
  * Usage:
- * npm run e2e:pipeline -- --feature "advertiser-dashboard" --path "/painel/dashboard"
+ * npm run e2e:loop -- --feature "advertiser-dashboard" --path "/painel/dashboard"
  */
 
 export const meta = {
-  name: 'e2e-full-pipeline-with-remediation',
-  description: 'Complete E2E testing pipeline: audit → generate → remediate → commit',
+  name: 'e2e-full-loop-with-remediation',
+  description: 'Complete E2E testing loop: audit → generate → remediate → commit',
   phases: [
     { title: 'Phase 0: Code Audit', detail: 'Analyze codebase structure, routes, components' },
     { title: 'Phase 1: Infrastructure Fix', detail: 'Apply backend config/test env fixes' },

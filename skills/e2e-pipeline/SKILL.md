@@ -41,8 +41,8 @@ Phase 3: Remediation (NEW - AUTO if tests fail)
 
 ## Quick Navigation
 
-**🔗 Full Pipeline Guide:**
-Read: `E2E_PIPELINE_ORCHESTRATION.md`
+**🔗 Full Loop Guide:**
+Read: `E2E_LOOP_ORCHESTRATION.md`
 
 This file contains:
 - ✅ Complete Phase 0, 1, 2 structure
@@ -170,12 +170,12 @@ If Phase 2 tests fail:
 
 ---
 
-## Integration with Full Pipeline
+## Integration with Full Loop
 
 For fully automated orchestration (Phases 0-3):
 
 ```bash
-npm run e2e:pipeline -- --feature "feature-name" --category "Category"
+npm run e2e:loop -- --feature "feature-name" --category "Category"
 ```
 
 The workflow:
@@ -189,6 +189,6 @@ The workflow:
 
 ## Next Step
 
-**Manual flow:** Read `E2E_PIPELINE_ORCHESTRATION.md` for Phase 0-2  
-**Automated flow:** Use the `e2e-full-pipeline-with-remediation` workflow  
+**Manual flow:** Read `E2E_LOOP_ORCHESTRATION.md` for Phase 0-2  
+**Automated flow:** Use the `e2e-full-loop-with-remediation` workflow  
 **Fixing failures:** Follow `REMEDIATION_METHODOLOGY.md` when tests fail

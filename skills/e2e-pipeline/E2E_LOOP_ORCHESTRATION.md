@@ -1,10 +1,10 @@
-# E2E Testing Pipeline Orchestration
+# E2E Testing Loop Orchestration
 
 **Version:** 2.0  
 **Status:** Active  
 **Last Updated:** 2026-06-11
 
-Complete end-to-end pipeline for generating production-ready Playwright tests for Portal Aurora.
+Complete end-to-end loop for generating production-ready Playwright tests for Portal Aurora.
 
 ---
 
@@ -272,7 +272,7 @@ npm run test:e2e
 
 ---
 
-## Quick Start: Run Full Pipeline
+## Quick Start: Run Full Loop
 
 ### Option A: Manual Sequential (Recommended for First Run)
 
@@ -313,7 +313,7 @@ npm run test:e2e
 
 ```bash
 #!/bin/bash
-# ./scripts/e2e-full-pipeline.sh
+# ./scripts/e2e-full-loop.sh
 
 set -e
 
@@ -488,7 +488,7 @@ Phase 3 Output:
 | 3 | Run Tests | 15 min | ⏳ Ready |
 | 3 | Healer (if needed) | 30 min | ⏳ On-demand |
 | 3 | **Verifier (NEW)** | **45 min** | ⏳ Ready |
-| **Total** | **Full Pipeline** | **~4 hours** | ✅ Ready to start |
+| **Total** | **Full Loop** | **~4 hours** | ✅ Ready to start |
 
 ---
 
@@ -507,9 +507,9 @@ Phase 3 Output:
    # Task: Add missing rate limit config, env vars, etc.
    ```
 
-3. **Or run full pipeline automatically**
+3. **Or run full loop automatically**
    ```bash
-   ./scripts/e2e-full-pipeline.sh
+   ./scripts/e2e-full-loop.sh
    ```
 
 ---
