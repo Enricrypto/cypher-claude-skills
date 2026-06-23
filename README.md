@@ -496,84 +496,168 @@ git push origin --delete feat/<task-name>
 
 ---
 
-## E2E Testing Loop (Updated with Auto-Remediation)
+## E2E Testing Loop System (v1.0: Harness-Driven, 100% Acceptance)
 
-The **E2E Testing Loop** is a complete orchestration system for building production-grade end-to-end test suites. It runs in four phases with dedicated agents for each step — audit → plan → generate → remediate → verify.
+The **E2E Testing Loop** is a complete, production-ready orchestration system for building end-to-end test suites with **guaranteed reliability**. It enforces 100% acceptance (no partial passes), mandatory Docker rebuilds (no stale-state bugs), and automatic human escalation when limits are reached.
+
+### Start Here
+
+**New to the E2E loop?** Read the quick-start guide:
+
+```bash
+Read: e2e-loop/docs/README.md
+```
+
+This gives you:
+- 🚀 Quick Start (5 minutes)
+- 🏗️ Architecture (how it works)
+- 📋 Phase Guide (detailed walkthrough)
+- 🔧 Reference (error categories, contracts, schemas)
+
+### What's New in v1.0
+
+✅ **Harness-Driven Guardrails** — Only the harness decides when phases advance (not agent mood)  
+✅ **100% Acceptance Only** — Loop requires 100% pass rate; if not achievable, escalates to human  
+✅ **Mandatory Docker Rebuild** — Fresh environment before every test run (prevents stale-state bugs)  
+✅ **Playwright MCP Integration** — Evaluator verifies selectors/APIs exist before tests run (catches ghost features)  
+✅ **Regression Detection** — Before/after comparison automatically rolls back agent fixes that broke tests  
+✅ **Hard Limits** — Max 5 iterations, 1 hour timeout, 500k token budget (prevents infinite loops)  
+✅ **Phase-Organized Artifacts** — Each phase stores outputs in dedicated folders (easy navigation)  
+✅ **Structured Output** — All agent outputs are JSON/YAML (no prose parsing errors)  
+✅ **Clear Escalation Path** — When limits hit, escalates to human with full context preserved  
+
+### The Problem It Solves
+
+Your original E2E loop had **10 critical failure modes** where agent decision-making caused bugs:
+
+1. ❌ Docker rebuild forgotten → stale container → false test passes
+2. ❌ Phase advancement uncontrolled → PR opened without tests passing
+3. ❌ Evaluator tested stale code → no verification of live app
+4. ❌ Acceptance criteria vague → "good enough" acceptance
+5. ❌ Error categorization guessed → wrong fix applied
+6. ❌ Agent output unparseable → harness made bad decisions
+7. ❌ Regressions undetected → agent broke something, didn't notice
+8. ❌ Loop never terminated → could run forever
+9. ❌ Artifacts scattered → agents couldn't find things
+10. ❌ No escalation path → no way out when stuck
+
+**All 10 fixed in v1.0.** The harness now enforces all rules deterministically.
 
 ### Why a Loop?
 
-Manual E2E test writing is slow and error-prone:
-- Tests don't match actual code → false confidence
-- Edge cases missed → bugs in production
-- Test infrastructure misconfigured → flaky tests on CI
-- Failing tests require manual diagnosis and fixing (slow, error-prone)
+Manual E2E test writing is slow and error-prone. The E2E Testing Loop solves this with **automated auditing, generation, verification, and remediation** that systematically:
+- Audits the codebase first (prevents guessing)
+- Generates tests from the audit (prevents hallucination)
+- Audits the generated tests (catches ghost features)
+- Tests on fresh Docker (no stale state)
+- Auto-remediates failures (up to 5 tries)
+- Escalates to human if unreachable (no infinite loops)
 
-The E2E Testing Loop solves this with **automated remediation** that systematically fixes failing tests:
-
-### How It Works
+### Phase Flow
 
 ```
-Phase 0: Audit Preparation (60 min)
-  ↓
-  ├─ Audit Reviewer: Validate codebase audit completeness (95%+ target)
-  ├─ Gap Remediation: Fix audit discrepancies
-  └─ Apply Corrections: Update audit docs
+Phase -1: AUDIT PREPARATION
+  ├─ Code Auditor → Comprehensive audit
+  ├─ Audit Reviewer → Validate (≥95% required)
+  └─ Gap Remediation → Fix gaps (if < 95%)
   
-Phase 1: Infrastructure Fix (OPTIONAL, 20 min)
-  ↓
-  └─ Fixer: Apply config/env corrections (rate limiting, healthchecks, etc.)
+Phase 0: INFRASTRUCTURE (Optional)
+  └─ Fixer → Apply optional fixes
   
-Phase 2: Test Generation (2.5 hours)
-  ↓
-  ├─ Planner: Map test scenarios from audit
-  ├─ Generator: Create Playwright test files
-  ├─ Test Auditor: Verify tests match actual code (Phase 2 audit)
-  └─ Run Tests: Execute test suite
+Phase 1: TEST GENERATION
+  ├─ Test Planner → Map scenarios
+  ├─ Test Generator → Create test files
+  ├─ Test Auditor (Playwright MCP) → Verify selectors/APIs exist
+  ├─ Mandatory Docker Rebuild (Harness)
+  └─ Run Tests (Harness) → Fresh results
   
-Phase 3: Remediation (AUTO if tests fail, 30-90 min)
-  ↓
-  ├─ Remediation Agent: 6-Phase Systematic Fix Methodology
-  │  ├─ Phase 1: DIAGNOSE (run tests, identify patterns)
-  │  ├─ Phase 2: ANALYZE (compare expected vs actual, categorize root causes)
-  │  ├─ Phase 3: FIX (apply fixes: API payloads, selectors, cleanup, timing, data)
-  │  ├─ Phase 4: VERIFY (re-run across all 3 browsers)
-  │  ├─ Phase 5: COMMIT (clear fix summary)
-  │  └─ Phase 6: PUSH (to remote branch)
-  └─ Verifier: Confirm all fixes work end-to-end
+Phase 2: REMEDIATION (If tests failed, max 5 iterations)
+  └─ Repeat:
+     ├─ Mandatory Docker Rebuild (Harness)
+     ├─ Remediation Agent → Fix failures
+     ├─ Run Tests (Harness)
+     └─ Harness checks:
+        ├─ 100% pass? → Advance
+        ├─ Regressions? → Rollback, escalate
+        ├─ Max iterations? → Escalate
+        └─ Improving? → Loop again
+  
+Phase 3: FINALIZE
+  └─ Create commit summary, ready for PR
 ```
 
-**Output:** Production-ready test suite (100% passing across 3 browsers, all AC covered)
-
-### Quick Start
-
-```bash
-Read ~/.claude/skills/software/e2e-pipeline/E2E_LOOP_ORCHESTRATION.md
-```
-
-This file contains:
-- ✅ Complete 8-phase structure with agent definitions
-- ✅ Step-by-step execution guide with decision points
-- ✅ Success criteria for each phase
-- ✅ Timeline estimates and what to expect
-
-### Key Learnings (June 2026)
-
-**Critical Patterns:**
-- **Fixture Organization**: Fixtures MUST be at `e2e/tests/fixtures.ts` (test directory root), NOT parent `e2e/`. This is the official Playwright pattern used by Stripe and Microsoft. Parent imports cause unrecoverable module resolution failures — only reorganization fixes it.
-- **Environment-Based Rate Limiting**: Use separate rate limit configs for test vs production (`appsettings.Test.json`). Test env: 1000/window, Production: 10/5/3 per tier. Prevents flaky tests.
-- **Code-First Verification**: Always read component code BEFORE writing tests. Know when validation runs, where errors appear, what elements exist.
-- **Docker Networking**: Inside containers, use service names (`http://nginx`), not localhost. Each container's localhost is its own namespace.
-- **Systematic Test Remediation**: When tests fail, diagnose failures systematically (Phase 1), analyze root causes (Phase 2), apply fixes by category (Phase 3: API payloads, selectors, cleanup, timing, data), then verify across all browsers (Phase 4). This 6-phase methodology catches 95%+ of issues without re-running generation.
+**Output:** Production-ready test suite (100% passing on all 3 browsers, all AC covered, fresh Docker state guaranteed)
 
 ### Documentation
 
-- **Full Loop Guide**: `E2E_LOOP_ORCHESTRATION.md` (complete step-by-step)
-- **Phase 0 Audit Checklist**: `reference/E2E_DEEP_AUDIT_CHECKLIST.md`
-- **Phase 3 Remediation**: `REMEDIATION_METHODOLOGY.md` (6-phase systematic fix guide)
-- **Error Categories**: `reference/ERROR_CATEGORIES.md` (error → root cause → fix mapping)
-- **Automated Workflow**: `workflows/e2e-full-loop-with-remediation.ts` (end-to-end automation)
-- **Playwright Patterns**: See `e2e-testing-playwright` skill below
-- **Test Categories & Plan**: `reference/TEST_PLAN.md` (post-audit)
+**Complete Guide:**  
+```bash
+Read: e2e-loop/docs/README.md              # Overview
+Read: e2e-loop/docs/QUICK_START.md         # 5-minute quickstart
+Read: e2e-loop/docs/ARCHITECTURE.md        # Deep dive
+Read: e2e-loop/docs/PHASE_GUIDE.md         # Detailed phase walkthrough
+Read: e2e-loop/reference/QUICK_REFERENCE.md # Quick lookup
+```
+
+**Key Files:**
+- `e2e-loop/harness/` — Guardrail infrastructure (phase gates, error categories, remediation engine)
+- `e2e-loop/workflows/` — Orchestrator workflow
+- `e2e-loop/artifacts/` — Phase outputs (auto-created)
+- `e2e-loop/skills/` — Agent definitions
+- `e2e-loop/docs/` — Full documentation
+
+### Key Learnings & Critical Patterns
+
+**From v1.0 Implementation (June 23, 2026):**
+
+1. **Harness, Not Agent, Decides Advancement**
+   - Agents produce artifacts; harness validates against contracts
+   - No agent decides phase completion (reduces self-approval bugs)
+   - All phase gates checkable automatically
+
+2. **100% Acceptance Model**
+   - No partial passes; < 100% → escalate to human
+   - Prevents "almost working" from shipping
+   - Clear go/no-go decision at each phase
+
+3. **Mandatory Docker Rebuild**
+   - Before EVERY test run, hard requirement
+   - Prevents stale-state bugs (old code tested)
+   - Non-negotiable harness step
+
+4. **Live Verification with Playwright MCP**
+   - Evaluator navigates actual pages before tests run
+   - Catches ghost features (tests for non-existent UI)
+   - Verifies selectors exist and APIs respond correctly
+
+5. **Error Categorization as Lookup Table**
+   - Deterministic pattern → category → fix mapping
+   - Prevents wrong fix from wrong categorization
+   - Harness-provided, not agent-inferred
+
+6. **Phase-Organized Artifacts**
+   - Each phase has its own folder (phase-0-audit/, etc.)
+   - Easy navigation, no scattered files
+   - Agents know exactly where to look
+
+7. **Regression Detection**
+   - Before/after comparison catches agent-introduced breaks
+   - Automatic rollback on regression
+   - Prevents broken code from advancing
+
+8. **Hard Limits Prevent Loops**
+   - Max 5 remediation iterations
+   - 1 hour timeout
+   - 500k token budget
+   - Escalates when hit
+
+### Reference
+
+- **Harness Implementation**: `e2e-loop/docs/HARNESS_IMPLEMENTATION_SUMMARY.md` (technical deep dive)
+- **Error Categories**: `e2e-loop/harness/error-categories.ts` (deterministic mapping)
+- **Phase Contracts**: `e2e-loop/harness/phase-gates.ts` (acceptance criteria)
+- **Remediation Engine**: `e2e-loop/harness/remediation-engine.ts` (loop orchestrator)
+- **Playwright Integration**: See `e2e-testing-playwright` skill below
 
 ### Diagrams
 
@@ -869,40 +953,63 @@ Enforces strict RED → GREEN → REFACTOR cycle. Write failing test first, watc
 
 #### `e2e-pipeline` _(directory skill)_
 
-**Source:** cypher-claude-skills (custom)
+**Source:** cypher-claude-skills (custom)  
+**Location:** `e2e-loop/` (organized harness-driven system)  
+**Version:** 1.0 (Harness-Driven, 100% Acceptance)
 
-Complete E2E test suite orchestration system. Manages the full lifecycle from codebase audit through test generation, validation, and execution with dedicated agents for each phase.
+Complete E2E test suite orchestration system with **guaranteed reliability**. Manages the full lifecycle from codebase audit through test generation, validation, and automated remediation with guardrails at every phase.
 
 **Used by Feature Factory:** Test Verifier (Agent 6) — can invoke standalone or as part of feature factory
 
-**When to use:** Building production E2E test suites for web applications. Especially valuable when starting from scratch or when testing complex user flows (auth, payments, multi-step interactions).
+**When to use:** Building production E2E test suites for web applications. Especially valuable for:
+- Complex user flows (auth, payments, multi-step interactions)
+- Cross-browser compatibility testing (Chromium, Firefox, Mobile Safari)
+- Guaranteed 100% pass rate with no stale-state bugs
+- Systems that require deterministic, reliable test automation
 
 **How to invoke:**
 
+```bash
+# Quick start (5 min)
+Read e2e-loop/docs/README.md
+
+# Full implementation guide
+Read e2e-loop/docs/QUICK_START.md
+
+# Architecture & design decisions
+Read e2e-loop/docs/ARCHITECTURE.md
+
+# Detailed phase-by-phase walkthrough
+Read e2e-loop/docs/PHASE_GUIDE.md
+
+# Quick reference (error categories, contracts, etc.)
+Read e2e-loop/reference/QUICK_REFERENCE.md
 ```
-"Help me build an E2E test suite"
-"Set up comprehensive E2E tests for this feature"
-Read ~/.claude/skills/software/e2e-pipeline/E2E_PIPELINE_ORCHESTRATION.md
-```
 
-**Workflow (8 phases):**
+**Workflow (4 Phases):**
 
-1. **Phase 0** — Audit codebase for test coverage gaps
-2. **Phase 1** — Fix infrastructure (rate limiting, healthchecks, env config)
-3. **Phase 2** — Generate comprehensive test plan
-4. **Phases 3–5** — Create tests, validate against code, run suite
-5. **Phases 6–7** — Heal failures, verify all fixes work end-to-end
-6. **Phase 8** — Archive test suite and document patterns
+1. **Phase -1: Audit Preparation** — Code Auditor + Reviewer validate codebase (≥95%)
+2. **Phase 0: Infrastructure** — Optional infrastructure fixes (rate limiting, healthchecks)
+3. **Phase 1: Test Generation** — Plan + Generate + Audit tests + Run
+4. **Phase 2: Remediation** — Auto-fix failures (max 5 iterations) or escalate
 
-**Key features:**
-- **Code-first approach** — audit actual routes/pages/components before writing tests
-- **Two-phase validation** — Phase 0 (audit codebase), Phase 4 (audit generated tests)
-- **Automated healing** — on-demand test failure detection and repair
-- **Environment separation** — test vs production configs to prevent flakiness
-- **Docker integration** — runs inside Docker Compose with healthchecks
-- **Pattern documentation** — archives reusable test patterns for future features
+**Key Features (v1.0):**
+- ✅ **Harness-Driven Guardrails** — Only harness decides phase advancement
+- ✅ **100% Acceptance** — No partial passes; escalates if unreachable
+- ✅ **Mandatory Docker Rebuild** — Fresh environment before every test run
+- ✅ **Playwright MCP Integration** — Live verification of selectors/APIs before tests
+- ✅ **Regression Detection** — Before/after comparison with auto-rollback
+- ✅ **Deterministic Error Handling** — Lookup table, not agent inference
+- ✅ **Hard Limits** — Max 5 iterations, 1 hour, 500k tokens
+- ✅ **Phase-Organized Artifacts** — Clean folder structure
+- ✅ **Structured Output** — JSON schemas for all agent outputs
+- ✅ **Clear Escalation** — Human review with full context when needed
 
-**Skill includes:** Full orchestration guide, agent definitions, execution checklist, timeline estimates.
+**Files to Know:**
+- `e2e-loop/harness/phase-gates.ts` — Phase contracts & validation
+- `e2e-loop/harness/error-categories.ts` — Error → fix mapping
+- `e2e-loop/harness/remediation-engine.ts` — Loop orchestrator
+- `e2e-loop/workflows/e2e-full-loop-with-remediation.ts` — Orchestrator
 
 **Learn more:** Pair with `e2e-testing-playwright` for tactical Playwright patterns.
 
