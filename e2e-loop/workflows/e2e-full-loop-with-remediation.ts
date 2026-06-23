@@ -22,6 +22,15 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
+import {
+  phaseContracts,
+  canAdvancePhase,
+  validateTestPassRate,
+  getRemediationDecision,
+  generateGateSummary,
+  PhaseContext,
+  TestResults
+} from '../harness/test-phase-gates';
 
 export const meta = {
   name: 'e2e-full-loop-with-remediation',
@@ -453,14 +462,38 @@ saveJSONArtifact(getArtifactPath(testPhaseDir, 'TEST_RESULTS.json'), testResults
 
 log(`📊 Test Results: ${testResults.passed}/${testResults.total} passed (${(testResults.passRate * 100).toFixed(0)}%)`);
 
+// ============================================================================
+// PHASE 1 GATE CHECK: Tests must be valid (even if failing)
+// ============================================================================
+
+const phase1Context: PhaseContext = {
+  phase: 1,
+  testResults,
+  metadata: {
+    testPlanCreated: true,
+    testsGenerated: true,
+    testAuditPassed: true
+  }
+};
+
+const phase1Gate = await canAdvancePhase(1, phase1Context);
+log(`\n${generateGateSummary(1, phase1Gate)}`);
+
+if (!phase1Gate.canAdvance) {
+  log('❌ Phase 1 gate FAILED. Cannot proceed.');
+  log(`Reason: ${phase1Gate.details}`);
+  process.exit(1);
+}
+
+log('✅ Phase 1 gate PASSED - test execution valid');
+
 if (testResults.passRate === 1.0) {
-  log('✅ All tests passing - skipping remediation');
-  phase('Phase 3: Finalize');
+  log('✅ All tests passing (100%) - skipping remediation, advancing to Phase 3');
 } else {
-  log(`⚠️  ${testResults.failed} test(s) failing - triggering remediation`);
+  log(`⚠️  ${testResults.failed} test(s) failing - entering Phase 2 remediation loop`);
 
   // ============================================================================
-  // Phase 2: Remediation Loop
+  // Phase 2: Remediation Loop (with Deterministic Gates)
   // ============================================================================
 
   phase('Phase 2: Remediation');
@@ -469,9 +502,11 @@ if (testResults.passRate === 1.0) {
   createPhaseDir(remediationPhaseDir);
 
   log('🔄 Starting remediation loop (max 5 iterations)');
+  log('   GATE: Tests MUST reach 100% pass rate to advance to Phase 3\n');
 
   const maxRemediationIterations = 5;
   let currentPassRate = testResults.passRate;
+  let currentTestResults = testResults;
 
   for (let iteration = 1; iteration <= maxRemediationIterations; iteration++) {
     log(`\n🔄 Remediation Iteration ${iteration}/${maxRemediationIterations}`);
@@ -518,31 +553,106 @@ Output: Fixed test code ready to re-run.
       total: 45,
       passed: 40 + iteration, // Simulate improvement
       failed: 5 - iteration,
-      passRate: (40 + iteration) / 45
+      passRate: (40 + iteration) / 45,
+      skipped: 0,
+      failedTests: []
     };
 
     currentPassRate = newTestResults.passRate;
+    currentTestResults = newTestResults;
 
     log(`  ✅ Pass rate: ${(currentPassRate * 100).toFixed(0)}% (${newTestResults.passed}/${newTestResults.total})`);
 
-    // Check if 100% pass rate achieved
-    if (currentPassRate === 1.0) {
-      log('✅ 100% PASS RATE ACHIEVED');
-      saveJSONArtifact(getArtifactPath(remediationPhaseDir, 'FINAL_TEST_RESULTS.json'), newTestResults);
-      break;
-    }
+    // ============================================================================
+    // PHASE 2 GATE CHECK: Test pass rate validation
+    // ============================================================================
 
-    // Check if max iterations exceeded
-    if (iteration === maxRemediationIterations) {
-      log(`\n❌ Max remediation iterations (${maxRemediationIterations}) reached`);
-      log(`Pass rate: ${(currentPassRate * 100).toFixed(0)}%`);
+    const phase2Context: PhaseContext = {
+      phase: 2,
+      testResults: newTestResults,
+      remediationIterations: iteration,
+      metadata: {
+        allBrowsersPass: currentPassRate === 1.0
+      }
+    };
+
+    const passRateValidation = validateTestPassRate(newTestResults);
+    const remediationDecision = getRemediationDecision(iteration, newTestResults, maxRemediationIterations);
+
+    log(`  📋 Gate Status: ${remediationDecision.reason}`);
+
+    // Check decision
+    if (remediationDecision.action === 'SUCCESS') {
+      log(`\n✅ PHASE 2 GATE PASSED: 100% pass rate achieved at iteration ${iteration}`);
+
+      const phase2Gate = await canAdvancePhase(2, {
+        ...phase2Context,
+        testResults: newTestResults
+      });
+
+      log(`${generateGateSummary(2, phase2Gate)}`);
+
+      if (phase2Gate.canAdvance) {
+        log('✅ All Phase 2 criteria met - advancing to Phase 3');
+        saveJSONArtifact(getArtifactPath(remediationPhaseDir, 'FINAL_TEST_RESULTS.json'), newTestResults);
+        break;
+      }
+    } else if (remediationDecision.action === 'ESCALATE') {
+      // Max iterations exceeded
+      log(`\n❌ PHASE 2 GATE FAILED: ${remediationDecision.reason}`);
+
+      const phase2Gate = await canAdvancePhase(2, phase2Context);
+      log(`${generateGateSummary(2, phase2Gate)}`);
+
       log(`\n⛔ ESCALATING TO HUMAN REVIEW`);
-      log(`Reason: Unable to reach 100% pass rate after ${maxRemediationIterations} iterations`);
-      log(`Artifacts ready: ${remediationPhaseDir}`);
+      log(`Cannot reach 100% pass rate after ${maxRemediationIterations} iterations`);
+      log(`Final pass rate: ${passRateValidation.passRate}`);
+      log(`Failed tests: ${newTestResults.failed}`);
+      log(`\nArtifacts available: ${remediationPhaseDir}`);
+
+      saveJSONArtifact(getArtifactPath(remediationPhaseDir, 'FINAL_TEST_RESULTS_ESCALATED.json'), {
+        ...newTestResults,
+        escalationReason: 'Max iterations exceeded without reaching 100% pass rate'
+      });
+
       process.exit(1); // Stop and wait for human intervention
+    } else {
+      // Continue remediation
+      log(`  → Continuing to iteration ${iteration + 1}...`);
     }
   }
 }
+
+// ============================================================================
+// FINAL GATE CHECK: Verify Phase 2 passed before advancing to Phase 3
+// ============================================================================
+
+log('\n' + '='.repeat(70));
+log('FINAL GATE CHECK: Verifying readiness for Phase 3');
+log('='.repeat(70));
+
+const finalPhase2Context: PhaseContext = {
+  phase: 2,
+  testResults: currentTestResults,
+  remediationIterations: 0,
+  metadata: {
+    phase2Passed: currentTestResults.passRate === 1.0 && currentTestResults.failed === 0
+  }
+};
+
+const finalPhase2Gate = await canAdvancePhase(2, finalPhase2Context);
+
+log(`${generateGateSummary(2, finalPhase2Gate)}`);
+
+if (!finalPhase2Gate.canAdvance) {
+  log('\n❌ CANNOT ADVANCE: Phase 2 gate not passed');
+  log(`Pass rate: ${(currentTestResults.passRate * 100).toFixed(0)}%`);
+  log(`Failed tests: ${currentTestResults.failed}`);
+  log('\nPhase 3 will NOT execute until all tests pass.');
+  process.exit(1);
+}
+
+log('✅ Phase 2 gate PASSED - All prerequisites met for Phase 3\n');
 
 // ============================================================================
 // Phase 3: Finalize
