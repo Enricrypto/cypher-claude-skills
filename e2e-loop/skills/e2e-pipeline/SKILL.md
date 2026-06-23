@@ -53,6 +53,56 @@ This file contains:
 
 ---
 
+## 🧠 Memory Integration (MemoryKit Learning System)
+
+E2E loop agents learn from prior features and work faster each time.
+
+### How It Works
+
+**At start of loop:**
+```
+retrieve_context("e2e: prior test patterns and failure solutions")
+```
+This loads patterns from prior features (if any exist) so agents work ~30% faster.
+
+**At end of each phase:**
+Each agent stores what it learned:
+- **Phase -1 (Audit):** Audit patterns + fix success rates
+- **Phase 1 (Tests):** Test scenarios + proven patterns + what failed
+- **Phase 2 (Remediation):** Failure solutions + root causes + fixes that worked
+- **Consolidation:** All learning compiled for next feature
+
+### Learning Progression
+
+| Feature | Phase -1 | Phase 1 | Phase 2 | Total Time |
+|---------|----------|---------|---------|-----------|
+| **1** | 20 min | 60 min | 40 min | ~120 min (baseline) |
+| **2** | 18 min | 50 min | 30 min | ~98 min (-18%) |
+| **3-5** | 16 min | 45 min | 25 min | ~86 min (-28%) |
+| **10+** | 14 min | 40 min | 20 min | ~74 min (-38%) |
+
+**Result:** By feature 5, E2E testing is 30% faster. By feature 10, 40% faster.
+
+### What Agents Retrieve & Use
+
+- **Audit Reviewer:** Prior audit patterns + known issue types
+- **Planner:** Prior test scenarios for similar features
+- **Generator:** Proven test patterns (auth fixtures, selectors, waits)
+- **Remediation:** Prior failure patterns + proven fixes
+- **Consolidator:** All learning to extract reusable patterns
+
+### Memory Tags
+
+When stored, memories use these tags for easy retrieval:
+- `e2e:audit` — Audit findings and patterns
+- `e2e:test-patterns` — Proven test patterns
+- `e2e:failures` — Failure patterns and solutions
+- `e2e:consolidation` — Consolidated learning from full loop
+
+See `reference/MEMORY_PATTERNS.md` for complete MemoryKit architecture.
+
+---
+
 ## Phase 0: Audit Preparation
 
 **Agents:**

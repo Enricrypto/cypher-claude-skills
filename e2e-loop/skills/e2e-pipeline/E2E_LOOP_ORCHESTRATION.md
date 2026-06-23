@@ -37,6 +37,86 @@ Complete end-to-end loop for generating production-ready Playwright tests for Po
 
 ---
 
+## 🧠 Memory Integration (MemoryKit)
+
+### Start of Loop: Retrieve Prior Learning
+
+**Before Phase -1, call:**
+```bash
+retrieve_context("e2e: prior audit findings, test patterns, and failure solutions")
+```
+
+This loads learning from previous features:
+- ✅ Audit patterns (what to look for, success rates)
+- ✅ Test scenarios (typical count, edge cases often missed)
+- ✅ Code patterns (how APIs respond, selector stability)
+- ✅ Failure solutions (common errors, proven fixes)
+
+**Pass this context to Audit Reviewer Agent** so it knows:
+- What issues commonly appear
+- Which fixes are reliably auto-fixable
+- Where to focus audit effort
+
+### End of Each Phase: Store Learning
+
+**After Phase -1 (Audit Consolidation):**
+```bash
+store_memory(
+  title="E2E Audit Patterns: [Feature Name]",
+  content="[AUDIT findings, patterns found, success rates]",
+  tags=["e2e:audit", "e2e:consolidation"],
+  scope="global"  # Patterns reuse across projects
+)
+```
+
+**After Phase 1 (Infrastructure Fixes):**
+```bash
+store_memory(
+  title="E2E Infrastructure Fixes: [Feature Name]",
+  content="[What was fixed, how, success rate]",
+  tags=["e2e:fixes"],
+  scope="global"
+)
+```
+
+**After Phase 2 (Test Generation):**
+```bash
+store_memory(
+  title="E2E Test Patterns: [Feature Name]",
+  content="[Scenarios tested, patterns used, failure patterns, solutions]",
+  tags=["e2e:test-patterns", "e2e:failures"],
+  scope="global"
+)
+```
+
+**After Full Loop (Consolidation):**
+```bash
+store_memory(
+  title="E2E Consolidation: [Feature Name]",
+  content="[Complete execution metrics, patterns reused, confidence scores, recommendations]",
+  tags=["e2e:consolidation"],
+  scope="global"
+)
+```
+
+### How Agents Use Retrieved Learning
+
+- **Audit Reviewer:** Knows what patterns were found before → prioritizes audit effort
+- **Planner:** Knows typical test scenario counts → estimates scenario count
+- **Generator:** Knows proven patterns (auth, selectors, waits) → reuses them
+- **Remediation:** Knows prior failures and fixes → applies proven solutions faster
+
+### Expected Memory Growth
+
+Each feature adds patterns, but consolidation removes duplicates. Growth is logarithmic:
+- Feature 1: 5-8 new patterns
+- Feature 2-3: 3-5 new patterns (reusing Feature 1)
+- Feature 5-10: 2-3 new patterns (most patterns are known)
+
+See `reference/MEMORY_PATTERNS.md` for detailed memory architecture.
+
+---
+
 ## Phase 0: Audit Preparation
 
 ### Purpose
