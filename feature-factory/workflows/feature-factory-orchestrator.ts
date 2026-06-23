@@ -42,6 +42,13 @@ import {
 } from '../harness/error-categories';
 
 import {
+  auditExecution,
+  validateExecutionGate,
+  generateExecutionReport,
+  ExecutionAudit
+} from '../harness/execution-gates';
+
+import {
   FeatureState,
   createFeatureState,
   recordAgentStep,
@@ -422,6 +429,58 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
     }
 
     state = recordAgentStep(state, 4, '06-test-verifier', 'PASS', testOutput);
+
+    // ========================================================================
+    // EXECUTION VERIFICATION GATE (Reality Check for Tests)
+    // ========================================================================
+    // Prevent test hallucinations: verify tests actually ran and passed
+
+    log('\n🔍 Verifying test execution (ensuring tests actually ran and passed 100%)...\n');
+
+    let executionAudit: ExecutionAudit | null = null;
+    try {
+      executionAudit = await auditExecution(process.cwd());
+      log(generateExecutionReport(executionAudit));
+
+      const executionDecision = validateExecutionGate(executionAudit);
+
+      if (!executionDecision.canAdvance) {
+        log('\n❌ CRITICAL: Test execution verification failed!\n');
+        log(`Pass rate: ${(executionDecision.passRate * 100).toFixed(1)}%`);
+        log(`Blockers:`);
+        executionDecision.blockers.forEach(b => {
+          log(`  ❌ ${b}`);
+        });
+        log(`\nRemediation: ${executionDecision.remediation}`);
+
+        state = recordEscalation(
+          state,
+          4,
+          'harness',
+          'EXECUTION_FAILURE',
+          `Test execution verification failed: ${executionDecision.reason}`,
+          {
+            passRate: executionDecision.passRate,
+            blockers: executionDecision.blockers,
+            failedTests: executionAudit.failedTests,
+            buildErrors: executionAudit.buildErrors
+          }
+        );
+        return completeFeature(state, 'ESCALATED', `Test execution failed: ${executionDecision.blockers[0]}`);
+      }
+
+      log(`\n✅ All execution checks passed: Tests 100% passing, Build compiles, Dev server clean\n`);
+    } catch (err: any) {
+      log(`⚠️  Could not run execution verification: ${err.message}`);
+      log('Continuing to Validator (human review will catch issues)');
+      state = recordLoopBack(
+        state,
+        4,
+        'harness',
+        `Execution verification error: ${err.message}`,
+        'WARN'
+      );
+    }
 
     // Validator
     const validatorOutput = await invokeAgent({

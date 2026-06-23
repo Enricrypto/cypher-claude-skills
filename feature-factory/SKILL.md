@@ -15,47 +15,70 @@ A 7-agent chain for shipping features correctly the first time. Activate this sk
 
 ---
 
-## 🚨 Artifact Materialization Verification (NEW)
+## 🚨 Two-Gate Hallucination Prevention (NEW)
 
-Feature Factory v2.0 includes reality checks to catch hallucinations where agents claim to have created files but never actually wrote them.
+Feature Factory v2.0 includes dual reality checks to catch hallucinations at two critical points.
 
-### How It Works
+### Gate 1: Artifact Materialization (After Stage 3 Builders)
 
-**After Stage 3 (Builders complete):**
-1. Harness collects all files that Backend & Frontend builders claimed to create/modify
-2. Harness verifies each file actually exists on disk
+**What it checks:** Do claimed files actually exist on disk?
+
+**How it works:**
+1. Harness collects all files Backend & Frontend builders claimed to create/modify
+2. Verifies each file actually exists on disk
 3. If ANY claimed file is missing → **GATE FAILS**
-4. Blocks advancement to Stage 4 (Verify) until files are real
+4. Blocks advancement until files are real
 
-### What Gets Caught
+**What gets caught:**
+- ✅ Hallucinations: "Created src/components/Upload.tsx" but file doesn't exist
+- ✅ Wrong paths: "Created ./Upload.tsx" but actually wrote "/tmp/Upload.tsx"
+- ✅ Claims without actions: Summary mentions features but never used Write tool
 
-✅ **Hallucinations:** Agent says "Created src/components/Upload.tsx" but file doesn't exist  
-✅ **Wrong Paths:** Agent says "Created ./Upload.tsx" but actually wrote "/tmp/Upload.tsx"  
-✅ **Claims Without Actions:** Agent's summary mentions features but never used Write tool  
+### Gate 2: Execution Verification (After Stage 4 Test Verifier)
+
+**What it checks:** Did tests actually RUN and PASS 100%?
+
+**How it works:**
+1. After Test Verifier claims tests passed, harness runs the actual test suite
+2. Captures: test results, build compilation, dev server startup
+3. **CRITICAL:** Requires 100% test pass rate (no failures allowed)
+4. If tests fail OR build breaks OR dev server errors → **GATE FAILS**
+5. Blocks advancement until tests genuinely pass
+
+**What gets caught:**
+- ✅ Phantom tests: "62/62 passing" but tests were never run
+- ✅ Failed tests hidden: Tests ran but some failed, claims were false
+- ✅ Build broken: Tests "pass" but actual build compilation fails
+- ✅ Dev server errors: Dev startup has critical errors masked in logs
 
 ### The Guarantee
 
-**If Stage 4 (Verify) runs, you know with 100% certainty:**
-- ✅ All claimed files actually exist
-- ✅ All files can be read and audited
+**If PR is created, you know with 100% certainty:**
+- ✅ All claimed files actually exist on disk (Gate 1)
+- ✅ Build compiles without errors (Gate 2)
+- ✅ ALL tests ran and passed (100% pass rate) (Gate 2)
+- ✅ Dev server starts cleanly (Gate 2)
 - ✅ No phantom implementations
-- ✅ Test Verifier is testing real code, not hallucinations
+- ✅ No false test coverage
 
-### Example
+### Example: The g-artisans Hallucination
 
 ```
-❌ BEFORE (No artifact check):
-   Backend Builder: "✅ All files created"
-   → Advances to Stage 4 without verification
-   → Test Verifier tests phantom files and reports success
-   → Broken tests shipped
+❌ BEFORE (No execution gate):
+   Test Verifier: "✅ 62/62 tests passing"
+   → Artifact gate passes (test files exist ✅)
+   → Validator runs (claimed tests exist ✅)
+   → PR created with false confidence
+   → Reality: Tests never actually ran. 0% pass rate.
 
-✅ AFTER (With artifact check):
-   Backend Builder: "✅ All files created"
-   Harness checks: ls src/services/auth.ts → NOT FOUND
-   → GATE FAILS with clear message
-   → Blocks Stage 4 advancement
-   → Backend Builder must use Write tool to create files
+✅ AFTER (With execution gate):
+   Test Verifier: "✅ 62/62 tests passing"
+   → Artifact gate passes (test files exist ✅)
+   → Execution gate: npm run test
+   → Tests don't run / fail / build breaks
+   → GATE FAILS: "Pass rate 0% — 62 failures (CRITICAL: 100% required)"
+   → Blocks PR creation
+   → Test Verifier loops back to fix actual issues
 ```
 
 ---
@@ -159,7 +182,7 @@ When implementation tests fail, agents now self-fix autonomously (up to 3 attemp
 
 ---
 
-## The Chain
+## The Chain (with Dual Hallucination Gates)
 
 ```
 Feature idea
@@ -178,8 +201,12 @@ Feature idea
     ↓
 [05] Frontend Builder → Frontend Summary
     ↓
+🔍 GATE 1: Artifact Materialization (files exist on disk?)
+    ↓ (if missing files → ESCALATE)
 [06] Test Verifier   → Acceptance Test Report
-    ↓ (loop back to builder if ❌ failures)
+    ↓
+🔍 GATE 2: Execution Verification (tests ran + 100% passing?)
+    ↓ (if failures/build errors → loop back to [06])
 [07] Validator       → Validation Report
     ↓ (loop back to builder if Critical issues)
 ⏸  CHECKPOINT 3: Open the PR
