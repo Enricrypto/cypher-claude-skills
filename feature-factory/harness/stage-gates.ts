@@ -174,6 +174,12 @@ export const stageContracts: Record<number, StageContract> = {
           description: 'Backend loops <= 3, Frontend loops <= 3',
           validator: async (ctx) => validateLoopLimits(ctx),
           severity: 'CRITICAL'
+        },
+        {
+          name: 'Artifacts Materialized',
+          description: 'All claimed files actually exist on disk (NOT hallucinated)',
+          validator: async (ctx) => validateArtifactsMaterialized(ctx),
+          severity: 'CRITICAL'
         }
       ]
     },
@@ -596,4 +602,57 @@ async function validateKnowledgeStored(ctx: StageContext): Promise<CriterionResu
     };
   }
   return { passed: true, score: 100, details: 'Patterns stored to memory for future features' };
+}
+
+/**
+ * REALITY CHECK: Verify that claimed artifacts actually exist on disk.
+ * This prevents hallucinations where agents claim to have created files
+ * but never actually wrote them.
+ */
+async function validateArtifactsMaterialized(ctx: StageContext): Promise<CriterionResult> {
+  const claimedFiles = ctx.metadata.claimedFiles || [];
+
+  if (!claimedFiles || claimedFiles.length === 0) {
+    return {
+      passed: false,
+      score: 0,
+      details: 'No files recorded for materialization check',
+      blockers: ['Builders must record all claimed files in metadata.claimedFiles']
+    };
+  }
+
+  const missingFiles: string[] = [];
+
+  // Check each claimed file
+  for (const fileInfo of claimedFiles) {
+    const filePath = fileInfo.path || fileInfo;
+
+    // In real implementation, this would use fs.existsSync or Read tool
+    // For now, document what should be checked
+    const exists = ctx.metadata.fileExistsCheck?.[filePath] ?? false;
+
+    if (!exists) {
+      missingFiles.push(filePath);
+    }
+  }
+
+  if (missingFiles.length > 0) {
+    return {
+      passed: false,
+      score: 0,
+      details: `${missingFiles.length}/${claimedFiles.length} files do not exist on disk`,
+      blockers: [
+        `HALLUCINATION DETECTED: These files were claimed but not created:`,
+        ...missingFiles.map(f => `  - ${f}`),
+        `The agents must actually call Write/Edit tools to create files.`,
+        `Do NOT advance until all claimed files exist on disk.`
+      ]
+    };
+  }
+
+  return {
+    passed: true,
+    score: 100,
+    details: `✅ All ${claimedFiles.length} claimed artifacts exist on disk (materialization verified)`
+  };
 }

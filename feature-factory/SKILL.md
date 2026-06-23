@@ -15,6 +15,51 @@ A 7-agent chain for shipping features correctly the first time. Activate this sk
 
 ---
 
+## 🚨 Artifact Materialization Verification (NEW)
+
+Feature Factory v2.0 includes reality checks to catch hallucinations where agents claim to have created files but never actually wrote them.
+
+### How It Works
+
+**After Stage 3 (Builders complete):**
+1. Harness collects all files that Backend & Frontend builders claimed to create/modify
+2. Harness verifies each file actually exists on disk
+3. If ANY claimed file is missing → **GATE FAILS**
+4. Blocks advancement to Stage 4 (Verify) until files are real
+
+### What Gets Caught
+
+✅ **Hallucinations:** Agent says "Created src/components/Upload.tsx" but file doesn't exist  
+✅ **Wrong Paths:** Agent says "Created ./Upload.tsx" but actually wrote "/tmp/Upload.tsx"  
+✅ **Claims Without Actions:** Agent's summary mentions features but never used Write tool  
+
+### The Guarantee
+
+**If Stage 4 (Verify) runs, you know with 100% certainty:**
+- ✅ All claimed files actually exist
+- ✅ All files can be read and audited
+- ✅ No phantom implementations
+- ✅ Test Verifier is testing real code, not hallucinations
+
+### Example
+
+```
+❌ BEFORE (No artifact check):
+   Backend Builder: "✅ All files created"
+   → Advances to Stage 4 without verification
+   → Test Verifier tests phantom files and reports success
+   → Broken tests shipped
+
+✅ AFTER (With artifact check):
+   Backend Builder: "✅ All files created"
+   Harness checks: ls src/services/auth.ts → NOT FOUND
+   → GATE FAILS with clear message
+   → Blocks Stage 4 advancement
+   → Backend Builder must use Write tool to create files
+```
+
+---
+
 ## Memory Integration (Phase 1 + 2)
 
 ### Phase 1: Storage

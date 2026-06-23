@@ -29,7 +29,10 @@ import {
   FrontendBuilderOutput,
   TestVerifierOutput,
   ValidatorOutput,
-  FeatureConsolidatorOutput
+  FeatureConsolidatorOutput,
+  verifyArtifactMaterialization,
+  generateMaterializationReport,
+  MaterializationAudit
 } from '../harness/agent-output-schema';
 
 import {
@@ -333,6 +336,42 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
     }
 
     log(`✅ Frontend builder passed (${frontendLoopCount === 1 ? 'first try' : `after ${frontendLoopCount} attempts`})`);
+
+    // ========================================================================
+    // ARTIFACT MATERIALIZATION CHECK (Reality Verification)
+    // ========================================================================
+    // Prevent hallucinations: verify that claimed files actually exist on disk
+
+    log('\n🔍 Verifying artifact materialization (checking if claimed files actually exist)...\n');
+
+    const claimedFiles = [
+      ...(backendOutput?.details.filesModified?.map(f => ({ path: f.path, source: 'Backend Builder' })) || []),
+      ...(frontendOutput?.details.filesModified?.map(f => ({ path: f.path, source: 'Frontend Builder' })) || [])
+    ];
+
+    const artifactAudit = await verifyArtifactMaterialization(3, 'builders', claimedFiles);
+
+    log(generateMaterializationReport(artifactAudit));
+
+    if (!artifactAudit.allMaterialized) {
+      log('\n❌ CRITICAL: Hallucination detected!\n');
+      log(`${artifactAudit.missingArtifacts.length} claimed files do not exist on disk:`);
+      artifactAudit.missingArtifacts.forEach(f => {
+        log(`  ❌ ${f.path}`);
+      });
+
+      state = recordEscalation(
+        state,
+        3,
+        'harness',
+        'HALLUCINATION_DETECTED',
+        `${artifactAudit.missingArtifacts.length} claimed files not materialized`,
+        { missingFiles: artifactAudit.missingArtifacts.map(f => f.path) }
+      );
+      return completeFeature(state, 'ESCALATED', 'Artifact materialization failed: builders claimed files that do not exist');
+    }
+
+    log(`\n✅ All ${claimedFiles.length} artifacts verified to exist on disk\n`);
 
     // Check Stage 3 gate
     const stage3Decision = await checkStageGate(state, 3);

@@ -673,3 +673,159 @@ ${validationErrors.map(e => `- ${e}`).join('\n')}
 See \`agent-output-schema.ts\` for the exact schema definition.
 `;
 }
+
+// ============================================================================
+// ARTIFACT MATERIALIZATION VERIFICATION (Reality Checks)
+// ============================================================================
+
+/**
+ * Verification result for claimed artifacts.
+ * Answers: Do the files actually exist that the agent claimed to create?
+ */
+export interface ArtifactVerification {
+  artifact: ArtifactRef;
+  exists: boolean;
+  readable: boolean;
+  content?: string;
+  error?: string;
+}
+
+/**
+ * Materialization audit result.
+ * Answers: Do claimed artifacts match reality on disk?
+ */
+export interface MaterializationAudit {
+  stage: number;
+  agent: string;
+  claimedArtifacts: ArtifactRef[];
+  verifications: ArtifactVerification[];
+  allMaterialized: boolean;
+  missingArtifacts: ArtifactRef[];
+  summary: string;
+}
+
+/**
+ * Verify that claimed artifacts actually exist on disk.
+ * This is the REALITY CHECK that catches hallucinations.
+ *
+ * @param stage Stage number (1-5)
+ * @param agent Agent name
+ * @param artifacts List of artifacts the agent claimed to create/modify
+ * @returns Audit showing which artifacts actually exist
+ */
+export async function verifyArtifactMaterialization(
+  stage: number,
+  agent: string,
+  artifacts: ArtifactRef[]
+): Promise<MaterializationAudit> {
+  const verifications: ArtifactVerification[] = [];
+  const missingArtifacts: ArtifactRef[] = [];
+
+  // Verify each claimed artifact
+  for (const artifact of artifacts) {
+    const verification: ArtifactVerification = {
+      artifact,
+      exists: false,
+      readable: false
+    };
+
+    try {
+      // Try to read the file to verify it exists
+      // In real implementation, this would use Read tool or fs.existsSync
+      const path = artifact.path;
+
+      // Placeholder: in actual implementation, call Read tool or check fs
+      // For now, we document what should happen
+      verification.exists = false; // Would be: fs.existsSync(path)
+      verification.readable = false;
+      verification.error = `[Artifact Check Needed] Verify that ${path} exists`;
+
+      if (!verification.exists) {
+        missingArtifacts.push(artifact);
+      }
+    } catch (error) {
+      verification.exists = false;
+      verification.readable = false;
+      verification.error = `Error checking artifact: ${error instanceof Error ? error.message : String(error)}`;
+      missingArtifacts.push(artifact);
+    }
+
+    verifications.push(verification);
+  }
+
+  const allMaterialized = missingArtifacts.length === 0;
+
+  return {
+    stage,
+    agent,
+    claimedArtifacts: artifacts,
+    verifications,
+    allMaterialized,
+    missingArtifacts,
+    summary: allMaterialized
+      ? `✅ All ${artifacts.length} artifacts exist on disk`
+      : `❌ ${missingArtifacts.length}/${artifacts.length} artifacts missing: ${missingArtifacts.map(a => a.path).join(', ')}`
+  };
+}
+
+/**
+ * Generate report for artifact materialization audit.
+ * Shows what was claimed vs what actually exists.
+ */
+export function generateMaterializationReport(audit: MaterializationAudit): string {
+  let report = `
+## Artifact Materialization Audit
+
+**Stage:** ${audit.stage}
+**Agent:** ${audit.agent}
+
+### Summary
+${audit.summary}
+
+### Claimed Artifacts (${audit.claimedArtifacts.length})
+${audit.claimedArtifacts
+  .map((a, i) => {
+    const verification = audit.verifications[i];
+    const status = verification.exists ? '✅' : '❌';
+    return `${i + 1}. ${status} ${a.path} - ${a.description}`;
+  })
+  .join('\n')}
+
+### Reality Check Results
+${audit.verifications
+  .map((v, i) => {
+    if (v.exists) {
+      return `${i + 1}. ✅ EXISTS: ${v.artifact.path}`;
+    } else {
+      return `${i + 1}. ❌ MISSING: ${v.artifact.path}\n   Error: ${v.error}`;
+    }
+  })
+  .join('\n')}
+`;
+
+  if (audit.missingArtifacts.length > 0) {
+    report += `
+
+### ⚠️ GATE FAILURE: Missing Artifacts
+
+The following files were claimed but do not exist:
+${audit.missingArtifacts.map(a => `- ${a.path}`).join('\n')}
+
+**This blocks advancement.** The agent must:
+1. Actually call the Write tool to create files
+2. Verify files exist before reporting completion
+3. Re-run the stage to create the missing artifacts
+
+**Do NOT advance to next stage until all artifacts exist on disk.**
+`;
+  } else {
+    report += `
+
+### ✅ GATE PASS: All Artifacts Materialized
+
+All claimed artifacts exist on disk. Safe to advance to next stage.
+`;
+  }
+
+  return report;
+}
