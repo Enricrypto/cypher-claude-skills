@@ -49,6 +49,13 @@ import {
 } from '../harness/execution-gates';
 
 import {
+  auditInfrastructure,
+  validateInfrastructureGate,
+  generateInfrastructureReport,
+  InfrastructureAudit
+} from '../harness/infrastructure-gates';
+
+import {
   FeatureState,
   createFeatureState,
   recordAgentStep,
@@ -395,6 +402,63 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
 
     log(`✅ Stage 3 passed: Implementation complete`);
     state = advanceToStage(state, 4);
+
+    // ========================================================================
+    // INFRASTRUCTURE VERIFICATION GATE (Reality Check for Readiness)
+    // ========================================================================
+    // Verify npm scripts, database setup, TypeScript config before running tests
+
+    log('\n🏗️  Verifying infrastructure prerequisites (npm scripts, database, config)...\n');
+
+    let infrastructureAudit: InfrastructureAudit | null = null;
+    try {
+      infrastructureAudit = await auditInfrastructure(process.cwd());
+      log(generateInfrastructureReport(infrastructureAudit));
+
+      const infrastructureDecision = validateInfrastructureGate(infrastructureAudit);
+
+      if (!infrastructureDecision.canAdvance) {
+        log('\n❌ CRITICAL: Infrastructure prerequisites missing!\n');
+        log(`Blockers:`);
+        infrastructureDecision.blockers.forEach(b => {
+          log(`  ❌ ${b}`);
+        });
+        log(`\nRequired fixes:`);
+        log(infrastructureDecision.remediation);
+
+        state = recordEscalation(
+          state,
+          4,
+          'harness',
+          'INFRASTRUCTURE_FAILURE',
+          `Infrastructure verification failed: ${infrastructureDecision.reason}`,
+          {
+            blockers: infrastructureDecision.blockers,
+            remediation: infrastructureDecision.remediation
+          }
+        );
+        return completeFeature(state, 'ESCALATED', `Infrastructure not ready: ${infrastructureDecision.blockers[0]}`);
+      }
+
+      if (infrastructureDecision.warnings.length > 0) {
+        log(`\n⚠️  Warnings (non-blocking):`);
+        infrastructureDecision.warnings.forEach(w => {
+          log(`  ⚠️  ${w}`);
+        });
+      }
+
+      log(`\n✅ Infrastructure ready: All prerequisites verified\n`);
+    } catch (err: any) {
+      log(`⚠️  Could not run infrastructure verification: ${err.message}`);
+      log('Continuing to Test Verifier (manual infrastructure check recommended)');
+      state = recordLoopBack(
+        state,
+        4,
+        'harness',
+        `Infrastructure verification error: ${err.message}`,
+        'WARN'
+      );
+    }
 
     // ========================================================================
     // STAGE 4: VERIFY (Test Verifier + Validator with regression detection)

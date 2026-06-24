@@ -15,7 +15,7 @@ A 7-agent chain for shipping features correctly the first time. Activate this sk
 
 ---
 
-## 🚨 Two-Gate Hallucination Prevention (NEW)
+## 🚨 Three-Gate Quality System (NEW)
 
 Feature Factory v2.0 includes dual reality checks to catch hallucinations at two critical points.
 
@@ -42,6 +42,32 @@ Feature Factory v2.0 includes dual reality checks to catch hallucinations at two
 - ✅ Claims without actions: Summary mentions features but never used Write tool
 - ✅ Binary/permission issues: File created but not readable
 
+### Gate 1.5: Infrastructure Verification (After Stage 3 Frontend Builder, Before Stage 4 Tests)
+
+**What it checks:** Are all prerequisites in place to run tests?
+
+**How it works:**
+1. After Frontend Builder completes, harness verifies infrastructure before Test Verifier runs
+2. **CRITICAL checks:**
+   - ✅ npm script 'test' exists
+   - ✅ npm script 'build' exists
+   - ✅ npm script 'dev' exists
+   - ✅ npm script 'test:e2e' exists (if E2E tests detected)
+   - ✅ package.json is valid JSON
+   - ✅ tsconfig.json is valid
+   - ✅ Database migrations exist
+3. If ANY critical check fails → **GATE FAILS with remediation**
+4. Blocks Test Verifier until infrastructure is ready
+
+**What gets caught:**
+- ✅ Missing npm scripts: "test:e2e script not in package.json"
+- ✅ Invalid config: "tsconfig.json has JSON syntax error"
+- ✅ Missing build setup: "build script not configured"
+- ✅ Database not ready: "no migrations directory found"
+- ✅ Source structure issues: "app/ or components/ directory missing"
+
+---
+
 ### Gate 2: Execution Verification (After Stage 4 Test Verifier)
 
 **What it checks:** Did tests actually RUN and PASS 100%?
@@ -58,6 +84,7 @@ Feature Factory v2.0 includes dual reality checks to catch hallucinations at two
 - ✅ Failed tests hidden: Tests ran but some failed, claims were false
 - ✅ Build broken: Tests "pass" but actual build compilation fails
 - ✅ Dev server errors: Dev startup has critical errors masked in logs
+- ✅ Missing npm script: If infrastructure gate missed it, execution gate will fail
 
 ### The Guarantee
 
@@ -190,7 +217,7 @@ When implementation tests fail, agents now self-fix autonomously (up to 3 attemp
 
 ---
 
-## The Chain (with Dual Hallucination Gates)
+## The Chain (with Three-Gate Quality System)
 
 ```
 Feature idea
@@ -209,12 +236,17 @@ Feature idea
     ↓
 [05] Frontend Builder → Frontend Summary
     ↓
-🔍 GATE 1: Artifact Materialization (files exist on disk?)
-    ↓ (if missing files → ESCALATE)
+🔍 GATE 1: Artifact Materialization
+   (Files exist on disk? Build config valid? npm scripts present?)
+    ↓ (if missing → ESCALATE)
+🔍 GATE 1.5: Infrastructure Verification
+   (npm scripts exist? tsconfig valid? Database ready? Config files OK?)
+    ↓ (if critical issues → ESCALATE with remediation)
 [06] Test Verifier   → Acceptance Test Report
     ↓
-🔍 GATE 2: Execution Verification (tests ran + 100% passing?)
-    ↓ (if failures/build errors → loop back to [06])
+🔍 GATE 2: Execution Verification
+   (Tests actually ran? 100% passing? Build compiles? Dev server clean?)
+    ↓ (if failures → loop back to [06])
 [07] Validator       → Validation Report
     ↓ (loop back to builder if Critical issues)
 ⏸  CHECKPOINT 3: Open the PR
