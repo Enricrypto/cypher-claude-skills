@@ -718,6 +718,9 @@ export async function verifyArtifactMaterialization(
   agent: string,
   artifacts: ArtifactRef[]
 ): Promise<MaterializationAudit> {
+  const fs = await import('fs');
+  const path = await import('path');
+
   const verifications: ArtifactVerification[] = [];
   const missingArtifacts: ArtifactRef[] = [];
 
@@ -730,23 +733,52 @@ export async function verifyArtifactMaterialization(
     };
 
     try {
-      // Try to read the file to verify it exists
-      // In real implementation, this would use Read tool or fs.existsSync
-      const path = artifact.path;
+      const filePath = artifact.path;
 
-      // Placeholder: in actual implementation, call Read tool or check fs
-      // For now, we document what should happen
-      verification.exists = false; // Would be: fs.existsSync(path)
-      verification.readable = false;
-      verification.error = `[Artifact Check Needed] Verify that ${path} exists`;
+      // Resolve to absolute path (handle relative paths from project root)
+      const absolutePath = path.isAbsolute(filePath)
+        ? filePath
+        : path.resolve(process.cwd(), filePath);
 
+      // Check if file exists
+      verification.exists = fs.existsSync(absolutePath);
+
+      if (verification.exists) {
+        try {
+          // Try to read the file to verify it's readable
+          const stats = fs.statSync(absolutePath);
+          verification.readable = stats.isFile();
+
+          // If readable, capture first 200 chars of content for audit
+          if (verification.readable) {
+            try {
+              const content = fs.readFileSync(absolutePath, 'utf-8');
+              verification.content = content.substring(0, 200);
+            } catch {
+              // File exists but can't read content (binary, permissions, etc.)
+              verification.readable = false;
+              verification.error = `File exists but not readable (possibly binary or permission issue)`;
+            }
+          } else {
+            verification.error = `Path is not a regular file (may be directory)`;
+          }
+        } catch (statsError) {
+          verification.exists = false;
+          verification.readable = false;
+          verification.error = `Could not stat file: ${statsError instanceof Error ? statsError.message : String(statsError)}`;
+        }
+      } else {
+        verification.error = `File does not exist at path: ${absolutePath}`;
+      }
+
+      // Track missing artifacts
       if (!verification.exists) {
         missingArtifacts.push(artifact);
       }
     } catch (error) {
       verification.exists = false;
       verification.readable = false;
-      verification.error = `Error checking artifact: ${error instanceof Error ? error.message : String(error)}`;
+      verification.error = `Verification error: ${error instanceof Error ? error.message : String(error)}`;
       missingArtifacts.push(artifact);
     }
 
@@ -763,8 +795,8 @@ export async function verifyArtifactMaterialization(
     allMaterialized,
     missingArtifacts,
     summary: allMaterialized
-      ? `✅ All ${artifacts.length} artifacts exist on disk`
-      : `❌ ${missingArtifacts.length}/${artifacts.length} artifacts missing: ${missingArtifacts.map(a => a.path).join(', ')}`
+      ? `✅ All ${artifacts.length} artifacts verified on disk`
+      : `❌ ${missingArtifacts.length}/${artifacts.length} artifacts missing (hallucination detected)`
   };
 }
 
@@ -774,56 +806,100 @@ export async function verifyArtifactMaterialization(
  */
 export function generateMaterializationReport(audit: MaterializationAudit): string {
   let report = `
-## Artifact Materialization Audit
+## 🔍 Artifact Materialization Audit
 
 **Stage:** ${audit.stage}
 **Agent:** ${audit.agent}
+**Timestamp:** ${new Date().toISOString()}
 
 ### Summary
 ${audit.summary}
 
-### Claimed Artifacts (${audit.claimedArtifacts.length})
-${audit.claimedArtifacts
-  .map((a, i) => {
-    const verification = audit.verifications[i];
-    const status = verification.exists ? '✅' : '❌';
-    return `${i + 1}. ${status} ${a.path} - ${a.description}`;
-  })
-  .join('\n')}
-
-### Reality Check Results
-${audit.verifications
-  .map((v, i) => {
-    if (v.exists) {
-      return `${i + 1}. ✅ EXISTS: ${v.artifact.path}`;
-    } else {
-      return `${i + 1}. ❌ MISSING: ${v.artifact.path}\n   Error: ${v.error}`;
-    }
-  })
-  .join('\n')}
 `;
 
+  // Show the claimed vs actual breakdown
+  const verified = audit.verifications.filter(v => v.exists).length;
+  const unverified = audit.verifications.filter(v => !v.exists).length;
+
+  report += `**Results:** ${verified}/${audit.claimedArtifacts.length} verified `;
+  if (unverified > 0) {
+    report += `| ⚠️ ${unverified} missing`;
+  }
+  report += `\n\n`;
+
+  // Detailed verification results
+  report += `### File-by-File Verification\n\n`;
+
+  audit.verifications.forEach((v, i) => {
+    const artifact = audit.claimedArtifacts[i];
+
+    if (v.exists) {
+      report += `${i + 1}. ✅ **EXISTS** — \`${artifact.path}\`\n`;
+      report += `   Description: ${artifact.description}\n`;
+      if (v.readable) {
+        report += `   Status: Readable ✓\n`;
+        if (v.content) {
+          report += `   Preview: \`${v.content.substring(0, 100).replace(/\n/g, ' ')}...\`\n`;
+        }
+      } else if (v.error) {
+        report += `   Status: Not readable — ${v.error}\n`;
+      }
+      report += `\n`;
+    } else {
+      report += `${i + 1}. ❌ **MISSING** — \`${artifact.path}\`\n`;
+      report += `   Description: ${artifact.description}\n`;
+      report += `   Error: ${v.error || 'File not found'}\n`;
+      report += `\n`;
+    }
+  });
+
+  // Gate decision
   if (audit.missingArtifacts.length > 0) {
     report += `
+---
 
-### ⚠️ GATE FAILURE: Missing Artifacts
+### 🚨 GATE FAILURE: Hallucination Detected
 
-The following files were claimed but do not exist:
-${audit.missingArtifacts.map(a => `- ${a.path}`).join('\n')}
+**${audit.missingArtifacts.length} claimed artifacts do NOT exist on disk:**
 
-**This blocks advancement.** The agent must:
-1. Actually call the Write tool to create files
-2. Verify files exist before reporting completion
-3. Re-run the stage to create the missing artifacts
+${audit.missingArtifacts
+  .map(
+    (a, i) =>
+      `${i + 1}. \`${a.path}\` — ${a.description}`
+  )
+  .join('\n')}
 
-**Do NOT advance to next stage until all artifacts exist on disk.**
+### Why This Happens
+
+The agent output claimed these files were created, but:
+- ❌ The Write tool was not called
+- ❌ Files were not created in the project
+- ❌ The agent hallucinated the implementation
+
+### Required Action
+
+**DO NOT ADVANCE.** This blocks the next stage. The agent must:
+
+1. Actually invoke the Write tool to create each file
+2. Verify each file is created successfully
+3. Re-run the stage to complete the implementation
+
+### For the Orchestrator
+
+Loop back to the agent with a clear message:
+- "These files were claimed but do not exist: [list]"
+- "Use the Write tool to actually create them"
+- "Verify files exist before reporting completion"
 `;
   } else {
     report += `
+---
 
 ### ✅ GATE PASS: All Artifacts Materialized
 
-All claimed artifacts exist on disk. Safe to advance to next stage.
+All **${audit.claimedArtifacts.length}** claimed artifacts exist on disk and are readable.
+
+Safe to advance to next stage.
 `;
   }
 

@@ -25,14 +25,22 @@ Feature Factory v2.0 includes dual reality checks to catch hallucinations at two
 
 **How it works:**
 1. Harness collects all files Backend & Frontend builders claimed to create/modify
-2. Verifies each file actually exists on disk
-3. If ANY claimed file is missing → **GATE FAILS**
-4. Blocks advancement until files are real
+2. **Verifies EACH file exists** using `fs.existsSync()` + stat check
+3. **Tries to read** first 200 chars to confirm file is readable
+4. If ANY claimed file is missing → **GATE FAILS with detailed report**
+5. Blocks advancement until ALL files are real and readable
+
+**Reality verification includes:**
+- ✅ File exists on disk (fs check)
+- ✅ File is readable (stat + read check)
+- ✅ File has content (first 200 chars captured for audit)
+- ✅ Correct path (absolute path resolution)
 
 **What gets caught:**
 - ✅ Hallucinations: "Created src/components/Upload.tsx" but file doesn't exist
 - ✅ Wrong paths: "Created ./Upload.tsx" but actually wrote "/tmp/Upload.tsx"
 - ✅ Claims without actions: Summary mentions features but never used Write tool
+- ✅ Binary/permission issues: File created but not readable
 
 ### Gate 2: Execution Verification (After Stage 4 Test Verifier)
 
