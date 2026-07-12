@@ -57,7 +57,7 @@ import {
 } from '../harness/infrastructure-gates';
 
 import { AgentInvoker } from '../runner/invoke-agent';
-import { buildStageContext, StageOutputs } from '../harness/stage-context';
+import { buildStageContext, persistArtifacts, StageOutputs } from '../harness/stage-context';
 
 import {
   FeatureState,
@@ -71,6 +71,18 @@ import {
   serializeState,
   getStateSummary
 } from '../harness/state-tracker';
+
+/**
+ * An agent that says it cannot proceed is believed.
+ *
+ * The live smoke test had the Researcher correctly return status:"ESCALATE" — it had found that
+ * the feature was not implementable against the codebase — and the orchestrator would have
+ * carried on to schema validation and the gate regardless. The agents are the ones looking at
+ * the code; when one declares a blocker, that is a finding, not noise.
+ */
+function agentDeclaredBlocked(output: FeatureFactoryAgentOutput): boolean {
+  return output.status === 'ESCALATE' || output.status === 'FAIL';
+}
 
 export interface OrchestrationOptions {
   featureName: string;
@@ -134,6 +146,17 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
       return completeFeature(state, 'ESCALATED', 'Schema validation failed at Stage 1');
     }
 
+    if (agentDeclaredBlocked(researcherOutput)) {
+      state = recordEscalation(
+        state,
+        1,
+        '01-researcher',
+        'CRITICAL_ISSUE',
+        `01-researcher reported ${researcherOutput.status}: ${researcherOutput.details.summary}`
+      );
+      return completeFeature(state, 'ESCALATED', `01-researcher declared the feature blocked`);
+    }
+
     outputs.researcher = researcherOutput;
     state = recordAgentStep(state, 1, '01-researcher', 'PASS', researcherOutput);
 
@@ -180,6 +203,17 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
       return completeFeature(state, 'ESCALATED', 'Story schema validation failed');
     }
 
+    if (agentDeclaredBlocked(storyOutput)) {
+      state = recordEscalation(
+        state,
+        2,
+        '02-story-writer',
+        'CRITICAL_ISSUE',
+        `02-story-writer reported ${storyOutput.status}: ${storyOutput.details.summary}`
+      );
+      return completeFeature(state, 'ESCALATED', `02-story-writer declared the feature blocked`);
+    }
+
     outputs.story = storyOutput;
     state = recordAgentStep(state, 2, '02-story-writer', 'PASS', storyOutput);
 
@@ -205,6 +239,17 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
         `Spec output schema invalid: ${specValidation.errors[0]}`
       );
       return completeFeature(state, 'ESCALATED', 'Spec schema validation failed');
+    }
+
+    if (agentDeclaredBlocked(specOutput)) {
+      state = recordEscalation(
+        state,
+        2,
+        '03-spec-writer',
+        'CRITICAL_ISSUE',
+        `03-spec-writer reported ${specOutput.status}: ${specOutput.details.summary}`
+      );
+      return completeFeature(state, 'ESCALATED', `03-spec-writer declared the feature blocked`);
     }
 
     outputs.spec = specOutput;
@@ -728,6 +773,11 @@ async function checkStageGate(
   outputs: StageOutputs,
   extra?: { loops?: { backend?: number; frontend?: number }; knowledgeStored?: boolean }
 ): Promise<StageAdvancementDecision> {
+  // Read-only agents cannot write their own documents — they have no Write tool. Persist what
+  // they returned so the gates have something real to read. Builders are excluded: they must
+  // write their own code, or the materialization gate would be checking the harness's work.
+  persistArtifacts(outputs, cwd);
+
   const contract = stageContracts[stage];
   const context = buildStageContext({
     stage,

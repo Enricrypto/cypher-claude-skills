@@ -14,6 +14,21 @@ export interface ArtifactRef {
   description: string;
   created?: boolean;
   modified?: boolean;
+
+  /**
+   * The document's full text, for artifacts the agent cannot write itself.
+   *
+   * The read-only agents (Researcher, Story Writer, Spec Writer, Validator, Consolidator) are
+   * granted no Write tool — that is the point of them. But the gates require their documents to
+   * exist on disk (validateUserStory reads USER_STORY.md's content and looks for Given/When/Then).
+   * So they return the content here and the HARNESS persists it. The agent stays read-only.
+   *
+   * Builders do NOT use this: they write their code files themselves with the Write tool, and
+   * the materialization gate then checks those paths against the filesystem. If the harness
+   * wrote a builder's files for it, that gate would be checking its own work and the
+   * anti-hallucination guarantee would be worthless. persistArtifacts() enforces the split.
+   */
+  content?: string;
 }
 
 // ============================================================================
@@ -590,14 +605,22 @@ export function validateOutputSchema(
     errors.push('details.artifacts must be array');
   }
 
-  // Validate stage-specific schema
-  switch (stage) {
-    case 1:
-      // Researcher must have architecture, filesIdentified, patterns
+  // Validate agent-specific schema.
+  //
+  // This switches on AGENT, not stage. It used to switch on stage — but stages 2, 3 and 4 are
+  // each shared by two agents with entirely different output shapes, so the stage-keyed checks
+  // were being applied to the wrong agent:
+  //   - Stage 2 demanded `userStory` + 3 acceptance criteria from the SPEC WRITER, which has
+  //     dataModel/apiContract/fileList and no userStory. It could never pass.
+  //   - Stage 4 demanded BOTH `acceptanceTests` (Test Verifier) and `codeQuality` (Validator).
+  //     Neither agent has both, so stage 4 was unpassable by either.
+  // The pipeline could not have got past the Spec Writer.
+  switch (agent) {
+    case '01-researcher':
       if (!output.details.architecture) {
         errors.push('Researcher missing architecture');
       }
-      if (!Array.isArray(output.details.filesIdentified) || output.details.filesIdentified.length === 0) {
+      if (!Array.isArray(output.details.filesIdentified) || output.details.filesIdentified.length < 3) {
         errors.push('Researcher must identify 3+ files');
       }
       if (!Array.isArray(output.details.existingPatterns) || output.details.existingPatterns.length === 0) {
@@ -605,8 +628,7 @@ export function validateOutputSchema(
       }
       break;
 
-    case 2:
-      // Story Writer must have userStory and acceptanceCriteria
+    case '02-story-writer':
       if (!output.details.userStory) {
         errors.push('Story Writer missing userStory');
       }
@@ -615,31 +637,52 @@ export function validateOutputSchema(
       }
       break;
 
-    case 3:
-      // Builders must have filesModified and testing results
+    case '03-spec-writer':
+      if (!output.details.apiContract) {
+        errors.push('Spec Writer missing apiContract');
+      }
+      if (!Array.isArray(output.details.fileList) || output.details.fileList.length === 0) {
+        errors.push('Spec Writer must list the files to be changed');
+      }
+      if (!output.details.testStrategy) {
+        errors.push('Spec Writer missing testStrategy');
+      }
+      break;
+
+    case '04-backend-builder':
+    case '05-frontend-builder':
       if (!Array.isArray(output.details.filesModified) || output.details.filesModified.length === 0) {
         errors.push('Builder must modify at least one file');
       }
       if (!output.details.testing) {
         errors.push('Builder missing testing results');
-      }
-      if (output.details.testing.testsFailed && output.details.testing.testsFailed > 0) {
+      } else if (output.details.testing.testsFailed > 0) {
         errors.push(`Builder has failing tests: ${output.details.testing.testsFailed}`);
       }
       break;
 
-    case 4:
-      // Validator must have acceptanceTests and issues
+    case '06-test-verifier':
       if (!output.details.acceptanceTests) {
-        errors.push('Validator missing acceptanceTests results');
+        errors.push('Test Verifier missing acceptanceTests results');
       }
-      if (!output.details.codeQuality) {
-        errors.push('Validator missing codeQuality assessment');
+      if (!output.details.testExecution) {
+        errors.push('Test Verifier missing testExecution results');
       }
       break;
 
-    case 5:
-      // Consolidator must have metrics and patterns
+    case '07-validator':
+      if (!output.details.codeQuality) {
+        errors.push('Validator missing codeQuality assessment');
+      }
+      if (!output.details.security) {
+        errors.push('Validator missing security assessment');
+      }
+      if (!Array.isArray(output.details.issues)) {
+        errors.push('Validator must report an issues array (empty is a valid finding)');
+      }
+      break;
+
+    case '08-feature-consolidator':
       if (!output.details.executionMetrics) {
         errors.push('Consolidator missing executionMetrics');
       }

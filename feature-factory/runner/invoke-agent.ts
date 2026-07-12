@@ -13,6 +13,7 @@
  *   escalation path would be silently bypassed. There is one arbiter, and it is the gate.
  */
 
+import { agentOutputSchema } from './output-schemas';
 import {
   AGENT_TOOLS,
   AGENT_STAGE,
@@ -81,66 +82,44 @@ const DEFAULTS = {
   maxTurns: 40
 };
 
-/**
- * JSON Schema for the output envelope, handed to the SDK so the shape is guaranteed and the
- * SDK retries the model itself on a malformed response. This is why the orchestrator never
- * has to parse JSON out of prose.
- *
- * `details` is deliberately open: each agent adds its own stage-specific fields there, and
- * enforcing THOSE is the harness's job. This schema guarantees well-formed JSON;
- * validateOutputSchema decides whether it is acceptable work.
- */
-export function envelopeSchema(stage: number, agent: string): Record<string, unknown> {
-  return {
-    type: 'object',
-    properties: {
-      stage: { type: 'integer', const: stage },
-      agent: { type: 'string', const: agent },
-      timestamp: { type: 'string' },
-      status: { type: 'string', enum: ['PASS', 'FAIL', 'LOOP_BACK', 'ESCALATE'] },
-      details: {
-        type: 'object',
-        properties: {
-          summary: { type: 'string' },
-          artifacts: {
-            type: 'array',
-            items: {
-              type: 'object',
-              properties: {
-                name: { type: 'string' },
-                path: { type: 'string' },
-                description: { type: 'string' }
-              },
-              required: ['name', 'path', 'description']
-            }
-          }
-        },
-        required: ['summary', 'artifacts'],
-        additionalProperties: true
-      }
-    },
-    required: ['stage', 'agent', 'timestamp', 'status', 'details'],
-    additionalProperties: true
-  };
-}
-
-/** Appended to the agent's contract. States the honesty rule the materialization gate enforces. */
-const OUTPUT_CONTRACT = `
+/** Appended to the agent's contract, tailored to whether the agent can write files. */
+function outputContract(agent: FeatureFactoryAgent): string {
+  const common = `
 ---
 
 # Output contract (enforced)
 
-Return your result as structured JSON matching the required schema. Beyond the envelope,
-\`details\` must carry the stage-specific fields your role's contract describes above.
+Return your result as structured JSON matching the required schema. Put your findings in the
+STRUCTURED FIELDS, not only in \`summary\` — the gates read the fields, and analysis that exists
+only as prose is invisible to them and will fail the stage.
 
-\`details.artifacts\` must list every file you actually created or modified, with a real path.
-Do not list a file you did not write. A later gate checks each path against the filesystem,
-and a claimed-but-absent file fails the build as a hallucination — an honest short list always
-beats an optimistic long one.
-
-If you cannot complete the task, still return the envelope with status "FAIL" or "ESCALATE"
-and explain why in \`summary\`.
+Set \`status\` honestly. If the task cannot proceed and needs a human, return "ESCALATE" and
+explain why in \`summary\`; the harness stops the run and shows your reasoning. "PASS" means you
+did the work.
 `;
+
+  if (isReadOnly(agent)) {
+    return (
+      common +
+      `
+You have NO Write tool — you cannot create files, by design. For each document you produce,
+return its full text in \`artifacts[].content\` and the harness will write it to disk for you.
+An artifact without content will not exist on disk, and the gate that reads it will block the
+stage.
+`
+    );
+  }
+
+  return (
+    common +
+    `
+You DO have Write and Edit. Every path in \`filesModified\` must be a file you actually wrote —
+a gate checks each one against the filesystem and fails the build as a hallucination if it is
+missing. Report test counts as the runner actually printed them; do not report 0 failures
+unless you ran the suite and saw 0.
+`
+  );
+}
 
 /**
  * Build the production invoker. Agents run against `cwd` with exactly the tools their contract
@@ -161,7 +140,7 @@ export function createSdkInvoker(config: SdkInvokerConfig): AgentInvoker {
     }
 
     const stage = AGENT_STAGE[agent];
-    const systemPrompt = loadAgentContract(agent) + OUTPUT_CONTRACT;
+    const systemPrompt = loadAgentContract(agent) + outputContract(agent);
     const { query } = await loadSdk();
 
     let structuredOutput: unknown;
@@ -178,7 +157,7 @@ export function createSdkInvoker(config: SdkInvokerConfig): AgentInvoker {
         systemPrompt,
 
         // The envelope is schema-forced; the SDK retries the model on a malformed response.
-        outputFormat: { type: 'json_schema', schema: envelopeSchema(stage, agent) },
+        outputFormat: { type: 'json_schema', schema: agentOutputSchema(agent) },
 
         // Exactly the tools this agent's contract grants; the mutating ones it lacks are
         // explicitly denied. 'dontAsk' never prompts and denies anything not pre-approved —

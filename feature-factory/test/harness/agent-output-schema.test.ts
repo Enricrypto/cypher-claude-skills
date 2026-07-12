@@ -142,8 +142,11 @@ describe('Agent Output Schema', () => {
           summary: 'Analyzed codebase',
           artifacts: [{ name: 'Report', path: 'path/to/report.md', description: 'Audit report' }],
           architecture: { layers: ['Controllers', 'Services', 'Models'] },
+          // The rule is 3+ — the message always said so, but the check only tested non-empty.
           filesIdentified: [
-            { path: 'src/auth.ts', role: 'service', reason: 'Auth logic' }
+            { path: 'src/auth.ts', role: 'service', reason: 'Auth logic' },
+            { path: 'src/middleware/authGuard.ts', role: 'util', reason: 'Guards routes' },
+            { path: 'src/routes/session.ts', role: 'controller', reason: 'Login entry point' }
           ],
           existingPatterns: [
             { name: 'AuthGuard', locations: ['src/middleware/'], confidence: 0.95 }

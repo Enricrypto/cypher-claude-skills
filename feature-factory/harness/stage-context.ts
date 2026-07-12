@@ -21,8 +21,8 @@
  * the filesystem. Nothing is assumed, and nothing defaults to a passing value.
  */
 
-import { existsSync, readFileSync, statSync } from 'fs';
-import { basename, isAbsolute, resolve } from 'path';
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'fs';
+import { basename, dirname, isAbsolute, resolve } from 'path';
 
 import { StageContext } from './stage-gates';
 import {
@@ -60,6 +60,58 @@ export interface BuildStageContextInput {
 
 /** Markers that mean a builder left work unfinished. */
 const ABANDONED_MARKERS = /\b(TODO|FIXME|XXX|HACK)\b/g;
+
+/**
+ * Agents that may have their artifacts written to disk BY THE HARNESS.
+ *
+ * These are the read-only agents: they are granted no Write tool, but the gates require their
+ * documents to exist on disk. So they return the text in artifact.content and we persist it.
+ *
+ * The builders are deliberately absent. They write their own files, and the materialization
+ * gate then checks those paths against the filesystem. If the harness wrote a builder's files
+ * for it, that gate would be verifying its own handiwork and the anti-hallucination guarantee
+ * would be worth nothing. A builder that claims a file must have actually written it.
+ */
+const HARNESS_PERSISTED_AGENTS = new Set([
+  '01-researcher',
+  '02-story-writer',
+  '03-spec-writer',
+  '07-validator',
+  '08-feature-consolidator'
+]);
+
+export interface PersistedArtifact {
+  agent: string;
+  path: string;
+}
+
+/**
+ * Write the documents produced by read-only agents to disk, so the gates can read them.
+ * Returns what was written. Silently skips builders and any artifact without content.
+ */
+export function persistArtifacts(outputs: StageOutputs, cwd: string): PersistedArtifact[] {
+  const written: PersistedArtifact[] = [];
+
+  for (const output of Object.values(outputs)) {
+    const agentOutput = output as FeatureFactoryAgentOutput | undefined;
+    if (!agentOutput?.details?.artifacts) continue;
+    if (!HARNESS_PERSISTED_AGENTS.has(agentOutput.agent)) continue;
+
+    for (const artifact of agentOutput.details.artifacts) {
+      if (typeof artifact.content !== 'string' || artifact.content.length === 0) continue;
+
+      const absolutePath = isAbsolute(artifact.path)
+        ? artifact.path
+        : resolve(cwd, artifact.path);
+
+      mkdirSync(dirname(absolutePath), { recursive: true });
+      writeFileSync(absolutePath, artifact.content, 'utf-8');
+      written.push({ agent: agentOutput.agent, path: artifact.path });
+    }
+  }
+
+  return written;
+}
 
 /**
  * Read every artifact the agents claimed, keyed by both its declared name and its filename,
