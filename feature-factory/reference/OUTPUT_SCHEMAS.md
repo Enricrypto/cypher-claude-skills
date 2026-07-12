@@ -4,6 +4,61 @@ JSON schema definition for each agent's output.
 
 ---
 
+## How these are enforced
+
+Two layers, and the distinction matters:
+
+| Layer | Where | Enforces |
+|---|---|---|
+| **JSON Schema** | `runner/output-schemas.ts` → the Agent SDK's `outputFormat` | The output is well-formed and the gate-relevant fields are **present**. The SDK retries the model internally until it conforms. |
+| **Semantic validation** | `harness/agent-output-schema.ts` → `validateOutputSchema()` | The output is **acceptable work** — 3+ acceptance criteria, no failing tests, etc. A violation escalates. |
+
+The first guarantees the shape; the second judges the content. The harness is the arbiter — the agent dispatcher deliberately does **not** judge output, or there would be two arbiters and the harness's escalation path could be bypassed.
+
+> **Why the full schema matters.** The first live run used an envelope-only schema that required
+> just `summary` + `artifacts`. The Researcher did excellent analysis and put **all of it in
+> `summary` as prose**, returning `filesIdentified: []`. The gate then failed the stage for
+> "0 files identified" — on evidence the agent had genuinely gathered.
+>
+> **An agent fills the shape you give it.** A field that isn't required by the schema ends up in
+> the summary, where the gates cannot see it. Every gate-relevant field is now `required`.
+
+### `validateOutputSchema` keys on AGENT, not stage
+
+Stages 2, 3 and 4 are each shared by **two agents with different output shapes**. Keying the
+checks on stage applied them to the wrong agent — stage 2 demanded `userStory` from the Spec
+Writer (which has none), and stage 4 demanded fields that *neither* stage-4 agent possesses.
+Both were unpassable. The checks are now keyed on agent.
+
+---
+
+## `ArtifactRef` — and the `content` field
+
+```typescript
+{
+  name: string;         // Exact filename the gates look for, e.g. "USER_STORY.md"
+  path: string;         // Relative to the project root
+  description: string;
+  content?: string;     // See below
+}
+```
+
+**`content` exists because read-only agents cannot write files.**
+
+The Researcher, Story Writer, Spec Writer, Validator and Consolidator are granted no `Write`
+tool — that is the point of them. But the gates require their documents to exist **on disk with
+readable content** (`validateACTestable` searches `USER_STORY.md`'s text for Given/When/Then).
+So they return the document text in `content`, and `persistArtifacts()` in
+`harness/stage-context.ts` writes it. The agent stays read-only.
+
+**Builders are deliberately excluded from this.** They write their own code files with the
+`Write` tool, and the materialization gate then checks each claimed path against the filesystem.
+If the harness wrote a builder's files for it, that gate would be verifying its own handiwork and
+the anti-hallucination guarantee would be worth nothing. A builder that claims a file must have
+actually written it.
+
+---
+
 ## Base Schema
 
 All agents produce output matching this base structure:

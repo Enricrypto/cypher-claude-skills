@@ -1,16 +1,61 @@
-# Feature Factory Harness (v2.0)
+# Feature Factory Harness
 
-**Version:** 2.0 (Harness-Driven, Deterministic Gates)  
-**Status:** Production Ready  
-**Last Updated:** 2026-06-23
+**Last Updated:** 2026-07-13
+
+| | |
+|---|---|
+| Harness (gates, schemas, state) | ✅ compiles, tested, in CI |
+| Agent dispatch (Claude Agent SDK) | ✅ runs live |
+| Stage 1 | ✅ verified live against a real repo |
+| Stages 2–5 | ⚠️ gated and compiling, **not yet run live end-to-end** |
+
+> This document previously said **"Status: Production Ready."** It wasn't. The harness had
+> never been compiled, its tests had never run, and the orchestrator's agent calls were a mock
+> returning a hardcoded `status: 'PASS'`. That is fixed — see [../../docs/REFACTOR_PLAN.md](../../docs/REFACTOR_PLAN.md)
+> for what was broken and what remains open.
 
 ---
 
 ## What is Feature Factory?
 
-A **7-agent chain for shipping features correctly the first time**, powered by a **harness system** that enforces deterministic gates, structured outputs, and automated error recovery.
+A **10-agent chain for shipping features correctly the first time**, powered by a **harness** that enforces deterministic gates, structured outputs, and automated error recovery.
 
-Unlike agent-driven decision-making where agents decide if they're ready to advance, the Feature Factory **harness decides**. All criteria must be met. No guessing.
+Unlike agent-driven decision-making — where an agent decides whether it's ready to advance — the Feature Factory **harness decides**. All CRITICAL criteria must be met. No guessing.
+
+### The property that makes it real
+
+> **An agent's opinion of its own work is not evidence.**
+
+The gates never read an agent's self-reported status to decide whether it succeeded. They read the filesystem and the agent's structured output. A Story Writer can return `status: "PASS"` with three criteria all flagged `testable: true` and still be blocked, because the `USER_STORY.md` it wrote contains no Given/When/Then.
+
+This was not always so. `checkStageGate()` used to **fabricate** the evidence it judged:
+
+```ts
+metadata: {
+  testPassRate: stage === 3 ? 1.0 : undefined,   // CRITICAL criterion, hardcoded to pass
+  criticalIssuesCount: stage === 4 ? 0 : undefined,
+}
+```
+
+Of the 23 fields the gates read, the orchestrator supplied 3 — all invented. `harness/stage-context.ts` now derives every one of them from agent output and the filesystem.
+
+---
+
+## How it runs
+
+```bash
+npm run factory -- --feature "add an endpoint to update a user's email" --cwd /path/to/project
+```
+
+Agents are dispatched through the **Claude Agent SDK** (`runner/invoke-agent.ts`), whose bundled binary is Claude Code — so it authenticates as the signed-in user, **including a Claude subscription**. No API key needed locally. CI would need one.
+
+Three things the runner guarantees:
+
+1. **Tool grants are enforced, not documented.** `runner/agent-registry.ts` is what *makes* the Researcher read-only. Grants go to the SDK's permission layer in `dontAsk` mode — never prompts, denies anything not pre-approved, and *reports* any attempt to exceed the grant.
+2. **Output is schema-forced.** `runner/output-schemas.ts` gives each agent a full JSON Schema with the gate-relevant fields required; the SDK retries the model until it conforms. Without this, agents bury their findings in prose and the structured fields come back empty.
+3. **Nothing leaks in.** `settingSources: []` — no `CLAUDE.md`, no user skills, no project settings. The agent's contract is its only instruction source, so it behaves identically on any machine.
+
+**Read-only agents produce documents** by returning the text in `artifacts[].content`; the harness writes it. Builders are excluded from that — they must write their own code, or the anti-hallucination gate would be checking the harness's own work.
 
 ---
 

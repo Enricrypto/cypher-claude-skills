@@ -6,10 +6,15 @@
 
 ---
 
-## Premise
+## Premise *(the starting diagnosis — RESOLVED in Phases 0a/0b; kept for the record)*
 
-The Feature Factory harness is a **well-specified design that has never executed.**
-Three independent facts establish this:
+> **This section describes the state of the repo on 2026-07-12, before any of this work.**
+> It is no longer true: the harness compiles, is tested in CI, and agents run for real. It is
+> preserved because it explains why the plan is shaped the way it is. For current status, see
+> the Status table below.
+
+The Feature Factory harness was a **well-specified design that had never executed.**
+Three independent facts established this:
 
 1. **Every agent call is a mock.** `feature-factory/workflows/feature-factory-orchestrator.ts:713`
    — `invokeAgent()` carries the comment `// In real implementation, would use Agent tool`
@@ -149,6 +154,89 @@ from gstack.
 
 ---
 
+## Status
+
+| Phase | State |
+|---|---|
+| **0a** — compile, test, CI | ✅ done (`72eed7f`) |
+| **0b** — real agent dispatch + real gate evidence | ✅ done (`e0f0ce8`, `ce1c548`), verified live |
+| **0c** — reorg + honest docs | 🔄 in progress (docs done; reorg pending) |
+| **1** — the `preSuppliedSpec` seam | ⬜ next |
+| **2** — Tier 1 (Decomposer first) | ⬜ |
+| **3** — memory + parallelism | ⬜ |
+
+**Verified live (2026-07-13):** one read-only Researcher against a realistic Express+Postgres
+scratch repo. Schema valid, 7 files identified, 6 patterns, 8 risks, `RESEARCHER_REPORT.md`
+persisted by the harness, **gate: ADVANCE at 100%**, zero tool denials.
+
+**Measured cost:** ~15 turns, 2–4 min, $0.45–$0.75 reported per read-only agent on an 8-file
+repo. The old README's "1 minute, $0.08 by feature #10" was fiction and has been deleted.
+
+---
+
+## Known harness bugs (found by Phase 0b's first LIVE run)
+
+The smoke test found four defects that **no offline test could have** — they only appear when a
+real model meets a real schema. All fixed in `ce1c548`.
+
+### BUG-5 — The output schema was too loose *(FIXED)*
+
+The SDK's `outputFormat` only required `summary` + `artifacts` and left `details` open. So the
+Researcher did excellent analysis and put **all of it in `details.summary` as prose**, returning
+`filesIdentified: []`. The gate then failed the stage for "0 files identified" — on evidence the
+agent had genuinely gathered.
+
+**Lesson worth keeping: an agent fills the shape you give it.** A field that isn't required by
+the schema ends up in the summary. `runner/output-schemas.ts` now generates the full per-agent
+JSON Schema with every gate-relevant field required, and the SDK retries the model until it
+conforms. Result: `filesIdentified` 0 → 7, `patternsFound` 0 → 6, `risks` 0 → 8; stage 1 went
+from 0% to 100%.
+
+### BUG-6 — Read-only agents could not produce their documents *(FIXED)*
+
+The Researcher is granted `Read/Grep/Glob` and **no `Write`** — by design. But
+`validateResearcherReport` requires `RESEARCHER_REPORT.md` to exist on disk with readable
+content. It physically could not create it, so **stage 1 was unpassable.**
+
+`ArtifactRef` gained an optional `content`; `persistArtifacts()` writes it. Read-only agents
+return the document text and the **harness** writes it — they stay read-only.
+
+**Builders are deliberately excluded** (`HARNESS_PERSISTED_AGENTS`). They must write their own
+code files. If the harness wrote a builder's files for it, the artifact-materialization gate
+would be verifying the harness's own work and the anti-hallucination guarantee would be worth
+nothing.
+
+### BUG-7 — A self-reported ESCALATE was ignored *(FIXED)*
+
+Agents return `status: PASS | FAIL | LOOP_BACK | ESCALATE`, but the orchestrator only checked
+the schema and the gate. On the live run the Researcher correctly returned `ESCALATE` — it had
+found that the feature could not be built safely — and the orchestrator would have carried on.
+The agents are the ones reading the code; when one declares a blocker, that is a finding.
+`agentDeclaredBlocked()` now stops the run and surfaces its reasoning.
+
+### BUG-8 — `validateOutputSchema` switched on STAGE, not AGENT *(FIXED)*
+
+Stages 2, 3 and 4 are each shared by two agents with entirely different output shapes, so the
+stage-keyed checks were applied to the wrong agent:
+
+- **Stage 2** demanded `userStory` + 3 acceptance criteria from the **Spec Writer**, which has
+  `dataModel`/`apiContract`/`fileList` and no `userStory`. It could never pass.
+- **Stage 4** demanded **both** `acceptanceTests` (Test Verifier) **and** `codeQuality`
+  (Validator). Neither agent has both, so stage 4 was unpassable by either.
+
+**The pipeline could never have got past the Spec Writer.** Now keyed on agent.
+
+### The design property this validated
+
+On the successful run the **gate said ADVANCE (100%)** while the **agent said ESCALATE** — and
+both were correct. The gate judged *"is this research complete?"*; the agent judged *"can this
+be built safely?"* and found that `requireAuth` only checked the `Authorization` header was
+*present*, making an email change (the password-reset anchor) an account-takeover vector.
+
+**The harness enforces process; the agent contributes judgment; neither overrides the other.**
+
+---
+
 ## Known harness bugs (found by Phase 0a)
 
 Running the test suite for the first time surfaced four real bugs in the harness — not test
@@ -246,7 +334,7 @@ downstream is sized by what it reveals.
 
 ---
 
-## Phase 0b — Make the agents real
+## Phase 0b — Make the agents real — ✅ DONE
 
 - [ ] Delete the mock `invokeAgent()` (orchestrator:713) and the local `log()`/`phase()` stubs.
 - [ ] New `runner/invoke-agent.ts`: dispatch to a real agent via the Claude Agent SDK, load
@@ -255,12 +343,31 @@ downstream is sized by what it reveals.
 - [ ] New `runner/cli.ts` -> `npm run factory -- --feature "<description>"`.
 - [ ] Drop `export const meta`; `log`/`phase` become real logger calls. It is a Node module.
 
-**Exit criteria:** `npm run factory -- --feature "add a health check endpoint"` runs
-end-to-end against a scratch repo, invokes all 10 agents for real, **and a deliberately
-broken story (an acceptance criterion that is not Given/When/Then) causes stage 2 to BLOCK
-with exit code 1.** That last assertion is the whole moat — write it as an integration test.
+**RESULT (2026-07-13): met, and it found more than expected.**
 
-**Risk:** medium. This is the real work of Phase 0.
+Replacing the mock turned out to be only half the problem. `checkStageGate()` was FABRICATING
+the context the gates judge — `testPassRate` hardcoded to `1.0` (so the stage-3 CRITICAL "unit
+tests pass" gate was unfailable), `criticalIssuesCount` hardcoded to `0`, and `artifacts`
+assigned an ARRAY where the gates do `ctx.artifacts['USER_STORY.md']`. Of the **23 fields the
+gates read, the orchestrator supplied 3, all invented.** Fixing the mocked agent alone would not
+have made a single gate real. `harness/stage-context.ts` now derives every one of them from
+agent output and the filesystem.
+
+Regression detection was also dead: the baseline read `testing.totalTests`, a field that does
+not exist on the type, so the baseline was `{0, 0}` and the check compared
+`after.passingTests < 0` — never true.
+
+**The moat is tested offline** (`test/harness/stage-context.test.ts`): a story-writer output that
+is schema-valid and self-reports PASS — three criteria, each `testable: true` — is still BLOCKED
+when the `USER_STORY.md` it actually wrote has no Given/When/Then. No model, no network, no
+tokens: the model PRODUCES output, the gate JUDGES it, and judging is testable by handing the
+gate known-bad output directly. That keeps CI honest without drawing down the subscription.
+
+**Auth:** agents run on the **Claude subscription**, not a metered API key. The Agent SDK's
+bundled binary is Claude Code, already logged in (`authMethod: claude.ai`, `subscriptionType:
+max`). Not the documented SDK auth path, so it could change; CI would still need an API key.
+
+**Risk:** medium. This was the real work of Phase 0.
 
 ---
 

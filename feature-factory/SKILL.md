@@ -1,17 +1,34 @@
 # Feature Factory
 
-A 7-agent chain for shipping features correctly the first time. Activate this skill at the start of every non-trivial feature session.
+A 10-agent chain for shipping features correctly the first time, behind gates that are code
+rather than prose. Activate this skill at the start of every non-trivial feature session.
 
 ---
 
-## How to Start
+## Two ways to run it
 
-1. Activate this skill: `Read ~/.claude/skills/software/feature-factory/SKILL.md`
-2. Call `retrieve_context` with the feature description
-   - This loads prior feature patterns from memory (if any exist)
-   - Researcher will surface these learnings in the report
-3. Invoke Agent 1 (Researcher) with the feature prompt
-4. Follow the chain. Honor every STOP checkpoint.
+### 1. As a program (preferred)
+
+```bash
+npm run factory -- --feature "add an endpoint to update a user's email" --cwd /path/to/project
+```
+
+The orchestrator drives all five stages, enforces the gates in code, handles loop-backs, and
+exits `1` on any escalation. Agents run via the Claude Agent SDK and authenticate as the
+signed-in user — a Claude subscription works; no API key needed locally.
+
+This is the real thing. The gates cannot be talked past, because they are functions returning
+`false`, not instructions in a prompt.
+
+### 2. By hand, in a session (for understanding, or a one-off)
+
+1. Call `retrieve_context` with the feature description — loads prior patterns from memory.
+2. Invoke Agent 1 (Researcher) with the feature prompt.
+3. Follow the chain. Honor every STOP checkpoint.
+
+**Be honest about what this mode is.** Driving the chain by hand means *you* are the gate, and a
+gate made of good intentions is exactly the soft-gate failure this system exists to prevent. Use
+it to learn the chain; use mode 1 to actually ship.
 
 ---
 

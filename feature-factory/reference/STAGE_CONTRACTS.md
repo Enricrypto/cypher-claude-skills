@@ -4,6 +4,68 @@ Quick lookup for acceptance criteria per stage.
 
 ---
 
+## Where the evidence comes from
+
+Each criterion is a function reading a `StageContext`:
+
+```ts
+interface StageContext {
+  stageDir: string;
+  artifacts: Record<string, string>;   // filename -> the file's CONTENT, read off disk
+  metadata: Record<string, any>;       // derived from the agents' structured output
+}
+```
+
+**`artifacts` maps filename → file content, not filename → path.** The gates inspect content:
+`validateUserStory` counts Given/When/Then occurrences in `USER_STORY.md`'s *text*. A file that
+does not exist is simply absent from the map, so the gate sees nothing and fails — which is the
+correct outcome for a hallucinated artifact.
+
+`buildStageContext()` in `harness/stage-context.ts` assembles this from what the agents actually
+produced and what is actually on disk. **Nothing defaults to a passing value.** "No tests
+written" is a pass rate of `0`, not a vacuous 100%.
+
+> **This is the half of the moat that was missing.** `checkStageGate()` used to build the context
+> by hand:
+>
+> ```ts
+> metadata: {
+>   filesIdentified: stage === 1 ? 5 : undefined,
+>   testPassRate:    stage === 3 ? 1.0 : undefined,   // CRITICAL criterion — unfailable
+>   criticalIssuesCount: stage === 4 ? 0 : undefined,
+> }
+> ```
+>
+> `testPassRate: 1.0` meant the stage-3 "unit tests pass" gate could never fail.
+> `criticalIssuesCount: 0` did the same to stage 4. Of the 23 fields the gates read, the
+> orchestrator supplied 3 — all invented. The gates were real code judging fabricated evidence.
+> Replacing the mocked agent alone would not have fixed that.
+
+### The 23 fields the gates read
+
+| Field | Derived from |
+|---|---|
+| `filesIdentified` | `researcher.filesIdentified.length` |
+| `patternsFound` | `researcher.existingPatterns.length` (stage 1) / consolidator patterns (stage 5) |
+| `risksIdentified` | `researcher.risks` |
+| `filesModified` | builders' `filesModified.length` |
+| `filesExpected` | the approved spec's `fileList.length` |
+| `claimedFiles` | builders' `filesModified` → checked against the filesystem |
+| `testPassRate` | `testsPassed / testsWritten` across both builders |
+| `backendLoops` / `frontendLoops` | the orchestrator's loop counters |
+| `abandonedTODOs` | counted by **scanning the files the builders actually wrote** |
+| `acceptanceCriteriaTotalCount` / `...TestedCount` | test verifier's `acceptanceTests` |
+| `criticalIssuesCount` | validator's `issues` filtered to `severity: CRITICAL` |
+| `securityIssuesCount` | validator's failed security booleans **plus** its security `issues` |
+| `regressionCount` | validator's `regressions.count` |
+| `knowledgeStored` | the consolidator step |
+| `artifacts['*.md']` | read off disk |
+
+A security check that is `false` **is** a security issue — the booleans are findings, so a clean
+`issues` array does not mean a clean security posture.
+
+---
+
 ## Stage 1: DISCOVER
 
 **Agent:** Researcher  

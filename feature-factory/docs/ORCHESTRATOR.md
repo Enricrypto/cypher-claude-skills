@@ -1,16 +1,24 @@
 ```
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║                                                                              ║
-║                    🎯 FEATURE LOOP ORCHESTRATOR                              ║
+║                    🎯 FEATURE FACTORY ORCHESTRATOR                              ║
 ║                                                                              ║
 ║            Practical Implementation: How to Run the Loop                     ║
 ║                                                                              ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 ```
 
-# Feature Loop Orchestrator - Implementation Guide
+# Feature Factory Orchestrator — Implementation Guide
 
-This document describes how to actually run the Feature Loop system using the agents defined in this repository.
+This document describes how to run the Feature Factory using the agents defined in this repository.
+
+> **Naming:** this system was documented under two names — "Feature Factory" and "Feature Loop" —
+> which made the docs look like they described two different things. There is one system. It is
+> called Feature Factory.
+>
+> **It is now runnable as a Node program:** `npm run factory -- --feature "..." --cwd /path/to/project`.
+> The manual, step-by-step invocation described below still works and is useful for understanding
+> the chain, but the orchestrator no longer needs a human to drive it between stages.
 
 ---
 
@@ -28,24 +36,36 @@ This document describes how to actually run the Feature Loop system using the ag
 - 09-Audit Agent
 - 10-Remediation Agent
 
-✅ **Plans & Specs** (LOOP_IMPLEMENTATION/ directory)
-- Master plan (phased implementation)
-- Production standards
-- Phase 1 detailed spec
+✅ **The orchestrator** (`workflows/feature-factory-orchestrator.ts`)
+- Drives all 5 stages, no human needed between them
+- Enforces the gates in code (`harness/stage-gates.ts`)
+- Handles loop-backs (max 3 per builder) with deterministic error categorisation
+- Records escalations with structured context, and resumable state
 
-❌ **Missing: Orchestrator Implementation**
-- No CLI to invoke the loop
-- No state tracking between stages
-- No loop-back handler
-- No automatic agent sequencing
+✅ **The runner** (`runner/`)
+- `cli.ts` — `npm run factory -- --feature "..." --cwd /path/to/project`; exits `1` on escalation
+- `invoke-agent.ts` — dispatch via the Claude Agent SDK
+- `agent-registry.ts` — per-agent tool grants, **enforced** by the SDK permission layer
+- `output-schemas.ts` — full per-agent JSON Schema, so agents cannot bury findings in prose
+
+⬜ **Not built:** cross-feature memory (Phase 3), parallel builder worktrees (Phase 3),
+Tier 1 (Strategist / Architect / Decomposer).
 
 ---
 
-## Critical Implementation Tasks (Priority Order)
+## The implementation tasks below are DONE
 
-### TASK 1: Feature State Tracker (HIGH PRIORITY)
+> **This section is historical.** It was a to-do list written before the orchestrator existed.
+> Tasks 1 and 2 are built (`harness/state-tracker.ts`, and the loop-back logic in the
+> orchestrator). Tasks 3–5 are not, and are tracked in
+> [../../docs/REFACTOR_PLAN.md](../../docs/REFACTOR_PLAN.md) instead.
+>
+> It is kept because the pseudocode still describes the intended behaviour accurately, which is
+> useful when reading the implementation.
 
-Create `.claude/.feature-state.json` to track execution state:
+### TASK 1: Feature State Tracker — ✅ BUILT (`harness/state-tracker.ts`)
+
+Tracks execution state so a run can be audited and resumed:
 
 ```json
 {
@@ -87,7 +107,7 @@ Create `.claude/.feature-state.json` to track execution state:
 
 ---
 
-### TASK 2: Loop-Back Handler (HIGH PRIORITY)
+### TASK 2: Loop-Back Handler — ✅ BUILT (in the orchestrator)
 
 When a test fails or agent has issues:
 
@@ -113,7 +133,7 @@ detect_failure():
 
 ---
 
-### TASK 3: Memory Initialization Fallback (MEDIUM PRIORITY)
+### TASK 3: Memory Initialization Fallback — ⬜ NOT BUILT (Phase 3)
 
 When MemoryKit is empty (first feature of a type):
 
@@ -137,7 +157,7 @@ retrieve_patterns(feature_type):
 
 ---
 
-### TASK 4: Auto-Fix Framework (MEDIUM PRIORITY)
+### TASK 4: Auto-Fix Framework — ⬜ NOT BUILT
 
 Validator (P5) can auto-fix some guardrails:
 
@@ -161,7 +181,7 @@ auto_fix(finding, guardrail_type):
 
 ---
 
-### TASK 5: Parallel Execution Manager (MEDIUM PRIORITY)
+### TASK 5: Parallel Execution Manager — ⬜ NOT BUILT (Phase 3)
 
 Standard mode runs Backend + Frontend in parallel:
 
@@ -189,7 +209,10 @@ execute_parallel(backend_brief, frontend_brief):
 
 ## Practical Quick-Start (Manual Mode)
 
-Until the orchestrator is automated, you can run the loop manually:
+> **The orchestrator is no longer manual** — run `npm run factory -- --feature "..." --cwd <project>`.
+> The steps below remain useful for understanding what each agent receives and produces, and for
+> driving a single agent in isolation. But note: when you drive the chain by hand, **you** are the
+> gate, and a gate made of good intentions is the soft-gate failure this system exists to prevent.
 
 ### STEP 1: Prepare Project
 
@@ -343,13 +366,17 @@ feature start "Add user profiles" --mode=standard
 
 Implementation is complete when:
 
-✅ `feature start "feature name"` works end-to-end  
+✅ `npm run factory -- --feature "..."` works end-to-end  
 ✅ All 5 stages execute without manual invocation  
 ✅ Loop-back happens automatically on failures  
 ✅ Escalations presented clearly when humans needed  
 ✅ Auto-fixes applied automatically  
-✅ Memory accumulates learning across features  
-✅ System runs 92% faster by feature #10  
+⬜ Memory accumulates learning across features *(Phase 3 — not built)*
+
+**On speed:** an earlier version of this document claimed "the system runs 92% faster by
+feature #10." That number was never measured and has been removed. The only figure we have
+actually observed is ~15 turns / 2–4 minutes / $0.45–$0.75 reported for **one read-only agent**
+on an 8-file repo. A full ten-agent feature is meaningfully more. Measure before you claim.
 
 ---
 

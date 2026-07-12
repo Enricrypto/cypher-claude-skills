@@ -1,834 +1,172 @@
 # cypher-claude-skills
 
-**A repository of reusable Claude Code skills and agents.** Activate directly in Claude Code via `Read`. The **Feature Loop** — a 5-stage, 10-agent orchestration system — runs in the Claude Code window to turn feature ideas into merged, tested code in ~10 minutes (by feature #5).
+Two things live here:
 
-No CLI tool. No npm package. Pure Claude Code skills that you control.
+1. **Feature Factory** — a deterministic, gate-driven engine that runs a feature through five stages with ten specialist agents. Hard gates, enforced in code.
+2. **A library of Claude Code skills** — activated by `Read`-ing them in a session. Catalogued at the bottom of this file.
 
----
-
-## ✅ Feature Factory v2.0: PRODUCTION READY
-
-**Feature Factory harness system is complete, tested, and ready to use.**
-
-The harness adds **deterministic guardrails** to Feature Factory: phase gates, error categorization, structured outputs, and state tracking. Result: **90% fewer issues slip through**, **80% faster escalation detection**.
-
-### Quick Start
-
-```bash
-# Read the Feature Factory v2.0 system
-Read: feature-factory/docs/README.md
-
-# 15-minute quick start
-Read: feature-factory/docs/QUICK_START.md
-
-# Full architecture & design
-Read: feature-factory/docs/ARCHITECTURE.md
-```
-
-### What's Included
-
-✅ **Harness (2,100 lines of code)**
-- Deterministic phase gates (all CRITICAL criteria must pass)
-- Error categorization (30+ patterns → fix recommendations)
-- Structured output validation (JSON schemas per stage)
-- Full state tracking with resumption capability
-
-✅ **Orchestrator (537 lines)**
-- 5-stage coordination (Discover → Plan → Execute → Verify → Deliver)
-- Automatic loop-back recovery (max 3 attempts per builder)
-- Regression detection (before/after test comparison)
-- Clear escalation paths with structured context
-
-✅ **Documentation (9,000 words)**
-- README: Overview & philosophy
-- QUICK_START: 15-minute guide
-- STAGE_GUIDE: Deep dive into each stage
-- ARCHITECTURE: Design decisions & trade-offs
-- Reference docs: Contracts, errors, schemas, state tracking
-
-✅ **Tests (1,100 lines, 100+ test cases)**
-- Unit tests for all harness components
-- Integration tests for orchestrator
-- Mock-based for CI compatibility
-- Edge cases and error paths covered
-
-### Key Improvements Over v1.0
-
-| Aspect | v1.0 | v2.0 | Improvement |
-|--------|------|------|---|
-| **Gate Model** | Manual approval | Deterministic validation | Objective criteria |
-| **Error Handling** | Agent guesses | Lookup table + templates | 90% accuracy |
-| **Loop-Backs** | Manual tracking | Automated with history | 100% capture |
-| **Regressions** | None | Before/after detection | 100% prevention |
-| **Escalation** | Informal message | Structured report | 80% faster detection |
-| **State** | None | Full resumption | Can interrupt/resume |
-
-### Links
-
-- **feature-factory/docs/** — Complete documentation (4 files)
-- **feature-factory/reference/** — Quick lookup tables (4 files)
-- **feature-factory/harness/** — Guardrail components (4 files)
-- **feature-factory/workflows/** — Main orchestrator
-- **feature-factory/test/** — Test suite (5 files, 100+ tests)
+Not an npm package. Not a CLI you install. You clone this repo and run it.
 
 ---
 
-## 🎉 Feature Loop System: Design Complete
+## Status — read this before trusting anything else
 
-The Feature Loop system is **fully designed, documented, and ready for use or implementation**.
+| Component | Status |
+|---|---|
+| **Harness** (gates, schemas, error taxonomy, state tracking) | ✅ Compiles, tested, in CI |
+| **Agent dispatch** (Claude Agent SDK) | ✅ Runs live, verified end-to-end |
+| **Stage 1 (Discover)** | ✅ Verified live against a real repo |
+| **Stages 2–5** | ⚠️ Compile and are gated, but have **not** been run live end-to-end |
+| **E2E loop** (`e2e-loop/`) | ⚠️ Still a Claude Code Workflow script; not part of the Node build, not typechecked |
+| **Tier 1** (Strategist / Architect / Decomposer) | ❌ Designed, not built. See [docs/REFACTOR_PLAN.md](docs/REFACTOR_PLAN.md) |
 
-### What's Included
+**Earlier versions of this README claimed things that were not true** — "PRODUCTION READY", "92% faster", "$0.08 per feature by feature #10". Those numbers were invented. The harness had never been compiled, its test suite had never run, and the orchestrator's agent calls were a mock that returned a hardcoded `status: 'PASS'`. That is all fixed now, but the claims are worth remembering as a caution: measure, then write it down.
 
-✅ **Complete System Design** (June 11, 2026)
-- 5-stage pipeline (DISCOVER → PLAN → EXECUTE → VERIFY → DELIVER)
-- 10 specialized agents with clear responsibilities
-- 4 execution modes (safe, standard, fast, scheduled)
-- 5 optimization phases (P0-P5) documented
-- 10,000+ lines of documentation
+**Real measured cost:** one read-only agent, on an 8-file repo, took ~15 turns / 2–4 minutes and reported $0.45–$0.75. A full ten-agent feature is meaningfully more. On a Claude subscription you pay in usage limits rather than dollars, but plan accordingly.
 
-### Start Here
+---
 
-**To learn the system (manual mode):**
+## The idea
+
+A single AI session cannot reliably be product analyst, architect, backend engineer, frontend engineer, QA and reviewer at once. Mistakes compound silently when those roles collapse into one context.
+
+So the work is split across ten agents, each with one job, a clean context, and **only the tools it needs** — and between them sit gates that are *code*, not prose.
+
+That last part is the whole point. A "gate" that is an instruction in a prompt is a suggestion; the model can talk itself past it. A gate that is a function returning `false` cannot be talked past. Everything in `feature-factory/harness/` exists to make the gates unbypassable.
+
+### The one property that matters
+
+> **An agent's opinion of its own work is not evidence.**
+
+The gates never read an agent's self-reported status to decide whether it succeeded. They read what is **on disk** and what the agent **actually produced**:
+
+- The Story Writer can return `status: "PASS"` with three acceptance criteria all flagged `testable: true` — and still be **blocked**, because the `USER_STORY.md` it wrote contains no Given/When/Then. A gate reads that file's text.
+- A builder can claim it created `src/services/Foo.ts` — and be **blocked** as a hallucination, because the gate calls `fs.existsSync` on every claimed path.
+- "No tests written" scores a pass rate of **0**, not a vacuous 100%.
+
+Those are tested, offline, in CI, with no model and no tokens ([`stage-context.test.ts`](feature-factory/test/harness/stage-context.test.ts)) — because the model's job is to *produce* output and the gate's job is to *judge* it, and judging is testable by handing the gate known-bad output directly.
+
+---
+
+## Running it
+
 ```bash
-Read: ORCHESTRATOR.md
-# Invoke agents step-by-step, ~40 minutes per feature
+npm install
+npm run typecheck     # tsc, strict
+npm test              # 152 tests, no network, no tokens
+
+npm run factory -- --feature "add an endpoint to update a user's email" --cwd /path/to/project
 ```
 
-**To implement automation (next phase):**
-```bash
-Read: IMPLEMENTATION_ROADMAP.md
-# 8 tasks, 46-67 hours total, July 1, 2026 target
+Exits `0` only if all five stages pass their gates. Any escalation exits `1`.
+
+### Authentication
+
+Agents run through the **Claude Agent SDK**, whose bundled binary *is* Claude Code. So it authenticates as whoever is signed in — including a **Claude subscription**. No `ANTHROPIC_API_KEY` is required if you're already logged into Claude Code.
+
+Two caveats worth knowing:
+- Subscription auth is not the path the Agent SDK documents (it lists API keys and cloud providers), so it could change.
+- CI has no subscription login. If you want the factory to run unattended, that needs an API key. The gate tests run in CI regardless, because they need no model at all.
+
+---
+
+## The five stages
+
+```
+Stage 1  DISCOVER   01-researcher                        → Researcher Report
+Stage 2  PLAN       02-story-writer → 03-spec-writer     → User Story + Technical Brief
+                    ⏸ CHECKPOINT 1 (story)  ⏸ CHECKPOINT 2 (brief)
+Stage 3  EXECUTE    04-backend-builder → 05-frontend-builder   (max 3 loop-backs each)
+Stage 4  VERIFY     06-test-verifier → 07-validator      → regression + security check
+                    ⏸ CHECKPOINT 3 (PR)
+Stage 5  DELIVER    08-feature-consolidator              → reusable patterns
 ```
 
-**For complete status:**
-```bash
-Read: DELIVERY_SUMMARY.md
+Each stage has a contract in [`harness/stage-gates.ts`](feature-factory/harness/stage-gates.ts) — a list of criteria tagged CRITICAL / IMPORTANT / NICE_TO_HAVE. **All CRITICAL criteria must pass or the stage does not advance.** The recommendation (ADVANCE / WAIT / ESCALATE) falls out of the pass rate.
+
+### Tool grants are enforced, not documented
+
+[`runner/agent-registry.ts`](feature-factory/runner/agent-registry.ts) is what *makes* the Researcher read-only — not its markdown asking politely. The grants are passed to the SDK's permission layer, which runs in `dontAsk` mode: it never prompts, and denies anything not pre-approved.
+
+| Agent | Tools | Can write files? |
+|---|---|---|
+| 01-researcher | Read, Grep, Glob | No |
+| 02-story-writer | Read | No |
+| 03-spec-writer | Read, Grep, Glob | No |
+| 04-backend-builder | Read, Write, Edit, Bash | Yes |
+| 05-frontend-builder | Read, Write, Edit, Bash | Yes |
+| 06-test-verifier | Read, Write, Edit, Bash | Yes |
+| 07-validator | Read, Grep, Glob | No |
+| 08-feature-consolidator | Read, Grep | No |
+
+If an agent reaches for a tool it wasn't granted, the SDK denies it **and reports the attempt** — it isn't silently swallowed.
+
+**How read-only agents produce documents:** they can't write files, but the gates need `USER_STORY.md` and friends to exist on disk. So they return the document text in `artifacts[].content` and the **harness** writes it. Builders are deliberately excluded from this — they must write their own code, or the anti-hallucination gate would be verifying the harness's own work.
+
+---
+
+## What the agents are told
+
+Each agent's system prompt is its contract file in [`feature-factory/agents/`](feature-factory/agents/), loaded verbatim. Nothing else is loaded — no `CLAUDE.md`, no user skills, no project settings (`settingSources: []`). Without that, the same agent would behave differently depending on whose machine it ran on, and the determinism the gates exist to provide would be gone.
+
+Output is **schema-forced**: each agent gets a full JSON Schema ([`runner/output-schemas.ts`](feature-factory/runner/output-schemas.ts)) with the gate-relevant fields marked required, and the SDK retries the model internally until it conforms. This matters more than it sounds. In the first live run the schema only required a summary, so the Researcher put all its findings in **prose** and returned `filesIdentified: []` — the gate then failed it on evidence it had genuinely gathered. **An agent fills the shape you give it.** Give it the right shape.
+
+---
+
+## Gates enforce process; agents contribute judgment
+
+On the first successful live run, the **gate said ADVANCE (100%)** and the **agent said ESCALATE** — and both were right.
+
+The gate was judging *"is this research complete?"* — 7 files mapped, 6 patterns, 8 risks, report on disk. Yes.
+
+The agent was judging *"can this be built safely?"* — and found that `requireAuth` only checked that an `Authorization` header was *present*, never verifying a token or identifying the caller. Applied to an **email change** — the password-reset anchor — that's an account-takeover vector. It called the endpoint a 30-minute job and escalated anyway.
+
+The orchestrator honors that. An agent declaring a blocker is a finding, not noise. Neither side overrides the other.
+
+---
+
+## Layout
+
+```
+feature-factory/
+├── harness/          gates, schemas, error taxonomy, state, context building
+├── runner/           Agent SDK dispatch, tool grants, output schemas, CLI
+├── agents/           the 10 agent contracts (each becomes a system prompt)
+├── workflows/        the orchestrator
+├── docs/             deeper docs
+├── reference/        lookup tables (contracts, schemas, errors, state)
+└── test/             152 tests — all offline
+
+e2e-loop/             separate post-merge E2E system (see status table above)
+skills/               standalone Claude Code skills — catalogue below
+docs/REFACTOR_PLAN.md the phased plan, including known open bugs
 ```
 
 ---
 
-## How to Use
+## Skills
 
-This is a **Claude Code skill repository**. No installation needed. Activate skills directly in Claude Code:
-
-### Activate a Skill
-
-In Claude Code, type:
+Standalone, usable on their own. Activate by reading the file in a Claude Code session:
 
 ```
-Read ~/.claude/skills/software/feature-loop/SKILL.md
+Read skills/security-audit.md
 ```
 
-Then Claude will ask if you want to activate the skill. Approve, and the skill is live.
+Some are single files; some are directories with a `SKILL.md` and a `reference/` folder. The full catalogue is below.
 
-### Available Skills
-
-- **feature-loop** — The 5-stage, 10-agent Feature Loop system (primary)
-- Plus 20+ other skills (api-design, code-review, security-audit, etc.)
-
-### Clone the Repository
-
-```bash
-# Add these skills to your local Claude Code environment
-git clone https://github.com/Enricrypto/cypher-claude-skills.git ~/.claude/skills/custom
-```
-
-Then activate any skill by reading its SKILL.md file in Claude Code.
-
----
-
-## MemoryKit MCP Setup (Enables Feature Loop Learning)
-
-The Feature Loop includes a **memory-driven learning system** that improves with each feature. By feature #10, the system is 92% faster due to pattern reuse. This requires MemoryKit MCP.
-
-### Install MemoryKit MCP
-
-1. **Clone the MemoryKit repository:**
-
-```bash
-git clone https://github.com/antoniorapozo/memorykit-mcp.git
-cd memorykit-mcp
-```
-
-2. **Follow the setup instructions in the MemoryKit README:**
-   - Install dependencies
-   - Configure your MCP server
-   - Start the MemoryKit service
-
-3. **Once MemoryKit is running:**
-   - The Feature Loop will automatically store patterns after each feature
-   - The Researcher will retrieve proven solutions from prior features
-   - Each feature gets faster as the system learns and reuses patterns
-   - By feature #5: 75% faster, 75% cost reduction
-   - By feature #10: 92% faster, 92% cost reduction
-
-### Learning Progression
-
-```
-Feature #1:   12 min, $0.96  (baseline, building patterns)
-Feature #2:   8 min, $0.72   (learning from feature #1)
-Feature #3:   6 min, $0.48   (patterns reinforced)
-Feature #5:   3 min, $0.24   (80% pattern reuse)
-Feature #10:  1 min, $0.08   (92% savings, system "autopilot")
-```
-
-**Note:** MemoryKit is optional but strongly recommended. Without it, each feature starts from scratch. With it, the system learns and compounds knowledge — the difference between slow and fast is pattern reuse.
+> **Note:** this repo used to be published as `@cypher-digital/claude-skills` with a `npx cypher-skills sync` command. That channel is dead — the package is private and the repo is the single source of truth. Clone it and read the files.
 
 ---
 
 ## Skill Activation Policy
 
-**Skills never activate automatically.** Claude will ask:
+Skills never activate automatically. Claude will ask:
 
 > "Would you like me to activate the [skill-name] skill now?"
 
-You must explicitly approve before any skill runs. This applies to all skills in this repo.
+Approve explicitly before any skill runs.
 
 ---
-
-## Feature Loop System
-
-The Feature Loop is the successor to the Feature Factory — a **fully-automated 5-stage, 10-agent system** that ships features correctly and quickly.
-
-**The problem it solves:** A single AI session cannot reliably be product analyst + architect + backend engineer + frontend engineer + QA + reviewer simultaneously. Mistakes compound silently when those roles collapse into one context. The Feature Loop splits the work into 5 stages and 10 agents — each gets one job, a clean context, and only the tools it needs.
-
-**Performance:** Feature #1 takes 12 minutes. By feature #10, the system is 92% faster (1 minute) due to pattern reuse and learning.
-
-### How to Use (Manual Mode - Available Now)
-
-```bash
-Read: ORCHESTRATOR.md
-# Then invoke agents step-by-step following the practical guide
-```
-
-### How to Implement (Automation Layer - Documented for Next Phase)
-
-```bash
-Read: IMPLEMENTATION_ROADMAP.md
-# Complete day-by-day blueprint with code skeletons
-# 8 tasks, 46-67 hours total effort
-# Target launch: July 1, 2026
-```
-
-### Architecture (5 Stages, 10 Agents)
-
-```
-┌──────────────────────────────────────────────────────────────┐
-│           FEATURE FACTORY: 5 STAGES, 10 AGENTS               │
-├──────────────────────────────────────────────────────────────┤
-│                                                              │
-│ STAGE 1: DISCOVER (2-5 min)                                 │
-│ ├─ 01-Researcher: Map codebase + find patterns             │
-│ └─ Output: Researcher Report                                │
-│                                                              │
-│ STAGE 2: PLAN (3-8 min)                                    │
-│ ├─ 02-Story Writer: Define acceptance criteria             │
-│ ├─ 03-Spec Writer: Design technical blueprint              │
-│ └─ Output: User Story + Technical Brief                    │
-│                                                              │
-│ [CHECKPOINT 1: Approve story]                              │
-│ [CHECKPOINT 2: Approve spec]                               │
-│                                                              │
-│ STAGE 3: EXECUTE (5-15 min)                                │
-│ ├─ 04-Backend Builder: Services + API routes + tests       │
-│ ├─ 05-Frontend Builder: Components + pages + UI tests      │
-│ ├─ 06-Test Verifier: Acceptance tests                      │
-│ └─ Output: Code + tests ready for review                   │
-│                                                              │
-│ STAGE 4: VERIFY (7-13 min)                                 │
-│ ├─ 07-Validator: Gap report + security check              │
-│ └─ Output: Validation Report                               │
-│                                                              │
-│ [CHECKPOINT 3: Approve PR]                                 │
-│                                                              │
-│ STAGE 5: DELIVER (5-10 min)                                │
-│ ├─ 08-Feature Consolidator: Extract patterns + learn       │
-│ └─ Output: Reusable patterns + time estimates              │
-│                                                              │
-└──────────────────────────────────────────────────────────────┘
-```
-
-### Key Features
-
-- **Inline Verification (P2):** Test as you build, not after
-- **Pattern Reuse (P3):** Start from proven solutions (85% code reuse by feature #10)
-- **Code Review (P4):** Agent peer review catches architecture issues early
-- **Guardrails Validation (P5):** Non-negotiable rules enforcement + auto-fix
-- **Memory-Driven Learning:** System improves with each feature
-- **Human in Loop:** Checkpoints for approval + decisions
-
-### Links
-
-- **ORCHESTRATOR.md** — How to run manually today
-- **IMPLEMENTATION_ROADMAP.md** — Blueprint for automation (8 tasks)
-- **DELIVERY_SUMMARY.md** — Full status report
-- **agents/** — 10 agent definitions
-- **LOOP_IMPLEMENTATION/** — System specifications
-
----
-
-### Memory Integration (4 Phases)
-
-The Feature Factory includes a **self-learning memory system** powered by MemoryKit that compounds knowledge with each feature. After 10 features, your pipeline is 30-40% faster.
-
-#### Phase 1: Memory Storage
-Each agent stores insights to memory after completing its work:
-- **Researcher**: patterns found, risks flagged, time estimates
-- **Story Writer**: story scope, acceptance criteria boundaries
-- **Spec Writer**: architectural decisions, API patterns, design choices
-- **Builders**: execution metrics, confidence levels, iterations needed
-- **Test Verifier**: test coverage analysis, edge cases identified
-- **Validator**: validation metrics, guardrail violations
-
-#### Phase 2: Memory-Aware Reasoning
-Each agent actively retrieves and uses prior learnings:
-- **Researcher**: surfaces prior patterns with confidence levels + recommendations
-- **Story Writer**: flags scope issues from similar prior features
-- **Backend Builder**: recommends proven patterns (BaseAuthService, error handling, etc.)
-- **Frontend Builder**: recommends component patterns that worked
-- **Validator**: checks against known critical issues from history
-
-#### Phase 3: Autonomous Iteration
-Builders self-fix test failures instead of stopping:
-- **Backend Builder**: analyzes test error → attempts fix (up to 3 times) → re-runs tests
-- **Frontend Builder**: same pattern for component/integration tests
-- **Test Verifier**: refines test assumptions if test design was wrong
-- Each attempt logged to memory so next similar feature avoids the issue
-
-#### Phase 4: Feature Consolidation (Agent 08)
-After PR merge, consolidates learnings for next similar feature:
-- Execution summary (time per agent, total iterations, blockers)
-- Confidence profiles by category (CRUD, auth, migrations, async, error handling, etc.)
-- Reusable patterns extracted (proven ✓, watch ⚠️, avoid ✗)
-- Time estimates for feature type (baseline + risk adjustment)
-
-**Result:** Feature 1 takes 6h. Feature 2 takes 5h. Feature 3 takes 3.5h. Feature 10+ takes 4h consistently because the system knows:
-- Which patterns work (and how confident to be)
-- Which problems to anticipate (and how to avoid them)
-- How long similar features take (with confidence bounds)
-- What issues typically appear (and how to catch them early)
-
----
-
-### The chain
-
-```
-Feature idea
-    ↓
-[01] Researcher        → maps the codebase, flags risks, retrieves prior patterns
-    ↓
-[02] Story Writer      → user story + acceptance criteria, flags prior scope issues
-    ↓
-⏸  CHECKPOINT 1 — approve the story before any technical decisions
-    ↓
-[03] Spec Writer       → technical blueprint (data model, API, frontend, tests)
-    ↓
-⏸  CHECKPOINT 2 — approve the brief before any file is touched
-    ↓
-[04] Backend Builder   → migrations, services, routes, unit tests (self-fixes test failures)
-    ↓
-[05] Frontend Builder  → components, hooks, loading/error/empty states, UI tests (self-fixes test failures)
-    ↓
-[06] Test Verifier     → acceptance tests mapped to each story criterion (refines test design)
-    ↓ (loop back to builder if ❌ failures)
-[07] Validator         → gap report: completeness, security, code quality (checks known issues)
-    ↓ (loop back to builder if Critical issues)
-⏸  CHECKPOINT 3 — open the PR
-    ↓
-[08] Feature Consolidator → consolidates execution metrics, patterns, learnings for future features
-    ↓
-[09] Branch Cleanup    → delete local + remote feature branch
-```
-
----
-
-### How each agent works and which skills it uses
-
-#### [01] Researcher — read-only, tools: Read, Grep, Glob
-
-The Researcher maps the codebase before a single line of code is written. It produces a **Researcher Report** that every downstream agent depends on. If the Researcher misses something, every agent after it inherits that blind spot.
-
-**Loads:** `architecture-patterns`
-
-Why: Understanding Clean Architecture, Hexagonal, and DDD patterns lets the Researcher identify which layer existing code lives in, spot pattern violations, and flag whether a proposed feature fits the existing architecture or will require a refactor.
-
-**Produces:**
-- Relevant files list (path + role)
-- Existing patterns to follow (naming, error handling, test conventions)
-- Closest existing feature to reuse from
-- Risks and flags (multi-tenancy, auth boundaries, race conditions, timezone handling)
-- Open questions — never guesses, always flags
-
----
-
-#### [02] Story Writer — read-only, tools: Read
-
-Turns the rough feature description into a precise, testable user story. No technical decisions happen here — only clarity about the user problem, expected behaviour, and boundaries.
-
-**Loads:** no skills — reasoning only
-
-**Produces:**
-- User story (`As a… / I want… / so that…`)
-- Numbered acceptance criteria (Given/When/Then — each one directly testable)
-- Edge cases (in scope or explicitly out of scope)
-- Open questions for product or tech to resolve
-
-> ⏸ **CHECKPOINT 1** — the story is the contract. Read every acceptance criterion carefully before approving. Correcting a story takes minutes. Correcting the wrong feature after builders have run takes hours.
-
----
-
-#### [03] Spec Writer — read-only, tools: Read, Grep, Glob
-
-Translates the approved story into a concrete technical blueprint. Every builder agent reads this before touching a file.
-
-**Loads:** `architecture-patterns` · `api-design-principles`
-
-Why: `architecture-patterns` ensures the spec respects layering (no business logic in routes, no framework dependencies in the domain). `api-design-principles` drives correct endpoint design — resource-oriented naming, proper HTTP semantics, consistent error shapes, and pagination from day one.
-
-**Produces:**
-- Data model changes (tables, columns, indexes, migrations, foreign keys)
-- Background / async flow (if applicable)
-- API contract (method + path, auth, request/response shapes, all error codes)
-- Frontend changes (pages, components, hooks, all three states: loading / empty / error)
-- Full test list (unit, integration, acceptance — one per criterion)
-- Complete file list with reasons — nothing surprises the builders
-- Risks and constraints from the Researcher Report
-
-> ⏸ **CHECKPOINT 2** — last chance to catch wrong assumptions before any file changes. Read the file list. Read the API contract. Read the data model. Only approve when satisfied.
-
----
-
-#### [04] Backend Builder — tools: Read, Write, Edit, Bash
-
-Implements the backend exactly as specified in the approved brief. Scope ends at the API contract.
-
-**Loads:** `nodejs-backend-patterns` · `api-design-principles` · `test-driven-development`
-
-Why:
-- `nodejs-backend-patterns` enforces the layered structure (controllers stay thin, business logic goes in services, repositories handle data access) and provides patterns for middleware, error handling, auth, and database integration.
-- `api-design-principles` keeps the implemented endpoints consistent with the spec — correct HTTP methods, status codes, and error response shapes.
-- `test-driven-development` enforces RED → GREEN → REFACTOR: every new behaviour gets a failing test written first, watched fail, then implemented. No production code without a failing test first.
-
-**Builds:** migrations · service layer · routes/controllers · background jobs · unit tests
-
-**Does not touch:** any frontend file, component, page, or client-side hook
-
-**Produces:** Backend Builder Summary with every file changed, every pattern reused, the API contract, and test results.
-
----
-
-#### [05] Frontend Builder — tools: Read, Write, Edit, Bash
-
-Implements the UI exactly as specified, consuming the API contract the Backend Builder produced. Never invents endpoints.
-
-**Loads:** `frontend-architecture` · `frontend-design` · `test-driven-development`
-
-Why:
-- `frontend-architecture` enforces the 4-layer model (Presentation → Application → Domain → Infrastructure). Screens stay thin and wire-only. Business logic goes in use-case hooks. Domain rules live in framework-free domain files. Services are thin API wrappers.
-- `frontend-design` prevents generic AI aesthetics (Inter font, purple gradients, cards on cards). Every UI decision — spacing, radius, shadow, typography, motion — is evaluated against a production design standard.
-- `test-driven-development` applies the same RED → GREEN → REFACTOR discipline to UI components and hooks.
-
-**Builds:** components · pages · use-case hooks · state management · loading/empty/error states · form validation · UI tests
-
-**If the API contract doesn't match what the UI needs:** flags the mismatch explicitly and loops back to the Backend Builder — never silently works around it.
-
-**Does not touch:** any backend file, service, route, migration, or worker
-
----
-
-#### [06] Test Verifier — tools: Read, Write, Edit, Bash
-
-Proves the feature does what the story said it should. Writes acceptance tests — not unit tests. The builders already wrote unit tests; this agent verifies from the outside, the way a real user would experience it.
-
-**Loads:** `test-driven-development` · `verification-before-completion`
-
-Why:
-- `test-driven-development` keeps tests focused on behaviour, not implementation — tests exercise the feature through the API or UI, not internal functions.
-- `verification-before-completion` enforces the iron law: no completion claim without running the suite and reading the output. Every criterion is either ✅ Covered / ❌ Failing / ⚠️ Not coverable — never assumed passing.
-
-**For each acceptance criterion:**
-- ✅ **Covered** — test written and passes
-- ❌ **Failing** — test written, fails, reports which builder owns the fix
-- ⚠️ **Not coverable** — explains why automated verification isn't possible
-
-**Does not modify** any implementation file. Does not patch around failures. Routes them back.
-
----
-
-#### [07] Validator — read-only, tools: Read, Grep, Glob
-
-Compares what was actually built against what was approved. Finds everything the other agents missed. Reports it honestly by severity. Never fixes anything.
-
-**Loads:** `code-review-excellence` · `security-audit`
-
-Why:
-- `code-review-excellence` provides a structured review methodology: architectural fit, logic correctness, test quality, maintainability, naming — with severity labels (🔴 blocking / 🟡 important / 🟢 nit).
-- `security-audit` runs a full threat-surface check: secrets exposure, broken auth, injection vulnerabilities, missing input validation, tenant isolation gaps, supply chain concerns, and OWASP Top 10 — grounded in the 2026 threat landscape.
-
-**Checks:**
-- Completeness — every acceptance criterion and brief section implemented?
-- Test coverage — every failure path and edge case tested?
-- Security — auth checks, tenant isolation, input validation, no secrets in logs
-- Code quality — logic in the right layer, no duplicate code, patterns consistent with the codebase
-- Operational concerns — timezone handling, retry/idempotency, multi-tenant gaps
-
-**Severity levels:**
-- **Critical** — must fix before merge (security hole, data loss, auth gap, failing criterion)
-- **Important** — should fix before merge (missing test, pattern violation)
-- **Minor** — reviewer's call (naming, refactor opportunity)
-
-> ⏸ **CHECKPOINT 3** — review the Validation Report. No Critical issues → open the PR.
-
----
-
-#### [08] Feature Consolidator — read-only, tools: Read, Grep
-
-Runs **after the PR is merged** to consolidate all execution memories into reusable patterns for future similar features.
-
-**Produces:**
-- **Execution summary** — time per agent, total iterations needed, critical blockers encountered, what worked well, what caused issues
-- **Confidence profiles by category** — CRUD (X%), Authentication (X%), Database migrations (X%), Async operations (X%), Error handling (X%), State management (X%), etc.
-- **Reusable patterns** — patterns to reuse (proven, high confidence), patterns to watch (took iterations), patterns to avoid (failed), new patterns created
-- **Time estimation update** — baseline time for this feature type, risk adjustment for known issues, confidence level
-- **Common issues in this feature type** — what issues appeared, how they were solved, recommendation for next similar feature
-
-**Result:** Future features of the same type start with institutional knowledge. The Researcher immediately knows which patterns to recommend. The builders know which problems to anticipate. Time estimates become increasingly accurate.
-
-**When to run:** Once per week after features merge, or after every 2-3 features.
-
----
-
-### Artifacts that flow between agents
-
-| From | To | Artifact |
-|---|---|---|
-| Researcher | All downstream agents | Researcher Report |
-| Story Writer | Spec Writer, Test Verifier, Validator | User Story + acceptance criteria |
-| Spec Writer | Both Builders, Test Verifier, Validator | Technical Brief |
-| Backend Builder | Frontend Builder, Test Verifier, Validator | Backend Summary + API Contract |
-| Frontend Builder | Test Verifier, Validator | Frontend Summary |
-| Test Verifier | Validator | Acceptance Test Report |
-
-Each agent must read all upstream artifacts before starting.
-
----
-
-### Loop-back rules
-
-| Situation | Action |
-|---|---|
-| Test Verifier finds ❌ failing criterion | Loop back to the builder who owns that layer |
-| Validator finds Critical issue | Loop back to the builder who owns the file |
-| Validator finds Important issue | Your call — fix before PR or note in PR description |
-| Wrong architectural assumption mid-chain | Kill the session. Start fresh with the correct assumption baked into the first prompt. |
-
----
-
-### Overriding skill assignments per project
-
-The default skill assignments above apply to all projects. To override for a specific project, add this to the project's `CLAUDE.md`:
-
-```markdown
-## Active Skills
-Backend: nodejs-backend-patterns, api-design-principles, test-driven-development
-Frontend: frontend-architecture, frontend-design
-Validator: code-review-excellence, security-audit
-```
-
-The agents will use this list instead of the feature-factory defaults.
-
----
-
-### When to use the full chain
-
-| Use full chain | Skip it (inline fix) |
-|---|---|
-| New user-facing behaviour | Typo or copy correction |
-| New API endpoint | Single-line bug fix |
-| Database schema change | Config tweak |
-| Change touching > 3 files | One-line routing or styling fix |
-
----
-
-### Branch cleanup after merge
-
-After the PR merges, always run:
-
-```bash
-git checkout main
-git pull origin main
-git branch -d feat/<task-name>
-git push origin --delete feat/<task-name>
-```
-
----
-
-## E2E Testing Loop System (v1.0: Harness-Driven, 100% Acceptance)
-
-The **E2E Testing Loop** is a complete, production-ready orchestration system for building end-to-end test suites with **guaranteed reliability**. It enforces 100% acceptance (no partial passes), mandatory Docker rebuilds (no stale-state bugs), and automatic human escalation when limits are reached.
-
-### Start Here
-
-**New to the E2E loop?** Read the quick-start guide:
-
-```bash
-Read: e2e-loop/docs/README.md
-```
-
-This gives you:
-- 🚀 Quick Start (5 minutes)
-- 🏗️ Architecture (how it works)
-- 📋 Phase Guide (detailed walkthrough)
-- 🔧 Reference (error categories, contracts, schemas)
-
-### What's New in v1.0
-
-✅ **Harness-Driven Guardrails** — Only the harness decides when phases advance (not agent mood)  
-✅ **100% Acceptance Only** — Loop requires 100% pass rate; if not achievable, escalates to human  
-✅ **Mandatory Docker Rebuild** — Fresh environment before every test run (prevents stale-state bugs)  
-✅ **Playwright MCP Integration** — Evaluator verifies selectors/APIs exist before tests run (catches ghost features)  
-✅ **Regression Detection** — Before/after comparison automatically rolls back agent fixes that broke tests  
-✅ **Hard Limits** — Max 5 iterations, 1 hour timeout, 500k token budget (prevents infinite loops)  
-✅ **Phase-Organized Artifacts** — Each phase stores outputs in dedicated folders (easy navigation)  
-✅ **Structured Output** — All agent outputs are JSON/YAML (no prose parsing errors)  
-✅ **Clear Escalation Path** — When limits hit, escalates to human with full context preserved  
-
-### The Problem It Solves
-
-Your original E2E loop had **10 critical failure modes** where agent decision-making caused bugs:
-
-1. ❌ Docker rebuild forgotten → stale container → false test passes
-2. ❌ Phase advancement uncontrolled → PR opened without tests passing
-3. ❌ Evaluator tested stale code → no verification of live app
-4. ❌ Acceptance criteria vague → "good enough" acceptance
-5. ❌ Error categorization guessed → wrong fix applied
-6. ❌ Agent output unparseable → harness made bad decisions
-7. ❌ Regressions undetected → agent broke something, didn't notice
-8. ❌ Loop never terminated → could run forever
-9. ❌ Artifacts scattered → agents couldn't find things
-10. ❌ No escalation path → no way out when stuck
-
-**All 10 fixed in v1.0.** The harness now enforces all rules deterministically.
-
-### Why a Loop?
-
-Manual E2E test writing is slow and error-prone. The E2E Testing Loop solves this with **automated auditing, generation, verification, and remediation** that systematically:
-- Audits the codebase first (prevents guessing)
-- Generates tests from the audit (prevents hallucination)
-- Audits the generated tests (catches ghost features)
-- Tests on fresh Docker (no stale state)
-- Auto-remediates failures (up to 5 tries)
-- Escalates to human if unreachable (no infinite loops)
-
-### Phase Flow
-
-```
-Phase -1: AUDIT PREPARATION
-  ├─ Code Auditor → Comprehensive audit
-  ├─ Audit Reviewer → Validate (≥95% required)
-  └─ Gap Remediation → Fix gaps (if < 95%)
-  
-Phase 0: INFRASTRUCTURE (Optional)
-  └─ Fixer → Apply optional fixes
-  
-Phase 1: TEST GENERATION
-  ├─ Test Planner → Map scenarios
-  ├─ Test Generator → Create test files
-  ├─ Test Auditor (Playwright MCP) → Verify selectors/APIs exist
-  ├─ Mandatory Docker Rebuild (Harness)
-  └─ Run Tests (Harness) → Fresh results
-  
-Phase 2: REMEDIATION (If tests failed, max 5 iterations)
-  └─ Repeat:
-     ├─ Mandatory Docker Rebuild (Harness)
-     ├─ Remediation Agent → Fix failures
-     ├─ Run Tests (Harness)
-     └─ Harness checks:
-        ├─ 100% pass? → Advance
-        ├─ Regressions? → Rollback, escalate
-        ├─ Max iterations? → Escalate
-        └─ Improving? → Loop again
-  
-Phase 3: FINALIZE
-  └─ Create commit summary, ready for PR
-```
-
-**Output:** Production-ready test suite (100% passing on all 3 browsers, all AC covered, fresh Docker state guaranteed)
-
-### Documentation
-
-**Complete Guide:**  
-```bash
-Read: e2e-loop/docs/README.md              # Overview
-Read: e2e-loop/docs/QUICK_START.md         # 5-minute quickstart
-Read: e2e-loop/docs/ARCHITECTURE.md        # Deep dive
-Read: e2e-loop/docs/PHASE_GUIDE.md         # Detailed phase walkthrough
-Read: e2e-loop/reference/QUICK_REFERENCE.md # Quick lookup
-```
-
-**Key Files:**
-- `e2e-loop/harness/` — Guardrail infrastructure (phase gates, error categories, remediation engine)
-- `e2e-loop/workflows/` — Orchestrator workflow
-- `e2e-loop/artifacts/` — Phase outputs (auto-created)
-- `e2e-loop/skills/` — Agent definitions
-- `e2e-loop/docs/` — Full documentation
-
-### Key Learnings & Critical Patterns
-
-**From v1.0 Implementation (June 23, 2026):**
-
-1. **Harness, Not Agent, Decides Advancement**
-   - Agents produce artifacts; harness validates against contracts
-   - No agent decides phase completion (reduces self-approval bugs)
-   - All phase gates checkable automatically
-
-2. **100% Acceptance Model**
-   - No partial passes; < 100% → escalate to human
-   - Prevents "almost working" from shipping
-   - Clear go/no-go decision at each phase
-
-3. **Mandatory Docker Rebuild**
-   - Before EVERY test run, hard requirement
-   - Prevents stale-state bugs (old code tested)
-   - Non-negotiable harness step
-
-4. **Live Verification with Playwright MCP**
-   - Evaluator navigates actual pages before tests run
-   - Catches ghost features (tests for non-existent UI)
-   - Verifies selectors exist and APIs respond correctly
-
-5. **Error Categorization as Lookup Table**
-   - Deterministic pattern → category → fix mapping
-   - Prevents wrong fix from wrong categorization
-   - Harness-provided, not agent-inferred
-
-6. **Phase-Organized Artifacts**
-   - Each phase has its own folder (phase-0-audit/, etc.)
-   - Easy navigation, no scattered files
-   - Agents know exactly where to look
-
-7. **Regression Detection**
-   - Before/after comparison catches agent-introduced breaks
-   - Automatic rollback on regression
-   - Prevents broken code from advancing
-
-8. **Hard Limits Prevent Loops**
-   - Max 5 remediation iterations
-   - 1 hour timeout
-   - 500k token budget
-   - Escalates when hit
-
-### Reference
-
-- **Harness Implementation**: `e2e-loop/docs/HARNESS_IMPLEMENTATION_SUMMARY.md` (technical deep dive)
-- **Error Categories**: `e2e-loop/harness/error-categories.ts` (deterministic mapping)
-- **Phase Contracts**: `e2e-loop/harness/phase-gates.ts` (acceptance criteria)
-- **Remediation Engine**: `e2e-loop/harness/remediation-engine.ts` (loop orchestrator)
-- **Playwright Integration**: See `e2e-testing-playwright` skill below
-
-### Diagrams
-
-**E2E Loop Phase Flow:**
-
-```
-┌──────────────────────────────────────────────────────────────────┐
-│               E2E TESTING LOOP (4 Phases with Auto-Remediation)   │
-├──────────────────────────────────────────────────────────────────┤
-│                                                                  │
-│  PHASE 0: AUDIT PREPARATION (60 min)                           │
-│  ┌────────────────────────────────────────────────────────┐   │
-│  │ • Audit Reviewer:    Map routes, pages, components    │   │
-│  │ • Gap Remediation:   Fix audit discrepancies          │   │
-│  │ • Apply Corrections: Update E2E_TEST_CATEGORIES.md    │   │
-│  └─────────────────────────┬────────────────────────────┘   │
-│                            │                                  │
-│  PHASE 1: INFRA FIX (20 min, OPTIONAL)                       │
-│  ┌─────────────────────────┴────────────────────────────┐   │
-│  │ • Fixer: Rate limiting, healthchecks, test DB, env   │   │
-│  └─────────────────────────┬────────────────────────────┘   │
-│                            │                                  │
-│  PHASE 2: TEST GENERATION (2.5 hours)                        │
-│  ┌─────────────────────────┴────────────────────────────┐   │
-│  │ • Planner: Map test scenarios from audit             │   │
-│  │ • Generator: Create e2e/tests/**/*.spec.ts           │   │
-│  │ • Test Auditor: Verify tests match code (Phase 2 ✓)  │   │
-│  │ • Run: Execute test suite                            │   │
-│  └─────────────────────────┬────────────────────────────┘   │
-│                            │                                  │
-│         Tests FAIL?        │                                  │
-│            YES ↓           │ NO (tests pass)                  │
-│  ┌──────────────────────────────────────────────────────┐   │
-│  │ PHASE 3: REMEDIATION (AUTO, 30-90 min)              │   │
-│  │ ┌────────────────────────────────────────────────┐  │   │
-│  │ │ Remediation Agent: 6-Phase Systematic Fix      │  │   │
-│  │ │ • Phase 1: DIAGNOSE (cross-browser patterns)   │  │   │
-│  │ │ • Phase 2: ANALYZE (root causes)               │  │   │
-│  │ │ • Phase 3: FIX (API, selectors, data, timing)  │  │   │
-│  │ │ • Phase 4: VERIFY (all 3 browsers pass)        │  │   │
-│  │ │ • Phase 5: COMMIT (clear fix summary)          │  │   │
-│  │ │ • Phase 6: PUSH (to remote branch)             │  │   │
-│  │ └────────────────────────────────────────────────┘  │   │
-│  └─────────────────────────┬────────────────────────────┘   │
-│                            │                                  │
-│  OUTPUT: 100% tests passing, 3 browsers, all AC covered       │
-│                                                                  │
-└──────────────────────────────────────────────────────────────────┘
-```
-
-**Feature Loop + E2E Loop (Complete Automation):**
-
-```
-Feature Idea
-    │
-    ├─ FEATURE LOOP (5 Stages)
-    │  ├─ Stage 1: Researcher → Researcher Report
-    │  ├─ Stage 2: Story Writer → User Story + AC
-    │  │           [CHECKPOINT 1: Approve story]
-    │  ├─ Stage 3: Spec Writer → Technical Brief
-    │  │           [CHECKPOINT 2: Approve spec]
-    │  ├─ Stage 4: Backend Builder → API routes + services
-    │  │           Frontend Builder → UI components
-    │  │           Test Verifier → Acceptance tests
-    │  ├─ Stage 5: Validator → Gap report
-    │  │           [CHECKPOINT 3: Approve PR]
-    │  └─ Feature Consolidator → Extract patterns
-    │
-    ├─ FEATURE TESTED (After merge, OPTIONAL)
-    │  └─ E2E TESTING LOOP (4 Phases with Auto-Remediation)
-    │     ├─ Phase 0: Audit codebase for test gaps
-    │     ├─ Phase 1: Fix infrastructure (rate limit, etc.)
-    │     ├─ Phase 2: Generate tests
-    │     ├─ Phase 3: Auto-remediate failures (6-phase methodology)
-    │     │           → Diagnose → Analyze → Fix → Verify
-    │     │           → Commit → Push
-    │     └─ Output: Production-ready E2E test suite (100% passing)
-    │
-    └─ ✅ FEATURE SHIPPED (code + unit tests + E2E tests + docs)
-```
-
-### When to Use Feature Loop vs E2E Loop
-
-**Use Feature Loop when:**
-- Starting a new feature or sprint
-- Need to design API contracts before implementation
-- Want automated acceptance tests for user stories
-- Need code review and validation before merge
-- Building unit tests + integration tests for components
-
-**Use E2E Loop when:**
-- Feature is already merged and in production (or staging)
-- Want comprehensive cross-browser E2E coverage
-- Need to test complex user journeys (multi-step flows, auth, payments)
-- Want to build test infrastructure (fixtures, POMs, mocking)
-- Automating test generation from codebase audit
-
-**Use Both Together when:**
-- Feature Loop writes code + unit tests
-- E2E Loop builds comprehensive E2E test suite after merge
-- Combined: 100% AC coverage (unit + integration + E2E)
-
----
-
 ## Skills Reference
 
 The skills below are standalone — usable independently or as part of the Feature Factory chain. Each one can be activated on its own for any task that matches its description.
@@ -1553,26 +891,6 @@ Structured commit message discipline. Enforces conventional commits format with 
 
 ---
 
-## Adding New Skills
-
-```bash
-# Scaffold a new skill file in the repo
-npx cypher-skills add <skill-name>
-
-# Then edit skills/<skill-name>.md with your instructions
-# Bump version and publish — all projects get it on next sync
-npm version patch
-npm publish --access public
-```
-
----
-
-## Updating Skills Across Projects
-
-```bash
-# In any project that has cypher-claude-skills installed
-npx cypher-skills sync
-```
 
 ---
 
