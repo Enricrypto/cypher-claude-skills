@@ -119,7 +119,7 @@ export const errorPatterns: ErrorPattern[] = [
   // ============================================================================
 
   {
-    pattern: /TypeScript error|TS\d+:|Type.*is not assignable/i,
+    pattern: /TypeScript error|TS\d+:|Type.*is not assignable|Type mismatch/i,
     category: 'TYPE_ERROR',
     fixClass: 'FIX_TYPES',
     suggestedFix: 'TypeScript type mismatch — check type annotations match function signatures'
@@ -157,15 +157,14 @@ export const errorPatterns: ErrorPattern[] = [
     suggestedFix: 'Assertion failed — verify actual behavior matches test expectation'
   },
 
-  {
-    pattern: /does not exist|is undefined|cannot read property|null is not/i,
-    category: 'MISSING_IMPLEMENTATION',
-    fixClass: 'IMPLEMENT',
-    suggestedFix: 'Code or property not implemented — verify all required functions/properties exist'
-  },
-
   // ============================================================================
   // DATABASE ERRORS (Feature Factory specific)
+  //
+  // analyzeError() is first-match-wins, so these specific database patterns MUST
+  // stay ABOVE the generic MISSING_IMPLEMENTATION pattern below. Otherwise
+  // "column X does not exist" matches /does not exist/ first and is categorised as
+  // missing code (fix: IMPLEMENT) instead of a missing migration
+  // (fix: CREATE_MIGRATION) — the wrong fix class for the wrong root cause.
   // ============================================================================
 
   {
@@ -187,6 +186,17 @@ export const errorPatterns: ErrorPattern[] = [
     category: 'MIGRATION_ERROR',
     fixClass: 'CREATE_MIGRATION',
     suggestedFix: 'Database schema missing — create migration to add missing column/table'
+  },
+
+  // ============================================================================
+  // GENERIC IMPLEMENTATION GAPS — must stay BELOW the specific patterns above
+  // ============================================================================
+
+  {
+    pattern: /does not exist|is undefined|cannot read property|null is not/i,
+    category: 'MISSING_IMPLEMENTATION',
+    fixClass: 'IMPLEMENT',
+    suggestedFix: 'Code or property not implemented — verify all required functions/properties exist'
   },
 
   {
@@ -221,10 +231,16 @@ export const errorPatterns: ErrorPattern[] = [
 export function analyzeError(errorMessage: string): ErrorAnalysis {
   for (const pattern of errorPatterns) {
     if (pattern.pattern.test(errorMessage)) {
+      // An UNKNOWN match means the catch-all fired, i.e. we recognised the text as
+      // an error but could not categorise it. That must report confidence 0, not 0.9 —
+      // downstream code selects a fix class from this score, so a confident-looking
+      // UNKNOWN is worse than no match at all.
+      const isUncategorised = pattern.category === 'UNKNOWN';
+
       return {
         category: pattern.category,
         fixClass: pattern.fixClass,
-        confidence: 0.9,
+        confidence: isUncategorised ? 0 : 0.9,
         suggestedFix: pattern.suggestedFix,
         requiresManualReview: pattern.fixClass === 'MANUAL_REVIEW'
       };

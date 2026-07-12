@@ -219,7 +219,9 @@ describe('Agent Output Schema', () => {
             benefit: 'security'
           },
           acceptanceCriteria: [
-            { id: 'AC-1', given: 'logged in', when: 'enable 2FA', then: 'QR code shown', priority: 'MUST', testable: true }
+            { id: 'AC-1', given: 'logged in', when: 'enable 2FA', then: 'QR code shown', priority: 'MUST', testable: true },
+            { id: 'AC-2', given: 'QR code shown', when: 'a valid TOTP code is submitted', then: '2FA is enabled', priority: 'MUST', testable: true },
+            { id: 'AC-3', given: '2FA is enabled', when: 'an invalid TOTP code is submitted', then: 'login is rejected', priority: 'MUST', testable: true }
           ],
           edgeCases: [],
           assumptions: [],

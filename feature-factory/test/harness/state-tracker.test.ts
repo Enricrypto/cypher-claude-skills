@@ -21,6 +21,7 @@ import {
   isResumable,
   getStateStats
 } from '../../harness/state-tracker';
+import { FeatureFactoryAgentOutput } from '../../harness/agent-output-schema';
 
 describe('State Tracker', () => {
   describe('createFeatureState', () => {
@@ -61,7 +62,7 @@ describe('State Tracker', () => {
     });
 
     it('should record successful step', () => {
-      const output = {
+      const output: FeatureFactoryAgentOutput = {
         stage: 1,
         agent: '01-researcher',
         timestamp: new Date().toISOString(),
@@ -91,7 +92,7 @@ describe('State Tracker', () => {
       state = recordAgentStep(state, 1, '01-researcher', 'FAIL', undefined, error);
 
       expect(state.stageHistory[0].error).toBeTruthy();
-      expect(state.stageHistory[0].error.message).toBe('Test error');
+      expect(state.stageHistory[0].error?.message).toBe('Test error');
     });
   });
 
@@ -212,7 +213,8 @@ describe('State Tracker', () => {
     it('should calculate total time', () => {
       state = completeFeature(state, 'SUCCESS');
 
-      expect(state.metrics.totalTime).toBeGreaterThan(0);
+      // A synthetic run can start and complete inside the same millisecond, so 0 is valid.
+      expect(state.metrics.totalTime).toBeGreaterThanOrEqual(0);
     });
 
     it('should accept different completion statuses', () => {

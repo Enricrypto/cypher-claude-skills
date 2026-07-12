@@ -1,19 +1,12 @@
 {
   "name": "@cypher-digital/claude-skills",
   "version": "1.1.0",
-  "description": "Centralized Claude Code skills for Cypher projects",
-  "main": "install.js",
-  "files": [
-    "skills/",
-    "agents/",
-    "cli.js",
-    "install.js"
-  ],
-  "bin": {
-    "cypher-skills": "./cli.js"
-  },
+  "private": true,
+  "description": "Software Factory — deterministic, gate-driven feature execution engine for Claude Code",
   "scripts": {
-    "postinstall": "node install.js"
+    "typecheck": "tsc --noEmit",
+    "test": "jest",
+    "build": "tsc"
   },
   "keywords": [
     "claude",
@@ -22,5 +15,12 @@
     "ai"
   ],
   "author": "Cypher",
-  "license": "MIT"
+  "license": "MIT",
+  "devDependencies": {
+    "@types/jest": "^29.5.14",
+    "@types/node": "^22.10.2",
+    "jest": "^29.7.0",
+    "ts-jest": "^29.2.5",
+    "typescript": "^5.7.2"
+  }
 }

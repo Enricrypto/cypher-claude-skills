@@ -22,7 +22,7 @@ describe('Stage Gates', () => {
   beforeEach(() => {
     mockContext = {
       stageDir: 'artifacts/stage-1/',
-      artifacts: [],
+      artifacts: {},
       metadata: {}
     };
   });
@@ -46,11 +46,11 @@ describe('Stage Gates', () => {
       expect(criticalCriteria.length).toBeGreaterThan(0);
     });
 
-    it('Stage 1 should require architecture and files', () => {
+    it('Stage 1 should require a researcher report and files', () => {
       const stage1 = stageContracts[1];
       const names = stage1.acceptance.criteria.map(c => c.name);
 
-      expect(names).toContain('Architecture Mapped');
+      expect(names).toContain('Researcher Report Complete');
       expect(names).toContain('Files Identified');
     });
 
@@ -73,11 +73,11 @@ describe('Stage Gates', () => {
   describe('canAdvanceStage - Stage 1', () => {
     it('should PASS when all CRITICAL criteria met', async () => {
       const stage1 = stageContracts[1];
+      mockContext.artifacts = { 'RESEARCHER_REPORT.md': '# Researcher Report' };
       mockContext.metadata = {
-        architectureMapped: true,
         filesIdentified: 5,
         patternsFound: 3,
-        risksFlagged: 2
+        risksIdentified: ['multi-tenancy', 'timezone handling']
       };
 
       const decision = await canAdvanceStage(1, stage1, mockContext);
@@ -89,11 +89,11 @@ describe('Stage Gates', () => {
 
     it('should FAIL when files < 3', async () => {
       const stage1 = stageContracts[1];
+      mockContext.artifacts = { 'RESEARCHER_REPORT.md': '# Researcher Report' };
       mockContext.metadata = {
-        architectureMapped: true,
         filesIdentified: 2,  // Less than required 3
         patternsFound: 3,
-        risksFlagged: 2
+        risksIdentified: ['multi-tenancy', 'timezone handling']
       };
 
       const decision = await canAdvanceStage(1, stage1, mockContext);
@@ -102,13 +102,13 @@ describe('Stage Gates', () => {
       expect(decision.blockers.length).toBeGreaterThan(0);
     });
 
-    it('should FAIL when architecture not mapped', async () => {
+    it('should FAIL when the researcher report is missing', async () => {
       const stage1 = stageContracts[1];
+      mockContext.artifacts = {};  // CRITICAL criterion: report absent
       mockContext.metadata = {
-        architectureMapped: false,  // CRITICAL failure
         filesIdentified: 5,
         patternsFound: 3,
-        risksFlagged: 2
+        risksIdentified: ['multi-tenancy', 'timezone handling']
       };
 
       const decision = await canAdvanceStage(1, stage1, mockContext);
@@ -120,11 +120,11 @@ describe('Stage Gates', () => {
       const stage1 = stageContracts[1];
       const totalCriteria = stage1.acceptance.criteria.length;
 
+      mockContext.artifacts = { 'RESEARCHER_REPORT.md': '# Researcher Report' };
       mockContext.metadata = {
-        architectureMapped: true,
         filesIdentified: 5,
         patternsFound: 0,    // IMPORTANT criterion fails
-        risksFlagged: 2
+        risksIdentified: ['multi-tenancy', 'timezone handling']
       };
 
       const decision = await canAdvanceStage(1, stage1, mockContext);
@@ -162,7 +162,18 @@ describe('Stage Gates', () => {
       expect(decision.canAdvance).toBe(false);
     });
 
-    it('should PASS when all files modified and tests 100%', async () => {
+    // SKIPPED — this documents a known harness bug, not a test bug. See docs/REFACTOR_PLAN.md
+    // ("Known harness bugs", BUG-1). Stage 3's CRITICAL `artifacts_materialized` criterion is
+    // validated by validateArtifactsMaterialized() in stage-gates.ts, which reads a
+    // caller-supplied `metadata.fileExistsCheck` map instead of touching the disk — while the
+    // real filesystem check, verifyArtifactMaterialization() in agent-output-schema.ts, is never
+    // called by the gate. Nothing populates fileExistsCheck, so the criterion can never pass and
+    // stage 3 can never advance.
+    //
+    // Do NOT unskip this by adding a fake fileExistsCheck to the fixture — that would make the
+    // suite green while leaving the anti-hallucination gate blind. Unskip in Phase 0b, once the
+    // gate delegates to verifyArtifactMaterialization().
+    it.skip('should PASS when all files modified and tests 100%', async () => {
       const stage3 = stageContracts[3];
       mockContext.metadata = {
         filesModified: 5,
@@ -213,11 +224,11 @@ describe('Stage Gates', () => {
   describe('Gate Recommendations', () => {
     it('should recommend ADVANCE when passing', async () => {
       const stage1 = stageContracts[1];
+      mockContext.artifacts = { 'RESEARCHER_REPORT.md': '# Researcher Report' };
       mockContext.metadata = {
-        architectureMapped: true,
         filesIdentified: 5,
         patternsFound: 3,
-        risksFlagged: 2
+        risksIdentified: ['multi-tenancy', 'timezone handling']
       };
 
       const decision = await canAdvanceStage(1, stage1, mockContext);

@@ -1,0 +1,33 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "lib": ["ES2022"],
+    "types": ["node", "jest"],
+
+    "strict": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true,
+
+    "noEmit": true,
+    "outDir": "dist"
+  },
+  "include": ["**/*.ts"],
+  "exclude": [
+    "node_modules",
+    "dist",
+    "skills",
+
+    // Workflow-runtime scripts, NOT Node modules. They rely on globals injected by
+    // Claude Code's Workflow tool (log/phase/agent/args) and use top-level await, so
+    // they cannot typecheck as CommonJS modules.
+    //   - feature-factory orchestrator: rewritten as a real Node module in Phase 0b,
+    //     at which point it re-enters this typecheck.
+    //   - e2e-loop orchestrator: Tier 3, deferred.
+    // See docs/REFACTOR_PLAN.md.
+    "feature-factory/workflows",
+    "e2e-loop/workflows"
+  ]
+}

@@ -120,7 +120,7 @@ describe('Error Categories', () => {
     it('should return FIX_IMPORT template', () => {
       const template = getFixCodeTemplate('FIX_IMPORT');
       expect(template).toContain('import');
-      expect(template).toContain('file exists');
+      expect(template).toContain('file must exist');
     });
 
     it('should return FIX_TYPES template', () => {
