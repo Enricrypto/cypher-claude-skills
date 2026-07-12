@@ -14,7 +14,8 @@ import { FeatureFactoryAgentOutput } from './agent-output-schema';
 export interface AgentStepRecord {
   stage: number;
   agent: string;
-  status: 'PASS' | 'FAIL' | 'LOOP_BACK' | 'ESCALATED';
+  /** WARN: the agent completed, but with non-blocking findings the human should see. */
+  status: 'PASS' | 'FAIL' | 'WARN' | 'LOOP_BACK' | 'ESCALATED';
   startedAt: string; // ISO8601
   completedAt?: string; // ISO8601
   loopCount: number;
@@ -31,19 +32,39 @@ export interface StageLoopBack {
   reason: string;
   attempt: number;
   fixApplied?: string;
-  result: 'PASS' | 'FAIL';
+  /** WARN: a non-fatal verification problem, recorded but not blocking. */
+  result: 'PASS' | 'FAIL' | 'WARN';
   timestamp: string;
 }
 
 export interface EscalationRecord {
   stage: number;
   agent: string;
-  reason: 'MAX_LOOPS' | 'CRITICAL_ISSUE' | 'TIMEOUT' | 'SCHEMA_VALIDATION' | 'MANUAL';
+  reason:
+    | 'MAX_LOOPS'
+    | 'CRITICAL_ISSUE'
+    | 'TIMEOUT'
+    | 'SCHEMA_VALIDATION'
+    | 'MANUAL'
+    // An agent claimed files it never wrote. Distinct from CRITICAL_ISSUE: the code is not
+    // wrong, it does not exist.
+    | 'HALLUCINATION_DETECTED'
+    // The project itself is not ready to be built in (no test script, no migrations, etc.).
+    // Distinct because the fix is to the repo, not to the feature.
+    | 'INFRASTRUCTURE_FAILURE'
+    // The agent process itself failed — crashed, hit max turns, exhausted its budget.
+    | 'EXECUTION_FAILURE';
   severity: 'CRITICAL' | 'IMPORTANT';
   context: {
     failingTests?: string[];
     issues?: string[];
     loopCount?: number;
+    blockers?: string[];
+    regressions?: string[];
+    missingFiles?: string[];
+    remediation?: string;
+    passRate?: number;
+    buildErrors?: string[];
     message: string;
   };
   escalatedAt: string;
@@ -163,7 +184,7 @@ export function recordLoopBack(
   stage: number,
   agent: string,
   reason: string,
-  result: 'PASS' | 'FAIL',
+  result: 'PASS' | 'FAIL' | 'WARN',
   fixApplied?: string
 ): FeatureState {
   const loopBack: StageLoopBack = {

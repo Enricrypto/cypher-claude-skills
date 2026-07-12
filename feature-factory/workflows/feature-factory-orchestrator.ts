@@ -20,6 +20,7 @@ import {
 } from '../harness/stage-gates';
 
 import {
+  ArtifactRef,
   validateOutputSchema,
   FeatureFactoryAgentOutput,
   ResearcherOutput,
@@ -55,6 +56,9 @@ import {
   InfrastructureAudit
 } from '../harness/infrastructure-gates';
 
+import { AgentInvoker } from '../runner/invoke-agent';
+import { buildStageContext, StageOutputs } from '../harness/stage-context';
+
 import {
   FeatureState,
   createFeatureState,
@@ -68,25 +72,22 @@ import {
   getStateSummary
 } from '../harness/state-tracker';
 
-/**
- * Main orchestrator flow
- */
-export const meta = {
-  name: 'feature-factory-orchestrator',
-  description: 'Harness-driven orchestrator for Feature Factory with deterministic gates and loop-backs',
-  phases: [
-    { title: 'Stage 1: Discover', detail: 'Map codebase, identify patterns' },
-    { title: 'Stage 2: Plan', detail: 'Design user story and technical spec' },
-    { title: 'Stage 3: Execute', detail: 'Implement with auto loop-backs' },
-    { title: 'Stage 4: Verify', detail: 'Test and validate with regression detection' },
-    { title: 'Stage 5: Deliver', detail: 'Consolidate patterns and learnings' }
-  ]
-};
-
-interface OrchestrationOptions {
+export interface OrchestrationOptions {
   featureName: string;
   featureDescription: string;
   resumeFromState?: FeatureState;
+
+  /** The target project the agents build in. Artifact paths and gates resolve against this. */
+  cwd: string;
+
+  /**
+   * How agents are run. Injected rather than imported so the gates can be exercised without a
+   * network: production passes createSdkInvoker(...), tests pass a scripted fake. The harness
+   * is indifferent to which — it judges the output, not its provenance.
+   */
+  invoke: AgentInvoker;
+
+  logger?: (message: string) => void;
 }
 
 /**
@@ -94,6 +95,14 @@ interface OrchestrationOptions {
  */
 export async function runFeatureFactory(options: OrchestrationOptions): Promise<FeatureState> {
   let state = options.resumeFromState || createFeatureState(options.featureName);
+
+  const invokeAgent = options.invoke;
+  const cwd = options.cwd;
+  const log = options.logger ?? ((message: string) => console.log(`[FF] ${message}`));
+  const phase = (title: string) => log(`\n=== ${title} ===`);
+
+  /** Accumulates real agent outputs; the gates are built from this, never from constants. */
+  const outputs: StageOutputs = {};
 
   try {
     log(`Starting Feature Factory: ${state.featureName}`);
@@ -125,10 +134,11 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
       return completeFeature(state, 'ESCALATED', 'Schema validation failed at Stage 1');
     }
 
+    outputs.researcher = researcherOutput;
     state = recordAgentStep(state, 1, '01-researcher', 'PASS', researcherOutput);
 
     // Check Stage 1 gate
-    const stage1Decision = await checkStageGate(state, 1, researcherOutput);
+    const stage1Decision = await checkStageGate(1, cwd, outputs);
     if (!stage1Decision.canAdvance) {
       state = recordEscalation(
         state,
@@ -170,6 +180,7 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
       return completeFeature(state, 'ESCALATED', 'Story schema validation failed');
     }
 
+    outputs.story = storyOutput;
     state = recordAgentStep(state, 2, '02-story-writer', 'PASS', storyOutput);
 
     // CHECKPOINT 1: Approve story
@@ -196,10 +207,11 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
       return completeFeature(state, 'ESCALATED', 'Spec schema validation failed');
     }
 
+    outputs.spec = specOutput;
     state = recordAgentStep(state, 2, '03-spec-writer', 'PASS', specOutput);
 
     // Check Stage 2 gate
-    const stage2Decision = await checkStageGate(state, 2, specOutput);
+    const stage2Decision = await checkStageGate(2, cwd, outputs);
     if (!stage2Decision.canAdvance) {
       state = recordEscalation(
         state,
@@ -234,14 +246,14 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
       backendLoopCount++;
       log(`Backend Builder: Attempt ${backendLoopCount}/3`);
 
-      backendOutput = await invokeAgent({
+      const candidate: BackendBuilderOutput = await invokeAgent({
         stage: 3,
         agent: '04-backend-builder',
         prompt: `Implement backend for approved spec${backendLoopCount > 1 ? ` (Attempt ${backendLoopCount})` : ''}`,
         maxAttempts: 1
       });
 
-      const backendValidation = validateOutputSchema(3, '04-backend-builder', backendOutput);
+      const backendValidation = validateOutputSchema(3, '04-backend-builder', candidate);
       if (!backendValidation.valid) {
         state = recordLoopBack(
           state,
@@ -253,9 +265,9 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
         continue;
       }
 
-      if (backendOutput.details.testing?.testsFailed && backendOutput.details.testing.testsFailed > 0) {
+      if (candidate.details.testing?.testsFailed && candidate.details.testing.testsFailed > 0) {
         // Tests failed — analyze errors and loop back
-        const failedTest = backendOutput.details.testing.failingTests?.[0];
+        const failedTest = candidate.details.testing.failingTests?.[0];
         if (failedTest) {
           const errorAnalysis = analyzeError(failedTest.error);
           state = recordLoopBack(
@@ -271,7 +283,8 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
       }
 
       // Backend tests passed
-      state = recordAgentStep(state, 3, '04-backend-builder', 'PASS', backendOutput);
+      backendOutput = candidate;
+      state = recordAgentStep(state, 3, '04-backend-builder', 'PASS', candidate);
       backendPassed = true;
     }
 
@@ -288,6 +301,7 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
     }
 
     log(`✅ Backend builder passed (${backendLoopCount === 1 ? 'first try' : `after ${backendLoopCount} attempts`})`);
+    const backend: BackendBuilderOutput = backendOutput;
 
     // Frontend Builder with loop-back
     let frontendLoopCount = 0;
@@ -298,14 +312,14 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
       frontendLoopCount++;
       log(`Frontend Builder: Attempt ${frontendLoopCount}/3`);
 
-      frontendOutput = await invokeAgent({
+      const candidate: FrontendBuilderOutput = await invokeAgent({
         stage: 3,
         agent: '05-frontend-builder',
         prompt: `Implement frontend for approved spec and backend API${frontendLoopCount > 1 ? ` (Attempt ${frontendLoopCount})` : ''}`,
         maxAttempts: 1
       });
 
-      const frontendValidation = validateOutputSchema(3, '05-frontend-builder', frontendOutput);
+      const frontendValidation = validateOutputSchema(3, '05-frontend-builder', candidate);
       if (!frontendValidation.valid) {
         state = recordLoopBack(
           state,
@@ -317,8 +331,8 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
         continue;
       }
 
-      if (frontendOutput.details.testing?.testsFailed && frontendOutput.details.testing.testsFailed > 0) {
-        const failedTest = frontendOutput.details.testing.failingTests?.[0];
+      if (candidate.details.testing?.testsFailed && candidate.details.testing.testsFailed > 0) {
+        const failedTest = candidate.details.testing.failingTests?.[0];
         if (failedTest) {
           const errorAnalysis = analyzeError(failedTest.error);
           state = recordLoopBack(
@@ -333,7 +347,8 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
         continue;
       }
 
-      state = recordAgentStep(state, 3, '05-frontend-builder', 'PASS', frontendOutput);
+      frontendOutput = candidate;
+      state = recordAgentStep(state, 3, '05-frontend-builder', 'PASS', candidate);
       frontendPassed = true;
     }
 
@@ -350,6 +365,9 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
     }
 
     log(`✅ Frontend builder passed (${frontendLoopCount === 1 ? 'first try' : `after ${frontendLoopCount} attempts`})`);
+    const frontend: FrontendBuilderOutput = frontendOutput;
+    outputs.backend = backend;
+    outputs.frontend = frontend;
 
     // ========================================================================
     // ARTIFACT MATERIALIZATION CHECK (Reality Verification)
@@ -358,9 +376,13 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
 
     log('\n🔍 Verifying artifact materialization (checking if claimed files actually exist)...\n');
 
-    const claimedFiles = [
-      ...(backendOutput?.details.filesModified?.map(f => ({ path: f.path, source: 'Backend Builder' })) || []),
-      ...(frontendOutput?.details.filesModified?.map(f => ({ path: f.path, source: 'Frontend Builder' })) || [])
+    const claimedFiles: ArtifactRef[] = [
+      ...(backend.details.filesModified ?? []).map(f => ({
+        name: f.path.split('/').pop() ?? f.path, path: f.path, description: `Backend Builder: ${f.description}`
+      })),
+      ...(frontend.details.filesModified ?? []).map(f => ({
+        name: f.path.split('/').pop() ?? f.path, path: f.path, description: `Frontend Builder: ${f.description}`
+      }))
     ];
 
     const artifactAudit = await verifyArtifactMaterialization(3, 'builders', claimedFiles);
@@ -388,7 +410,9 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
     log(`\n✅ All ${claimedFiles.length} artifacts verified to exist on disk\n`);
 
     // Check Stage 3 gate
-    const stage3Decision = await checkStageGate(state, 3);
+    const stage3Decision = await checkStageGate(3, cwd, outputs, {
+      loops: { backend: backendLoopCount, frontend: frontendLoopCount }
+    });
     if (!stage3Decision.canAdvance) {
       state = recordEscalation(
         state,
@@ -467,9 +491,14 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
     phase('Stage 4: Verify');
 
     // Capture baseline test state before verification
+    // testing has no `totalTests` field — it is {testsWritten, testsPassed, testsFailed}.
+    // Reading a non-existent field made this baseline {0, 0}, so detectRegressions compared
+    // `after.passingTests < 0` and could never fire. Regression detection was dead.
+    const backendTesting = backendOutput.details.testing;
+    const frontendTesting = frontendOutput.details.testing;
     const testBaselineBefore = {
-      totalTests: backendOutput.details.testing?.totalTests || 0,
-      passingTests: (backendOutput.details.testing?.totalTests || 0) - (backendOutput.details.testing?.testsFailed || 0)
+      totalTests: (backendTesting?.testsWritten ?? 0) + (frontendTesting?.testsWritten ?? 0),
+      passingTests: (backendTesting?.testsPassed ?? 0) + (frontendTesting?.testsPassed ?? 0)
     };
 
     // Test Verifier
@@ -526,7 +555,7 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
           {
             passRate: executionDecision.passRate,
             blockers: executionDecision.blockers,
-            failedTests: executionAudit.failedTests,
+            failingTests: executionAudit.failedTests,
             buildErrors: executionAudit.buildErrors
           }
         );
@@ -567,7 +596,7 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
     }
 
     // Check for critical validation issues
-    const criticalIssues = validatorOutput.details.issues?.filter(i => i.severity === 'CRITICAL') || [];
+    const criticalIssues = validatorOutput.details.issues?.filter((i: { severity: string }) => i.severity === 'CRITICAL') || [];
     if (criticalIssues.length > 0) {
       state = recordEscalation(
         state,
@@ -575,7 +604,7 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
         '07-validator',
         'CRITICAL_ISSUE',
         `${criticalIssues.length} critical validation issues found`,
-        { issues: criticalIssues.map(i => i.message) }
+        { issues: criticalIssues.map((i: { message: string }) => i.message) }
       );
       // Loop back to Stage 3 for fixes
       state = advanceToStage(state, 3);
@@ -606,7 +635,7 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
     }
 
     // Check Stage 4 gate
-    const stage4Decision = await checkStageGate(state, 4, validatorOutput);
+    const stage4Decision = await checkStageGate(4, cwd, outputs);
     if (!stage4Decision.canAdvance) {
       state = recordEscalation(
         state,
@@ -653,7 +682,7 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
     state = recordAgentStep(state, 5, '08-feature-consolidator', 'PASS', consolidatorOutput);
 
     // Check Stage 5 gate
-    const stage5Decision = await checkStageGate(state, 5, consolidatorOutput);
+    const stage5Decision = await checkStageGate(5, cwd, outputs, { knowledgeStored: true });
     if (!stage5Decision.canAdvance) {
       log(`⚠️  Stage 5 gate incomplete: ${stage5Decision.reason}`);
     }
@@ -686,48 +715,29 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
 }
 
 /**
- * Helper: Check stage gate
+ * Helper: Check stage gate.
+ *
+ * The context is DERIVED — from what the agents produced and what is on disk. It used to be
+ * fabricated here (testPassRate hardcoded to 1.0, criticalIssuesCount to 0), which meant the
+ * gates were real code judging invented evidence and the CRITICAL criteria could never fail.
+ * See harness/stage-context.ts.
  */
 async function checkStageGate(
-  state: FeatureState,
   stage: number,
-  output?: FeatureFactoryAgentOutput
+  cwd: string,
+  outputs: StageOutputs,
+  extra?: { loops?: { backend?: number; frontend?: number }; knowledgeStored?: boolean }
 ): Promise<StageAdvancementDecision> {
   const contract = stageContracts[stage];
-  const context: StageContext = {
-    stageDir: `feature-factory/artifacts/stage-${stage}-${getStageNameLowerCase(stage)}/`,
-    artifacts: output?.details?.artifacts || [],
-    metadata: {
-      filesIdentified: stage === 1 ? 5 : undefined,
-      testPassRate: stage === 3 ? 1.0 : undefined,
-      criticalIssuesCount: stage === 4 ? 0 : undefined
-    }
-  };
+  const context = buildStageContext({
+    stage,
+    cwd,
+    outputs,
+    loops: extra?.loops,
+    knowledgeStored: extra?.knowledgeStored
+  });
 
   return canAdvanceStage(stage, contract, context);
-}
-
-/**
- * Helper: Invoke agent
- */
-async function invokeAgent(options: {
-  stage: number;
-  agent: string;
-  prompt: string;
-  maxAttempts: number;
-}): Promise<any> {
-  // In real implementation, would use Agent tool
-  // For now, return mock output
-  return {
-    stage: options.stage,
-    agent: options.agent,
-    timestamp: new Date().toISOString(),
-    status: 'PASS',
-    details: {
-      summary: `${options.agent} completed successfully`,
-      artifacts: []
-    }
-  };
 }
 
 /**
@@ -762,16 +772,3 @@ function getStageNameLowerCase(stage: number): string {
   return names[stage as keyof typeof names] || 'unknown';
 }
 
-/**
- * Helper: Log function (in real Workflow context, calls log())
- */
-function log(message: string): void {
-  console.log(`[FF] ${message}`);
-}
-
-/**
- * Helper: Phase function (in real Workflow context, calls phase())
- */
-function phase(title: string): void {
-  console.log(`\n📍 ${title}\n`);
-}

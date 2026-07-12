@@ -8,6 +8,8 @@
  * Specialized for: Feature Factory stages 1-5
  */
 
+import { ArtifactRef, verifyArtifactMaterialization } from './agent-output-schema';
+
 export interface StageCriterion {
   name: string;
   description: string;
@@ -621,29 +623,31 @@ async function validateArtifactsMaterialized(ctx: StageContext): Promise<Criteri
     };
   }
 
-  const missingFiles: string[] = [];
+  // Builders may record either a bare path string or a full ArtifactRef.
+  const artifacts: ArtifactRef[] = claimedFiles.map((file: string | ArtifactRef) =>
+    typeof file === 'string'
+      ? { name: file, path: file, description: 'Claimed by builder' }
+      : {
+          name: file.name ?? file.path,
+          path: file.path,
+          description: file.description ?? 'Claimed by builder'
+        }
+  );
 
-  // Check each claimed file
-  for (const fileInfo of claimedFiles) {
-    const filePath = fileInfo.path || fileInfo;
+  // This gate must hit the real filesystem. It is the only thing standing between an agent
+  // claiming it wrote a file and that claim being believed, so it delegates to
+  // verifyArtifactMaterialization() rather than trusting any caller-supplied state.
+  const agent = ctx.metadata.agent ?? 'builders';
+  const audit = await verifyArtifactMaterialization(3, agent, artifacts);
 
-    // In real implementation, this would use fs.existsSync or Read tool
-    // For now, document what should be checked
-    const exists = ctx.metadata.fileExistsCheck?.[filePath] ?? false;
-
-    if (!exists) {
-      missingFiles.push(filePath);
-    }
-  }
-
-  if (missingFiles.length > 0) {
+  if (!audit.allMaterialized) {
     return {
       passed: false,
       score: 0,
-      details: `${missingFiles.length}/${claimedFiles.length} files do not exist on disk`,
+      details: `${audit.missingArtifacts.length}/${artifacts.length} files do not exist on disk`,
       blockers: [
         `HALLUCINATION DETECTED: These files were claimed but not created:`,
-        ...missingFiles.map(f => `  - ${f}`),
+        ...audit.missingArtifacts.map(a => `  - ${a.path}`),
         `The agents must actually call Write/Edit tools to create files.`,
         `Do NOT advance until all claimed files exist on disk.`
       ]
@@ -653,6 +657,6 @@ async function validateArtifactsMaterialized(ctx: StageContext): Promise<Criteri
   return {
     passed: true,
     score: 100,
-    details: `✅ All ${claimedFiles.length} claimed artifacts exist on disk (materialization verified)`
+    details: `✅ All ${artifacts.length} claimed artifacts exist on disk (materialization verified)`
   };
 }

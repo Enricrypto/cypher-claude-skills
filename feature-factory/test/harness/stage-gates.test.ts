@@ -162,18 +162,9 @@ describe('Stage Gates', () => {
       expect(decision.canAdvance).toBe(false);
     });
 
-    // SKIPPED — this documents a known harness bug, not a test bug. See docs/REFACTOR_PLAN.md
-    // ("Known harness bugs", BUG-1). Stage 3's CRITICAL `artifacts_materialized` criterion is
-    // validated by validateArtifactsMaterialized() in stage-gates.ts, which reads a
-    // caller-supplied `metadata.fileExistsCheck` map instead of touching the disk — while the
-    // real filesystem check, verifyArtifactMaterialization() in agent-output-schema.ts, is never
-    // called by the gate. Nothing populates fileExistsCheck, so the criterion can never pass and
-    // stage 3 can never advance.
-    //
-    // Do NOT unskip this by adding a fake fileExistsCheck to the fixture — that would make the
-    // suite green while leaving the anti-hallucination gate blind. Unskip in Phase 0b, once the
-    // gate delegates to verifyArtifactMaterialization().
-    it.skip('should PASS when all files modified and tests 100%', async () => {
+    // The claimed files below are real paths in this repo, so the materialization gate is
+    // exercised against the actual filesystem rather than a mocked existence map.
+    it('should PASS when all files modified and tests 100%', async () => {
       const stage3 = stageContracts[3];
       mockContext.metadata = {
         filesModified: 5,
@@ -181,12 +172,33 @@ describe('Stage Gates', () => {
         testPassRate: 1.0,
         backendLoops: 2,
         frontendLoops: 1,
-        noAbandonedTODOs: true
+        noAbandonedTODOs: true,
+        claimedFiles: ['package.json', 'tsconfig.json']
       };
 
       const decision = await canAdvanceStage(3, stage3, mockContext);
 
       expect(decision.canAdvance).toBe(true);
+    });
+
+    it('should BLOCK when a builder claims a file it never wrote', async () => {
+      const stage3 = stageContracts[3];
+      mockContext.metadata = {
+        filesModified: 5,
+        filesExpected: 5,
+        testPassRate: 1.0,
+        backendLoops: 2,
+        frontendLoops: 1,
+        noAbandonedTODOs: true,
+        // package.json is real; the service file is a hallucination.
+        claimedFiles: ['package.json', 'src/services/TotallyImaginaryService.ts']
+      };
+
+      const decision = await canAdvanceStage(3, stage3, mockContext);
+
+      expect(decision.canAdvance).toBe(false);
+      expect(decision.blockers.join('\n')).toContain('HALLUCINATION DETECTED');
+      expect(decision.blockers.join('\n')).toContain('TotallyImaginaryService.ts');
     });
   });
 

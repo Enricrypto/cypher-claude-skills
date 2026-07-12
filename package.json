@@ -6,7 +6,8 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "jest",
-    "build": "tsc"
+    "build": "tsc",
+    "factory": "ts-node feature-factory/runner/cli.ts"
   },
   "keywords": [
     "claude",
@@ -21,6 +22,10 @@
     "@types/node": "^22.10.2",
     "jest": "^29.7.0",
     "ts-jest": "^29.2.5",
+    "ts-node": "^10.9.2",
     "typescript": "^5.7.2"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.207"
   }
 }
