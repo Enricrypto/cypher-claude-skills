@@ -28,7 +28,7 @@ An **Audit Report** with three parts:
 
 ```json
 {
-  "projectName": "hcrefactory",
+  "projectName": "<project-name>",
   "auditDate": "2024-06-10",
   "overallReadiness": "35%",
   "issueCount": {
@@ -41,10 +41,10 @@ An **Audit Report** with three parts:
     {
       "id": 1,
       "title": "API Response Shape Unstable",
-      "location": "src/api/listings.ts",
+      "location": "src/api/endpoint.ts",
       "severity": "CRITICAL",
       "category": "backend",
-      "problem": "POST /listings returns different fields in different responses",
+      "problem": "API endpoint returns different fields in different responses",
       "impact": "E2E tests cannot predict API response shape",
       "effort": "2h",
       "autoFixable": true,
@@ -298,7 +298,7 @@ Effort: 15m
 ```markdown
 # E2E Readiness Audit Report
 
-**Project:** hcrefactory  
+**Project:** <project-name>  
 **Date:** 2024-06-10  
 **Auditor:** Audit Agent  
 **Duration:** 4h  

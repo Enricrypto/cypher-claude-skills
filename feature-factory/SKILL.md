@@ -194,7 +194,7 @@ After the PR is merged and deployed:
 
 ---
 
-## Phase 3: Autonomous Iteration
+## Stage 3: Autonomous Iteration
 
 When implementation tests fail, agents now self-fix autonomously (up to 3 attempts):
 

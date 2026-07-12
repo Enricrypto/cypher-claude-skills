@@ -37,25 +37,25 @@ npm run e2e:loop -- --feature "advertiser-dashboard" --path "/painel/dashboard"
 The loop will run through 5 phases:
 
 ```
-Phase -1: Audit Preparation
+Phase 0: Audit Preparation (E2E Loop)
   ✅ Audits codebase for your feature
   ✅ Validates audit completeness
   ✅ Fixes any gaps found
 
-Phase 0: Infrastructure
+Phase 1: Infrastructure (E2E Loop)
   ⏭️  Skips (assumes ready) or applies fixes
 
-Phase 1: Test Generation
+Phase 2: Test Generation (E2E Loop)
   ✅ Plans test scenarios
   ✅ Generates test files
   ✅ Audits tests (Playwright MCP verifies selectors/APIs)
   ✅ Runs tests (mandatory Docker rebuild)
 
-Phase 2: Remediation (Only if tests failed)
+Phase 3: Remediation (E2E Loop - Only if tests failed)
   ✅ Automatically fixes failing tests
   ✅ Re-runs until 100% pass rate
 
-Phase 3: Finalize
+Phase 4: Finalize (E2E Loop)
   ✅ Creates commit summary
   ✅ Ready for your PR review
 ```

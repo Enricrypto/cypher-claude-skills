@@ -456,7 +456,7 @@ afterEach(async () => {
 ```markdown
 # Remediation Report
 
-**Project:** hcrefactory  
+**Project:** <project-name>  
 **Date:** 2024-06-10  
 **Total Issues:** 23  
 **Effort Applied:** 20h of 25h  
