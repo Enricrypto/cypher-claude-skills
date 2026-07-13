@@ -17,6 +17,7 @@ import { agentOutputSchema } from './output-schemas';
 import {
   AGENT_TOOLS,
   AGENT_STAGE,
+  REQUIRED_ARTIFACTS,
   FeatureFactoryAgent,
   deniedToolsFor,
   isReadOnly,
@@ -99,13 +100,21 @@ did the work.
 `;
 
   if (isReadOnly(agent)) {
+    const required = REQUIRED_ARTIFACTS[agent];
+    const names = required.length > 0
+      ? `You MUST return exactly these documents, named EXACTLY as written: ${required.join(', ')}.
+A gate looks each one up by that exact name. A document called anything else is invisible to it
+and the stage fails, however good the work is.
+`
+      : '';
+
     return (
       common +
       `
-You have NO Write tool — you cannot create files, by design. For each document you produce,
-return its full text in \`artifacts[].content\` and the harness will write it to disk for you.
-An artifact without content will not exist on disk, and the gate that reads it will block the
-stage.
+${names}
+You have NO Write tool — you cannot create files, by design. For each document, return its full
+text in \`artifacts[].content\` and the harness will write it to disk for you. An artifact
+without content will not exist on disk, and the gate that reads it will block the stage.
 `
     );
   }

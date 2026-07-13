@@ -45,6 +45,32 @@ export const AGENT_TOOLS: Record<FeatureFactoryAgent, string[]> = {
   '08-feature-consolidator': ['Read', 'Grep']
 };
 
+/**
+ * The EXACT document names each agent must produce.
+ *
+ * These are not a convention — they are the literal keys the gates look up:
+ * `ctx.artifacts['RESEARCHER_REPORT.md']`. A document by any other name is invisible to the
+ * gate, and the stage fails.
+ *
+ * A live Researcher named its report RESEARCH.md and was blocked, having done the work
+ * correctly. On the previous run the same agent had happened to guess RESEARCHER_REPORT.md.
+ * That is non-determinism, which is precisely what the gates exist to eliminate — and it was
+ * OUR bug: the gate demanded an exact filename that nothing ever told the agent.
+ *
+ * These names are now compiled into each agent's JSON Schema as an enum, so the SDK constrains
+ * the model to them and retries until it complies. Guessing is no longer possible.
+ */
+export const REQUIRED_ARTIFACTS: Record<FeatureFactoryAgent, string[]> = {
+  '01-researcher': ['RESEARCHER_REPORT.md'],
+  '02-story-writer': ['USER_STORY.md'],
+  '03-spec-writer': ['TECHNICAL_BRIEF.md', 'FILE_LIST.md'],
+  '04-backend-builder': [],
+  '05-frontend-builder': [],
+  '06-test-verifier': [],
+  '07-validator': [],
+  '08-feature-consolidator': ['CONSOLIDATION_REPORT.md', 'PATTERNS.md']
+};
+
 /** Mutating tools. Explicitly denied to any agent whose grant omits them. */
 const MUTATING_TOOLS = ['Write', 'Edit', 'Bash', 'NotebookEdit'];
 

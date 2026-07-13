@@ -17,7 +17,7 @@
  * something the harness has to catch after the fact.
  */
 
-import { isReadOnly, FeatureFactoryAgent, AGENT_STAGE } from './agent-registry';
+import { isReadOnly, FeatureFactoryAgent, AGENT_STAGE, REQUIRED_ARTIFACTS } from './agent-registry';
 
 type Schema = Record<string, unknown>;
 
@@ -45,9 +45,20 @@ const object = (properties: Record<string, Schema>, required: string[]): Schema 
  * them written for them, or the materialization gate would be checking the harness's work
  * instead of the builder's.
  */
-function artifactSchema(readOnly: boolean): Schema {
+function artifactSchema(agent: FeatureFactoryAgent, readOnly: boolean): Schema {
+  const requiredNames = REQUIRED_ARTIFACTS[agent];
+
   const properties: Record<string, Schema> = {
-    name: str('Exact filename the gates look for, e.g. "USER_STORY.md"'),
+    // Constrained to the exact keys the gates look up. A document by any other name is
+    // invisible to the gate and the stage fails, so the model is not allowed to invent one.
+    name:
+      requiredNames.length > 0
+        ? {
+            type: 'string',
+            enum: requiredNames,
+            description: `MUST be exactly one of: ${requiredNames.join(', ')}. A gate looks the document up by this exact name.`
+          }
+        : str('Filename of the document you produced'),
     path: str('Path relative to the project root'),
     description: str('What this artifact is')
   };
@@ -341,6 +352,7 @@ export function agentOutputSchema(agent: FeatureFactoryAgent): Schema {
   const stage = AGENT_STAGE[agent];
   const spec = DETAILS_BY_AGENT[agent];
   const readOnly = isReadOnly(agent);
+  const requiredArtifacts = REQUIRED_ARTIFACTS[agent];
 
   return {
     type: 'object',
@@ -359,7 +371,13 @@ export function agentOutputSchema(agent: FeatureFactoryAgent): Schema {
         type: 'object',
         properties: {
           summary: str('One paragraph. Do not put findings ONLY here — the structured fields below are what the gates read.'),
-          artifacts: arrayOf(artifactSchema(readOnly), 'Documents and files you produced'),
+          artifacts: arrayOf(
+            artifactSchema(agent, readOnly),
+            requiredArtifacts.length > 0
+              ? `You MUST return exactly these documents, by these exact names: ${requiredArtifacts.join(', ')}. A gate looks each one up by name and blocks the stage if it is absent.`
+              : 'Documents and files you produced',
+            requiredArtifacts.length || undefined
+          ),
           ...spec.properties
         },
         required: ['summary', 'artifacts', ...spec.required],
