@@ -405,11 +405,29 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
     const backend: BackendBuilderOutput = backendOutput;
 
     // Frontend Builder with loop-back
+    //
+    // ...but only if the approved brief actually calls for UI. A backend-only feature is a
+    // completely ordinary thing, and the Frontend Builder's schema requires filesModified to be
+    // non-empty — so invoking it with nothing to build guarantees three loop-backs and a bogus
+    // escalation. The spec is the authority on whether there is UI work: if the Spec Writer
+    // listed no UI components and no frontend files, there is none.
+    const specFileList = outputs.spec?.details.fileList ?? [];
+    const hasUiComponents = (outputs.spec?.details.uiComponents ?? []).length > 0;
+    const hasFrontendFiles = specFileList.some(f =>
+      /\.(tsx|jsx|vue|svelte)$/.test(f.path) ||
+      /(^|\/)(components|pages|app|views|screens)\//.test(f.path)
+    );
+    const needsFrontend = hasUiComponents || hasFrontendFiles;
+
+    if (!needsFrontend) {
+      log('⏭️  Frontend Builder skipped — the approved brief specifies no UI work.');
+    }
+
     let frontendLoopCount = 0;
     let frontendOutput: FrontendBuilderOutput | null = null;
     let frontendPassed = false;
 
-    while (frontendLoopCount < 3 && !frontendPassed) {
+    while (needsFrontend && frontendLoopCount < 3 && !frontendPassed) {
       frontendLoopCount++;
       log(`Frontend Builder: Attempt ${frontendLoopCount}/3`);
 
@@ -453,7 +471,7 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
       frontendPassed = true;
     }
 
-    if (!frontendPassed || !frontendOutput) {
+    if (needsFrontend && (!frontendPassed || !frontendOutput)) {
       state = recordEscalation(
         state,
         3,
@@ -465,10 +483,12 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
       return completeFeature(state, 'ESCALATED', 'Frontend builder max loops exceeded');
     }
 
-    log(`✅ Frontend builder passed (${frontendLoopCount === 1 ? 'first try' : `after ${frontendLoopCount} attempts`})`);
-    const frontend: FrontendBuilderOutput = frontendOutput;
+    if (needsFrontend) {
+      log(`✅ Frontend builder passed (${frontendLoopCount === 1 ? 'first try' : `after ${frontendLoopCount} attempts`})`);
+    }
+    const frontend: FrontendBuilderOutput | null = frontendOutput;
     outputs.backend = backend;
-    outputs.frontend = frontend;
+    if (frontend) outputs.frontend = frontend;
 
     // ========================================================================
     // ARTIFACT MATERIALIZATION CHECK (Reality Verification)
@@ -481,7 +501,7 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
       ...(backend.details.filesModified ?? []).map(f => ({
         name: f.path.split('/').pop() ?? f.path, path: f.path, description: `Backend Builder: ${f.description}`
       })),
-      ...(frontend.details.filesModified ?? []).map(f => ({
+      ...(frontend?.details.filesModified ?? []).map(f => ({
         name: f.path.split('/').pop() ?? f.path, path: f.path, description: `Frontend Builder: ${f.description}`
       }))
     ];
@@ -596,7 +616,7 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
     // Reading a non-existent field made this baseline {0, 0}, so detectRegressions compared
     // `after.passingTests < 0` and could never fire. Regression detection was dead.
     const backendTesting = backendOutput.details.testing;
-    const frontendTesting = frontendOutput.details.testing;
+    const frontendTesting = frontendOutput?.details.testing;
     const testBaselineBefore = {
       totalTests: (backendTesting?.testsWritten ?? 0) + (frontendTesting?.testsWritten ?? 0),
       passingTests: (backendTesting?.testsPassed ?? 0) + (frontendTesting?.testsPassed ?? 0)
