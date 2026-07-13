@@ -22,7 +22,7 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'fs';
-import { basename, dirname, isAbsolute, resolve } from 'path';
+import { basename, dirname, isAbsolute, join, resolve } from 'path';
 
 import { StageContext } from './stage-gates';
 import {
@@ -87,9 +87,25 @@ export interface PersistedArtifact {
 
 /**
  * Write the documents produced by read-only agents to disk, so the gates can read them.
- * Returns what was written. Silently skips builders and any artifact without content.
+ *
+ * MUST be called immediately after each agent returns — not at stage-gate time. The gate runs at
+ * the END of a stage, and stage 2 has TWO agents: if we waited, the Spec Writer would execute
+ * against a disk with no USER_STORY.md on it and would have to invent the acceptance criteria
+ * the builders are then graded against. A live run caught exactly that, and the Spec Writer
+ * refused to proceed rather than fabricate them. It was right.
+ *
+ * `artifactDir` namespaces the output per feature run. Without it, every run writes
+ * RESEARCHER_REPORT.md to the repo root and stomps the previous feature's — which a live
+ * Researcher noticed and reported about itself.
+ *
+ * Artifact paths are REWRITTEN in place to the namespaced location, so persistArtifacts() and
+ * readArtifactContents() can never disagree about where a document lives.
  */
-export function persistArtifacts(outputs: StageOutputs, cwd: string): PersistedArtifact[] {
+export function persistArtifacts(
+  outputs: StageOutputs,
+  cwd: string,
+  artifactDir?: string
+): PersistedArtifact[] {
   const written: PersistedArtifact[] = [];
 
   for (const output of Object.values(outputs)) {
@@ -99,6 +115,10 @@ export function persistArtifacts(outputs: StageOutputs, cwd: string): PersistedA
 
     for (const artifact of agentOutput.details.artifacts) {
       if (typeof artifact.content !== 'string' || artifact.content.length === 0) continue;
+
+      if (artifactDir && !isAbsolute(artifact.path)) {
+        artifact.path = join(artifactDir, basename(artifact.path));
+      }
 
       const absolutePath = isAbsolute(artifact.path)
         ? artifact.path

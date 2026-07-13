@@ -94,6 +94,24 @@ export interface OrchestrationOptions {
   cwd: string;
 
   /**
+   * The three human checkpoints. Called before the run is allowed to continue.
+   *
+   * The orchestrator used to log "⏸️  CHECKPOINT 1: Awaiting story approval" and then
+   * immediately record its own approval. It never waited for anyone. The system was claiming a
+   * human-oversight guarantee it did not have — and a live Spec Writer noticed, refusing to
+   * proceed because "Checkpoint 1 would have been skipped silently."
+   *
+   * This FAILS CLOSED. If no approver is supplied, the checkpoint is not silently granted — the
+   * run escalates. Auto-approval must be asked for explicitly (the CLI's --yes), because a
+   * checkpoint you can skip by forgetting to configure it is not a checkpoint.
+   */
+  approveCheckpoint?: (checkpoint: {
+    name: string;
+    stage: number;
+    summary: string;
+  }) => Promise<boolean>;
+
+  /**
    * A spec produced upstream — by a Tier 1 Decomposer, by a human, by anything.
    *
    * OPTIONAL, and that is the whole point. Omit it and Feature Factory runs its own Researcher,
@@ -127,6 +145,47 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
 
   /** Accumulates real agent outputs; the gates are built from this, never from constants. */
   const outputs: StageOutputs = {};
+
+  /** Namespaced per run, so one feature's documents never stomp another's. */
+  const artifactDir = `.factory/${state.featureId}`;
+
+  /**
+   * Persist a read-only agent's documents to disk IMMEDIATELY, so the next agent in the stage
+   * can actually read them. Waiting until the stage gate is what left the Spec Writer with no
+   * USER_STORY.md to translate.
+   */
+  const persist = (partial: StageOutputs) => {
+    for (const { agent, path } of persistArtifacts(partial, cwd, artifactDir)) {
+      log(`  📄 ${agent} → ${path}`);
+    }
+  };
+
+  /** A checkpoint that actually blocks. Fails closed when no approver is configured. */
+  const checkpoint = async (name: string, stage: number, summary: string): Promise<boolean> => {
+    log(`⏸️  ${name}`);
+
+    if (!options.approveCheckpoint) {
+      state = recordEscalation(
+        state,
+        stage,
+        'human',
+        'MANUAL',
+        `${name} requires human approval, but no approver is configured. ` +
+          `Pass approveCheckpoint, or run the CLI with --yes to approve automatically.`
+      );
+      return false;
+    }
+
+    const approved = await options.approveCheckpoint({ name, stage, summary });
+    if (!approved) {
+      state = recordEscalation(state, stage, 'human', 'MANUAL', `${name} was rejected.`);
+      return false;
+    }
+
+    state = recordCheckpointApproval(state, stage, name);
+    log(`✅ ${name} approved`);
+    return true;
+  };
 
   try {
     log(`Starting Feature Factory: ${state.featureName}`);
@@ -212,6 +271,7 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
       }
 
       outputs.researcher = researcherOutput;
+      persist({ researcher: researcherOutput });
       state = recordAgentStep(state, 1, '01-researcher', 'PASS', researcherOutput);
 
       // Check Stage 1 gate
@@ -241,7 +301,7 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
       const storyOutput = await invokeAgent({
         stage: 2,
         agent: '02-story-writer',
-        prompt: `Write user story for: "${options.featureDescription}" based on researcher report`,
+        prompt: `Write the user story for: "${options.featureDescription}".\n\nThe Researcher Report is at ${artifactDir}/RESEARCHER_REPORT.md — read it first.\n\nWrite your USER_STORY.md into artifacts[].content; the harness will persist it for you.`,
         maxAttempts: 1
       });
 
@@ -269,17 +329,18 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
       }
 
       outputs.story = storyOutput;
+      persist({ story: storyOutput });   // <- the Spec Writer must be able to READ this
       state = recordAgentStep(state, 2, '02-story-writer', 'PASS', storyOutput);
 
-      // CHECKPOINT 1: Approve story
-      log('⏸️  CHECKPOINT 1: Awaiting story approval');
-      state = recordCheckpointApproval(state, 2, 'Story Approval');
+      if (!(await checkpoint('CHECKPOINT 1: Approve the story', 2, storyOutput.details.summary))) {
+        return completeFeature(state, 'ESCALATED', 'Story not approved');
+      }
 
       // Spec Writer
       const specOutput = await invokeAgent({
         stage: 2,
         agent: '03-spec-writer',
-        prompt: `Write technical brief for approved story`,
+        prompt: `Write the technical brief for the approved user story.\n\nUpstream documents are in ${artifactDir}/ — RESEARCHER_REPORT.md and USER_STORY.md. Read BOTH before you start; the acceptance criteria in the story are what the builders will be graded against, so do not invent them.\n\nWrite your TECHNICAL_BRIEF.md and FILE_LIST.md into artifacts[].content.`,
         maxAttempts: 1
       });
 
@@ -307,6 +368,7 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
       }
 
       outputs.spec = specOutput;
+      persist({ spec: specOutput });
       state = recordAgentStep(state, 2, '03-spec-writer', 'PASS', specOutput);
 
       // Check Stage 2 gate
@@ -324,9 +386,9 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
 
       log(`✅ Stage 2 passed: Story & Spec approved`);
 
-      // CHECKPOINT 2: Approve brief
-      log('⏸️  CHECKPOINT 2: Awaiting brief approval');
-      state = recordCheckpointApproval(state, 2, 'Brief Approval');
+      if (!(await checkpoint('CHECKPOINT 2: Approve the technical brief', 2, specOutput.details.summary))) {
+        return completeFeature(state, 'ESCALATED', 'Technical brief not approved');
+      }
 
       state = advanceToStage(state, 3);
     }

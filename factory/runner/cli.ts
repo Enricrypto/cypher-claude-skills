@@ -9,6 +9,7 @@
  */
 
 import { resolve } from 'path';
+import { createInterface } from 'readline';
 import { runFeatureFactory } from '../feature/workflows/feature-factory-orchestrator';
 import { createSdkInvoker } from './invoke-agent';
 import { getStateSummary } from '../harness/state-tracker';
@@ -18,6 +19,41 @@ interface CliArgs {
   name: string;
   cwd: string;
   model?: string;
+  /** Approve all three human checkpoints without asking. Must be explicit — see below. */
+  yes: boolean;
+}
+
+/**
+ * The three human checkpoints.
+ *
+ * On a TTY we ask, and the run blocks until you answer. Without a TTY (CI, a pipe) there is
+ * nobody to ask, so we FAIL CLOSED — the run escalates rather than approving itself.
+ *
+ * --yes is the only way to skip them, and it has to be typed. That is deliberate: a checkpoint
+ * you can skip by forgetting to configure something is not a checkpoint. The orchestrator used
+ * to log "Awaiting story approval" and then immediately approve itself, which meant the system
+ * advertised a human-oversight guarantee it did not have.
+ */
+async function askHuman(checkpoint: { name: string; summary: string }): Promise<boolean> {
+  if (!process.stdin.isTTY) {
+    console.error(
+      `\n⏸️  ${checkpoint.name}\n` +
+        `   No TTY, so there is nobody to ask. Re-run interactively, or pass --yes to approve\n` +
+        `   all checkpoints automatically.`
+    );
+    return false;
+  }
+
+  console.log(`\n⏸️  ${checkpoint.name}`);
+  console.log(`\n${checkpoint.summary}\n`);
+
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    const answer = await new Promise<string>(res => rl.question('   Approve? [y/N] ', res));
+    return /^y(es)?$/i.test(answer.trim());
+  } finally {
+    rl.close();
+  }
 }
 
 export function parseArgs(argv: string[]): CliArgs {
@@ -27,6 +63,12 @@ export function parseArgs(argv: string[]): CliArgs {
     const token = argv[i];
     if (!token.startsWith('--')) continue;
     const key = token.slice(2);
+
+    if (key === 'yes') {
+      args.yes = 'true';
+      continue;
+    }
+
     const value = argv[i + 1];
     if (value === undefined || value.startsWith('--')) {
       throw new Error(`Flag --${key} requires a value.`);
@@ -44,7 +86,8 @@ export function parseArgs(argv: string[]): CliArgs {
     feature,
     name: args.name ?? feature.slice(0, 60),
     cwd: resolve(args.cwd ?? process.cwd()),
-    model: args.model
+    model: args.model,
+    yes: args.yes === 'true'
   };
 }
 
@@ -65,11 +108,16 @@ async function main(): Promise<number> {
     }
   });
 
+  if (args.yes) {
+    console.log('  ⚠️  --yes: the three human checkpoints will be approved automatically.\n');
+  }
+
   const state = await runFeatureFactory({
     featureName: args.name,
     featureDescription: args.feature,
     cwd: args.cwd,
-    invoke
+    invoke,
+    approveCheckpoint: args.yes ? async () => true : askHuman
   });
 
   console.log(getStateSummary(state));
