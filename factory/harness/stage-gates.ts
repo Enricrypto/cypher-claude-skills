@@ -466,23 +466,56 @@ async function validateAllFilesModified(ctx: StageContext): Promise<CriterionRes
     return { passed: true, score: 100, details: 'No approved file list to check against' };
   }
 
-  // Compare SETS, not counts. The old gate did `modifiedCount < expectedCount`, which fails on
-  // 8-of-9 but would happily pass nine completely different files — and its message, "Only 8/9
-  // files modified", never said WHICH one, so nobody could act on it.
   const touched = new Set(modified);
   const missing = expected.filter(path => !touched.has(path));
 
-  if (missing.length > 0) {
+  // What this gate is FOR: catching a builder that silently skipped implementation work the
+  // approved brief called for. Judged against that purpose, not all missing files are equal.
+  //
+  //   A missing SOURCE file means the feature is genuinely incomplete. That is a real skip.
+  //
+  //   A missing TEST file is not. If the brief guessed "preferences.routes.test.ts" and the
+  //   builder wrote "preferencesSchema.test.ts" covering the same behaviour, nothing was
+  //   skipped — and test coverage is not this gate's job. Stage 4 checks acceptance criteria
+  //   TESTED vs TOTAL, and the Test Verifier writes the acceptance tests. THAT is the
+  //   authority on whether the story is tested; a Spec Writer guessing a filename in advance
+  //   is not. Blocking a correct implementation over a test filename would be theatre.
+  //
+  //   A missing CONFIG file (package.json et al) usually means the brief over-listed — the
+  //   dependency was already present. Also not a skipped implementation.
+  //
+  // The deviation is still REPORTED in every case. It just does not masquerade as incomplete
+  // work when it is not.
+  const isTest = (path: string) => /(^|\/)tests?\//.test(path) || /\.(test|spec)\.[jt]sx?$/.test(path);
+  const isSource = (path: string) => /^src\//.test(path) && !isTest(path);
+
+  const missingSource = missing.filter(isSource);
+  const missingOther = missing.filter(path => !isSource(path));
+
+  if (missingSource.length > 0) {
     return {
       passed: false,
       score: Math.round(((expected.length - missing.length) / expected.length) * 100),
-      details: `${missing.length} of ${expected.length} files from the approved brief were not written`,
+      details: `${missingSource.length} source file(s) from the approved brief were never written`,
       blockers: [
-        `The approved technical brief said these files would be created or modified, and they were not:`,
-        ...missing.map(path => `  - ${path}`),
-        `Either the builder skipped work the brief called for, or the brief listed a file that did`,
-        `not turn out to be needed. Both are worth a human's attention — the brief is the contract.`
+        `The approved brief said these SOURCE files would be created or modified, and they were not.`,
+        `The feature is incomplete:`,
+        ...missingSource.map(path => `  - ${path}`),
+        ...(missingOther.length > 0
+          ? [`(Also not written, but not blocking: ${missingOther.join(', ')})`]
+          : [])
       ]
+    };
+  }
+
+  if (missingOther.length > 0) {
+    return {
+      passed: true,
+      score: 80,
+      details:
+        `All source files were written. The builder deviated from the brief on ` +
+        `${missingOther.length} non-source file(s): ${missingOther.join(', ')}. ` +
+        `Not blocking — stage 4 is the authority on test coverage — but worth a human's eye.`
     };
   }
 

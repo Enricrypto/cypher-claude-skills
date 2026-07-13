@@ -361,6 +361,75 @@ describe('the approved brief is the contract', () => {
     expect(decision.blockers.join('\n')).toContain('src/auth/recovery.ts');
   });
 
+  it('does NOT block over a test filename — stage 4 is the authority on test coverage', async () => {
+    writeFile('src/auth/totp.ts', 'export const totp = () => {};');
+    writeFile('test/totpBehaviour.test.ts', 'it("works", () => {});');
+
+    const spec = specOutput();
+    spec.details.fileList = [
+      { path: 'src/auth/totp.ts', type: 'CREATE', reason: 'TOTP', complexity: 'MODERATE' },
+      // The brief guessed a test filename. The builder wrote equivalent tests under another.
+      { path: 'test/totp.routes.test.ts', type: 'CREATE', reason: 'Tests', complexity: 'SIMPLE' },
+      { path: 'package.json', type: 'MODIFY', reason: 'add speakeasy', complexity: 'SIMPLE' }
+    ] as any;
+
+    const backend: any = {
+      stage: 3, agent: '04-backend-builder', timestamp: new Date().toISOString(), status: 'PASS',
+      details: {
+        summary: 'Built it, named the test file differently.', artifacts: [],
+        filesModified: [
+          { path: 'src/auth/totp.ts', type: 'CREATE', description: 'TOTP', linesAdded: 40, linesRemoved: 0 },
+          { path: 'test/totpBehaviour.test.ts', type: 'CREATE', description: 'tests', linesAdded: 20, linesRemoved: 0 }
+        ],
+        implementation: { services: [], routes: [], migrations: [] },
+        testing: { testsWritten: 5, testsPassed: 5, testsFailed: 0 },
+        patterns: { reused: [], created: [] }
+      }
+    };
+
+    const decision = await canAdvanceStage(
+      3,
+      stageContracts[3],
+      buildStageContext({ stage: 3, cwd: projectDir, outputs: { spec, backend } })
+    );
+
+    // The implementation is complete. A test filename and an unneeded package.json edit are
+    // deviations worth reporting — not incomplete work. Blocking here would be theatre.
+    expect(decision.canAdvance).toBe(true);
+  });
+
+  it('DOES block when a SOURCE file the brief called for is missing', async () => {
+    writeFile('src/auth/totp.ts', 'export const totp = () => {};');
+
+    const spec = specOutput();
+    spec.details.fileList = [
+      { path: 'src/auth/totp.ts', type: 'CREATE', reason: 'TOTP', complexity: 'MODERATE' },
+      { path: 'src/auth/recovery.ts', type: 'CREATE', reason: 'Recovery codes', complexity: 'MODERATE' }
+    ] as any;
+
+    const backend: any = {
+      stage: 3, agent: '04-backend-builder', timestamp: new Date().toISOString(), status: 'PASS',
+      details: {
+        summary: 'Built half.', artifacts: [],
+        filesModified: [{ path: 'src/auth/totp.ts', type: 'CREATE', description: 'TOTP', linesAdded: 40, linesRemoved: 0 }],
+        implementation: { services: [], routes: [], migrations: [] },
+        testing: { testsWritten: 5, testsPassed: 5, testsFailed: 0 },
+        patterns: { reused: [], created: [] }
+      }
+    };
+
+    const decision = await canAdvanceStage(
+      3,
+      stageContracts[3],
+      buildStageContext({ stage: 3, cwd: projectDir, outputs: { spec, backend } })
+    );
+
+    // A missing SOURCE file IS incomplete work. This must never be softened.
+    expect(decision.canAdvance).toBe(false);
+    expect(decision.blockers.join('\n')).toContain('src/auth/recovery.ts');
+    expect(decision.blockers.join('\n')).toMatch(/incomplete/i);
+  });
+
   it('does not pass a builder that wrote the right NUMBER of the wrong files', async () => {
     writeFile('src/auth/somethingelse.ts', 'export const x = 1;');
 
