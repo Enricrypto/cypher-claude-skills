@@ -41,6 +41,8 @@ export interface StageContract {
 }
 
 export interface StageContext {
+  /** The project the agents are building in. The gates check THIS filesystem, not the harness's. */
+  cwd: string;
   stageDir: string;
   artifacts: Record<string, string>;
   metadata: Record<string, any>;
@@ -638,7 +640,7 @@ async function validateArtifactsMaterialized(ctx: StageContext): Promise<Criteri
   // claiming it wrote a file and that claim being believed, so it delegates to
   // verifyArtifactMaterialization() rather than trusting any caller-supplied state.
   const agent = ctx.metadata.agent ?? 'builders';
-  const audit = await verifyArtifactMaterialization(3, agent, artifacts);
+  const audit = await verifyArtifactMaterialization(3, agent, artifacts, ctx.cwd);
 
   if (!audit.allMaterialized) {
     return {

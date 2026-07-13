@@ -568,7 +568,7 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
       }))
     ];
 
-    const artifactAudit = await verifyArtifactMaterialization(3, 'builders', claimedFiles);
+    const artifactAudit = await verifyArtifactMaterialization(3, 'builders', claimedFiles, cwd);
 
     log(generateMaterializationReport(artifactAudit));
 

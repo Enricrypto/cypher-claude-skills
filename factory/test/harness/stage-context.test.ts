@@ -256,6 +256,68 @@ describe('Stage 3 gate — test pass rate is measured, not asserted', () => {
   });
 });
 
+describe('the materialization gate checks the PROJECT, not the harness', () => {
+  /**
+   * The gate used to resolve every claimed path against process.cwd() — the HARNESS's directory,
+   * not the target project's. A live builder run caught it, and it was wrong in both directions:
+   *
+   *   false positive — the builder really did write four files into the target project. The gate
+   *                    looked for them in the harness repo, did not find them, and cried
+   *                    hallucination on honest work.
+   *   false negative — WORSE. A builder could claim it wrote "package.json", never touch the
+   *                    disk, and be APPROVED — because package.json exists in the harness's own
+   *                    repo. The anti-hallucination gate could be fooled by the harness's own
+   *                    directory listing.
+   *
+   * This test locks the second one out. It is the more dangerous of the two: a false positive is
+   * loud and blocks a good build; a false negative is silent and ships a hallucination.
+   */
+  it('does NOT accept a file that exists in the harness repo but not in the project', async () => {
+    // package.json exists where the harness runs. It does NOT exist in this empty project.
+    const backend: any = {
+      stage: 3, agent: '04-backend-builder', timestamp: new Date().toISOString(), status: 'PASS',
+      details: {
+        summary: 'Built it.', artifacts: [],
+        filesModified: [{ path: 'package.json', type: 'MODIFY', description: 'deps', linesAdded: 1, linesRemoved: 0 }],
+        implementation: { services: [], routes: [], migrations: [] },
+        testing: { testsWritten: 5, testsPassed: 5, testsFailed: 0 },
+        patterns: { reused: [], created: [] }
+      }
+    };
+
+    const context = buildStageContext({ stage: 3, cwd: projectDir, outputs: { backend } });
+    expect(context.cwd).toBe(projectDir);
+
+    const decision = await canAdvanceStage(3, stageContracts[3], context);
+
+    expect(decision.canAdvance).toBe(false);
+    expect(decision.blockers.join('\n')).toMatch(/HALLUCINATION/i);
+  });
+
+  it('DOES accept a file the builder really wrote into the project', async () => {
+    writeFile('src/services/PreferencesService.ts', 'export class PreferencesService {}');
+
+    const backend: any = {
+      stage: 3, agent: '04-backend-builder', timestamp: new Date().toISOString(), status: 'PASS',
+      details: {
+        summary: 'Built it.', artifacts: [],
+        filesModified: [{ path: 'src/services/PreferencesService.ts', type: 'CREATE', description: 'service', linesAdded: 1, linesRemoved: 0 }],
+        implementation: { services: [], routes: [], migrations: [] },
+        testing: { testsWritten: 5, testsPassed: 5, testsFailed: 0 },
+        patterns: { reused: [], created: [] }
+      }
+    };
+
+    const decision = await canAdvanceStage(
+      3,
+      stageContracts[3],
+      buildStageContext({ stage: 3, cwd: projectDir, outputs: { spec: specOutput(), backend } })
+    );
+
+    expect(decision.canAdvance).toBe(true);
+  });
+});
+
 describe('countAbandonedMarkers', () => {
   it('counts unfinished-work markers left in the files the builders wrote', () => {
     writeFile('src/x.ts', 'const a = 1; // TODO: handle errors\n// FIXME: race condition\n');

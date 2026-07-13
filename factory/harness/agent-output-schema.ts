@@ -759,7 +759,24 @@ export interface MaterializationAudit {
 export async function verifyArtifactMaterialization(
   stage: number,
   agent: string,
-  artifacts: ArtifactRef[]
+  artifacts: ArtifactRef[],
+  /**
+   * The project the agents are building in. REQUIRED.
+   *
+   * This used to default to process.cwd() — the HARNESS's directory, not the target project's.
+   * The gate therefore checked the wrong filesystem, and was wrong in both directions:
+   *
+   *   false positive — a builder wrote four files into the target project; the gate looked for
+   *                    them in the harness repo, did not find them, and cried hallucination on
+   *                    honest work.
+   *   false negative — worse. A builder could claim it wrote `package.json` or `src/index.ts`,
+   *                    never touch the disk, and the gate would APPROVE it, because a file of
+   *                    that name exists in the harness's own repo. The anti-hallucination gate
+   *                    could be fooled by the harness's own directory listing.
+   *
+   * Caught by the first live builder run.
+   */
+  projectDir: string
 ): Promise<MaterializationAudit> {
   const fs = await import('fs');
   const path = await import('path');
@@ -781,7 +798,7 @@ export async function verifyArtifactMaterialization(
       // Resolve to absolute path (handle relative paths from project root)
       const absolutePath = path.isAbsolute(filePath)
         ? filePath
-        : path.resolve(process.cwd(), filePath);
+        : path.resolve(projectDir, filePath);
 
       // Check if file exists
       verification.exists = fs.existsSync(absolutePath);

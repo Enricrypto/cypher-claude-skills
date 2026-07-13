@@ -21,6 +21,11 @@ describe('Stage Gates', () => {
 
   beforeEach(() => {
     mockContext = {
+      // These tests deliberately check against THIS repo's filesystem, so the claimed files
+      // below (package.json, tsconfig.json) are real. The gate must be told which filesystem
+      // to look at — it used to assume process.cwd(), which is how it ended up checking the
+      // harness's directory instead of the project the agents were building in.
+      cwd: process.cwd(),
       stageDir: 'artifacts/stage-1/',
       artifacts: {},
       metadata: {}

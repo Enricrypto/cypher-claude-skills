@@ -281,7 +281,8 @@ export function buildStageContext(input: BuildStageContextInput): StageContext {
   }
 
   return {
-    stageDir: `feature-factory/artifacts/stage-${stage}/`,
+    cwd,
+    stageDir: `.factory/stage-${stage}/`,
     artifacts,
     metadata
   };
