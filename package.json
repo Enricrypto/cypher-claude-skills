@@ -7,7 +7,7 @@
     "typecheck": "tsc --noEmit",
     "test": "jest",
     "build": "tsc",
-    "factory": "ts-node feature-factory/runner/cli.ts"
+    "factory": "ts-node factory/runner/cli.ts"
   },
   "keywords": [
     "claude",

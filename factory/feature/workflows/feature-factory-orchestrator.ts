@@ -17,7 +17,7 @@ import {
   canAdvanceStage,
   StageContext,
   StageAdvancementDecision
-} from '../harness/stage-gates';
+} from '../../harness/stage-gates';
 
 import {
   ArtifactRef,
@@ -34,30 +34,30 @@ import {
   verifyArtifactMaterialization,
   generateMaterializationReport,
   MaterializationAudit
-} from '../harness/agent-output-schema';
+} from '../../harness/agent-output-schema';
 
 import {
   analyzeError,
   getRemediationInstruction,
   getFixCodeTemplate
-} from '../harness/error-categories';
+} from '../../harness/error-categories';
 
 import {
   auditExecution,
   validateExecutionGate,
   generateExecutionReport,
   ExecutionAudit
-} from '../harness/execution-gates';
+} from '../../harness/execution-gates';
 
 import {
   auditInfrastructure,
   validateInfrastructureGate,
   generateInfrastructureReport,
   InfrastructureAudit
-} from '../harness/infrastructure-gates';
+} from '../../harness/infrastructure-gates';
 
-import { AgentInvoker } from '../runner/invoke-agent';
-import { buildStageContext, persistArtifacts, StageOutputs } from '../harness/stage-context';
+import { AgentInvoker } from '../../runner/invoke-agent';
+import { buildStageContext, persistArtifacts, StageOutputs } from '../../harness/stage-context';
 
 import {
   FeatureState,
@@ -70,7 +70,7 @@ import {
   completeFeature,
   serializeState,
   getStateSummary
-} from '../harness/state-tracker';
+} from '../../harness/state-tracker';
 
 /**
  * An agent that says it cannot proceed is believed.

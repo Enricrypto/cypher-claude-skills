@@ -453,7 +453,7 @@ cypher-claude-skills/
 │   ├── 02-story-writer.md
 │   └── ... (updated with loop context)
 ├── skills/                               (existing + new)
-│   ├── feature-factory/SKILL.md          (rewritten as loop stages)
+│   ├── factory/feature/SKILL.md          (rewritten as loop stages)
 │   ├── production-tdd/
 │   ├── production-security/
 │   ├── production-database/

@@ -98,7 +98,7 @@ Score < 85%  → REJECTED (re-audit)
 ### Artifacts
 
 ```
-e2e-loop/artifacts/phase-0-audit/
+factory/e2e/artifacts/phase-0-audit/
 ├── AUDIT_REPORT.md              ← Comprehensive audit
 ├── AUDIT_VALIDATION_REPORT.json ← Validation scores & gaps
 └── REMEDIATED_AUDIT_REPORT.md   ← Final audit (after fixes)
@@ -301,7 +301,7 @@ Harness captures:
 ### Artifacts
 
 ```
-e2e-loop/artifacts/phase-2-test-generation/
+factory/e2e/artifacts/phase-2-test-generation/
 ├── TEST_PLAN.md
 ├── GENERATED_TESTS_MANIFEST.md
 ├── TEST_AUDIT_REPORT.md
@@ -419,7 +419,7 @@ Check results:
 ### Artifacts
 
 ```
-e2e-loop/artifacts/phase-3-remediation/
+factory/e2e/artifacts/phase-3-remediation/
 ├── REMEDIATION_ITER_1.md
 ├── REMEDIATION_ITER_2.md
 ├── REMEDIATION_ITER_3.md
@@ -469,7 +469,7 @@ Create commit summary and prepare for PR review.
 ### Artifacts
 
 ```
-e2e-loop/artifacts/phase-4-finalize/
+factory/e2e/artifacts/phase-4-finalize/
 └── COMPLETION_REPORT.json
 ```
 

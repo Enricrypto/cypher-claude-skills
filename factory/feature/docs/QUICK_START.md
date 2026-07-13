@@ -8,7 +8,7 @@ Get your first feature through Feature Factory in 15 minutes.
 
 - Your codebase in Git
 - All 8 agents activated (01-researcher through 08-feature-consolidator)
-- Harness installed (`feature-factory/harness/*.ts`)
+- Harness installed (`factory/harness/*.ts`)
 
 ---
 

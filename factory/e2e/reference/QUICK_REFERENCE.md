@@ -24,7 +24,7 @@
 ## File Locations
 
 ```
-e2e-loop/
+factory/e2e/
 ├── harness/              ← Guardrails (do not modify unless extending)
 ├── workflows/            ← Orchestrator (e2e-full-loop-with-remediation.ts)
 ├── skills/               ← Agent definitions
@@ -44,11 +44,11 @@ docker ps
 docker-compose ps
 
 # View test results
-cat e2e-loop/artifacts/phase-2-test-generation/TEST_RESULTS.json
-cat e2e-loop/artifacts/phase-3-remediation/FINAL_TEST_RESULTS.json
+cat factory/e2e/artifacts/phase-2-test-generation/TEST_RESULTS.json
+cat factory/e2e/artifacts/phase-3-remediation/FINAL_TEST_RESULTS.json
 
 # Review failures
-cat e2e-loop/artifacts/phase-3-remediation/REMEDIATION_ITER_1.md
+cat factory/e2e/artifacts/phase-3-remediation/REMEDIATION_ITER_1.md
 ```
 
 ## Escalation Triggers
@@ -141,7 +141,7 @@ All agents output:
 - [ ] Docker running? `docker ps`
 - [ ] Playwright MCP installed? Check `~/.claude/mcp.json`
 - [ ] Test results are JSON? Check `TEST_RESULTS.json` format
-- [ ] All phases have artifacts? Check `e2e-loop/artifacts/phase-*-*/`
+- [ ] All phases have artifacts? Check `factory/e2e/artifacts/phase-*-*/`
 - [ ] Agent outputs are valid JSON? Validate with `validateOutputSchema()`
 - [ ] Docker healthy before tests? Check rebuild logs
 - [ ] Selectors verified? Check TEST_AUDIT_REPORT.md

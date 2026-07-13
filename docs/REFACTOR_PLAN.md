@@ -16,7 +16,7 @@
 The Feature Factory harness was a **well-specified design that had never executed.**
 Three independent facts established this:
 
-1. **Every agent call is a mock.** `feature-factory/workflows/feature-factory-orchestrator.ts:713`
+1. **Every agent call is a mock.** `factory/feature/workflows/feature-factory-orchestrator.ts:713`
    — `invokeAgent()` carries the comment `// In real implementation, would use Agent tool`
    and returns a hardcoded `status: 'PASS'`. The orchestrator never invokes an agent, so
    every gate it evaluates is validating a fake pass.
@@ -63,7 +63,7 @@ The original handoff doc called the spec contract "the keystone — build this F
 proposed authoring a new Markdown template + JSON schema. **Don't.**
 
 `ResearcherOutput`, `StoryWriterOutput`, and `SpecWriterOutput` in
-`feature-factory/harness/agent-output-schema.ts` **are** the spec contract, already written.
+`factory/harness/agent-output-schema.ts` **are** the spec contract, already written.
 `StoryWriterOutput` already carries:
 
 ```ts
@@ -129,19 +129,19 @@ from gstack.
 
 ---
 
-## Known repo problems (established by audit, 2026-07-12)
+## Known repo problems (audit 2026-07-12) — ✅ ALL RESOLVED in Phase 0c
 
 - **Broken symlink loop:** `skills/feature-factory/feature-factory` ->
   `/Users/.../skills/feature-factory` — points at its own parent. `install.js` walks
   `skills/` with a recursive `copyDir` calling `copyFileSync` on symlink entries, so the
   installer crashes (EISDIR) or recurses on this path. Dead only because the npm install
   path is no longer used.
-- **Forked harness:** `feature-factory/harness/error-categories.ts` (429 lines) and
-  `e2e-loop/harness/error-categories.ts` (426 lines) export the *identical* six symbols
+- **Forked harness:** `factory/harness/error-categories.ts` (429 lines) and
+  `factory/e2e/harness/error-categories.ts` (426 lines) export the *identical* six symbols
   (`errorPatterns`, `analyzeError`, `getFixCodeTemplate`, `getRemediationInstruction`,
   `ErrorAnalysis`, `ErrorPattern`). The error taxonomy is maintained twice.
 - **Not actually duplicated (verified):** `agents/` -> `feature-factory/agents` and
-  `skills/e2e-pipeline` -> `../e2e-loop/skills/e2e-pipeline` are **symlinks**, not copies.
+  `skills/e2e-pipeline` -> `../factory/e2e/skills/e2e-pipeline` are **symlinks**, not copies.
   No content drift. These are fine; only the self-referential one is broken.
 - **Dead npm channel:** `@cypher-digital/claude-skills` will not be published. The local repo
   is the single source of truth; the local system should always read the latest from it.
@@ -152,6 +152,16 @@ from gstack.
   ("92% faster", "$0.08/feature").
 - **Empty dir:** root `workflows/`.
 
+**Resolution (0c):** the self-referential symlink is deleted; `install.js`/`cli.js` are deleted
+and replaced by `scripts/link-skills.sh` (symlinks — cannot drift); the six stale root docs are
+in `docs/archive/`; the README is rewritten (1,612 -> ~950 lines) with the invented metrics and
+the "PRODUCTION READY" banner removed; the empty `workflows/` and the now-broken root `agents/`
+symlink are gone. Root is `CLAUDE.md` + `README.md`.
+
+**Still open:** the forked `error-categories.ts` (`factory/harness/` vs `factory/e2e/harness/`).
+Merging them is a behaviour change to a subsystem that is not yet typechecked, so it is deferred
+to Phase 1 rather than bundled into a file move.
+
 ---
 
 ## Status
@@ -160,7 +170,7 @@ from gstack.
 |---|---|
 | **0a** — compile, test, CI | ✅ done (`72eed7f`) |
 | **0b** — real agent dispatch + real gate evidence | ✅ done (`e0f0ce8`, `ce1c548`), verified live |
-| **0c** — reorg + honest docs | 🔄 in progress (docs done; reorg pending) |
+| **0c** — reorg + honest docs | ✅ done (`7d0662e`, `7a300bd`, + this) |
 | **1** — the `preSuppliedSpec` seam | ⬜ next |
 | **2** — Tier 1 (Decomposer first) | ⬜ |
 | **3** — memory + parallelism | ⬜ |
@@ -381,7 +391,7 @@ factory/
 ├── contracts/   <- the Tier1<->Tier2 seam
 ├── runner/      <- Agent SDK dispatch + CLI
 ├── feature/     <- Tier 2 (was feature-factory/)
-└── e2e/         <- Tier 3 (was e2e-loop/)
+└── e2e/         <- Tier 3 (was factory/e2e/)
 skills/          <- single source of truth for standalone skills
 docs/archive/    <- the six stale root planning docs
 scripts/link-skills.sh   <- symlinks repo -> ~/.claude/skills/

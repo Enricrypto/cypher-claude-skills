@@ -11,7 +11,7 @@
 
 > This document previously said **"Status: Production Ready."** It wasn't. The harness had
 > never been compiled, its tests had never run, and the orchestrator's agent calls were a mock
-> returning a hardcoded `status: 'PASS'`. That is fixed — see [../../docs/REFACTOR_PLAN.md](../../docs/REFACTOR_PLAN.md)
+> returning a hardcoded `status: 'PASS'`. That is fixed — see [../../../docs/REFACTOR_PLAN.md](../../../docs/REFACTOR_PLAN.md)
 > for what was broken and what remains open.
 
 ---

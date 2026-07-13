@@ -20,11 +20,11 @@
     "dist",
     "skills",
 
-    // e2e-loop's orchestrator is still a Workflow-runtime script: it relies on globals
+    // factory/e2e's orchestrator is still a Workflow-runtime script: it relies on globals
     // injected by Claude Code's Workflow tool (log/phase/agent/args) and uses top-level
     // await, so it cannot typecheck as a CommonJS module. It is Tier 3 and deferred.
     // The feature-factory orchestrator was rewritten as a real Node module in Phase 0b and
     // is now typechecked. See docs/REFACTOR_PLAN.md.
-    "e2e-loop/workflows"
+    "factory/e2e/workflows"
   ]
 }

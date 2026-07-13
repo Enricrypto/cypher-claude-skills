@@ -58,7 +58,7 @@ Tier 1 (Strategist / Architect / Decomposer).
 > **This section is historical.** It was a to-do list written before the orchestrator existed.
 > Tasks 1 and 2 are built (`harness/state-tracker.ts`, and the loop-back logic in the
 > orchestrator). Tasks 3–5 are not, and are tracked in
-> [../../docs/REFACTOR_PLAN.md](../../docs/REFACTOR_PLAN.md) instead.
+> [../../../docs/REFACTOR_PLAN.md](../../../docs/REFACTOR_PLAN.md) instead.
 >
 > It is kept because the pseudocode still describes the intended behaviour accurately, which is
 > useful when reading the implementation.

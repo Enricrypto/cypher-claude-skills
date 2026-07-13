@@ -9,7 +9,7 @@
  */
 
 import { resolve } from 'path';
-import { runFeatureFactory } from '../workflows/feature-factory-orchestrator';
+import { runFeatureFactory } from '../feature/workflows/feature-factory-orchestrator';
 import { createSdkInvoker } from './invoke-agent';
 import { getStateSummary } from '../harness/state-tracker';
 

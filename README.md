@@ -17,7 +17,7 @@ Not an npm package. Not a CLI you install. You clone this repo and run it.
 | **Agent dispatch** (Claude Agent SDK) | ✅ Runs live, verified end-to-end |
 | **Stage 1 (Discover)** | ✅ Verified live against a real repo |
 | **Stages 2–5** | ⚠️ Compile and are gated, but have **not** been run live end-to-end |
-| **E2E loop** (`e2e-loop/`) | ⚠️ Still a Claude Code Workflow script; not part of the Node build, not typechecked |
+| **E2E loop** (`factory/e2e/`) | ⚠️ Still a Claude Code Workflow script; not part of the Node build, not typechecked |
 | **Tier 1** (Strategist / Architect / Decomposer) | ❌ Designed, not built. See [docs/REFACTOR_PLAN.md](docs/REFACTOR_PLAN.md) |
 
 **Earlier versions of this README claimed things that were not true** — "PRODUCTION READY", "92% faster", "$0.08 per feature by feature #10". Those numbers were invented. The harness had never been compiled, its test suite had never run, and the orchestrator's agent calls were a mock that returned a hardcoded `status: 'PASS'`. That is all fixed now, but the claims are worth remembering as a caution: measure, then write it down.
@@ -32,7 +32,7 @@ A single AI session cannot reliably be product analyst, architect, backend engin
 
 So the work is split across ten agents, each with one job, a clean context, and **only the tools it needs** — and between them sit gates that are *code*, not prose.
 
-That last part is the whole point. A "gate" that is an instruction in a prompt is a suggestion; the model can talk itself past it. A gate that is a function returning `false` cannot be talked past. Everything in `feature-factory/harness/` exists to make the gates unbypassable.
+That last part is the whole point. A "gate" that is an instruction in a prompt is a suggestion; the model can talk itself past it. A gate that is a function returning `false` cannot be talked past. Everything in `factory/harness/` exists to make the gates unbypassable.
 
 ### The one property that matters
 
@@ -44,7 +44,7 @@ The gates never read an agent's self-reported status to decide whether it succee
 - A builder can claim it created `src/services/Foo.ts` — and be **blocked** as a hallucination, because the gate calls `fs.existsSync` on every claimed path.
 - "No tests written" scores a pass rate of **0**, not a vacuous 100%.
 
-Those are tested, offline, in CI, with no model and no tokens ([`stage-context.test.ts`](feature-factory/test/harness/stage-context.test.ts)) — because the model's job is to *produce* output and the gate's job is to *judge* it, and judging is testable by handing the gate known-bad output directly.
+Those are tested, offline, in CI, with no model and no tokens ([`stage-context.test.ts`](factory/test/harness/stage-context.test.ts)) — because the model's job is to *produce* output and the gate's job is to *judge* it, and judging is testable by handing the gate known-bad output directly.
 
 ---
 
@@ -82,11 +82,11 @@ Stage 4  VERIFY     06-test-verifier → 07-validator      → regression + secu
 Stage 5  DELIVER    08-feature-consolidator              → reusable patterns
 ```
 
-Each stage has a contract in [`harness/stage-gates.ts`](feature-factory/harness/stage-gates.ts) — a list of criteria tagged CRITICAL / IMPORTANT / NICE_TO_HAVE. **All CRITICAL criteria must pass or the stage does not advance.** The recommendation (ADVANCE / WAIT / ESCALATE) falls out of the pass rate.
+Each stage has a contract in [`harness/stage-gates.ts`](factory/harness/stage-gates.ts) — a list of criteria tagged CRITICAL / IMPORTANT / NICE_TO_HAVE. **All CRITICAL criteria must pass or the stage does not advance.** The recommendation (ADVANCE / WAIT / ESCALATE) falls out of the pass rate.
 
 ### Tool grants are enforced, not documented
 
-[`runner/agent-registry.ts`](feature-factory/runner/agent-registry.ts) is what *makes* the Researcher read-only — not its markdown asking politely. The grants are passed to the SDK's permission layer, which runs in `dontAsk` mode: it never prompts, and denies anything not pre-approved.
+[`runner/agent-registry.ts`](factory/runner/agent-registry.ts) is what *makes* the Researcher read-only — not its markdown asking politely. The grants are passed to the SDK's permission layer, which runs in `dontAsk` mode: it never prompts, and denies anything not pre-approved.
 
 | Agent | Tools | Can write files? |
 |---|---|---|
@@ -107,9 +107,9 @@ If an agent reaches for a tool it wasn't granted, the SDK denies it **and report
 
 ## What the agents are told
 
-Each agent's system prompt is its contract file in [`feature-factory/agents/`](feature-factory/agents/), loaded verbatim. Nothing else is loaded — no `CLAUDE.md`, no user skills, no project settings (`settingSources: []`). Without that, the same agent would behave differently depending on whose machine it ran on, and the determinism the gates exist to provide would be gone.
+Each agent's system prompt is its contract file in [`factory/feature/agents/`](factory/feature/agents/), loaded verbatim. Nothing else is loaded — no `CLAUDE.md`, no user skills, no project settings (`settingSources: []`). Without that, the same agent would behave differently depending on whose machine it ran on, and the determinism the gates exist to provide would be gone.
 
-Output is **schema-forced**: each agent gets a full JSON Schema ([`runner/output-schemas.ts`](feature-factory/runner/output-schemas.ts)) with the gate-relevant fields marked required, and the SDK retries the model internally until it conforms. This matters more than it sounds. In the first live run the schema only required a summary, so the Researcher put all its findings in **prose** and returned `filesIdentified: []` — the gate then failed it on evidence it had genuinely gathered. **An agent fills the shape you give it.** Give it the right shape.
+Output is **schema-forced**: each agent gets a full JSON Schema ([`runner/output-schemas.ts`](factory/runner/output-schemas.ts)) with the gate-relevant fields marked required, and the SDK retries the model internally until it conforms. This matters more than it sounds. In the first live run the schema only required a summary, so the Researcher put all its findings in **prose** and returned `filesIdentified: []` — the gate then failed it on evidence it had genuinely gathered. **An agent fills the shape you give it.** Give it the right shape.
 
 ---
 
@@ -128,19 +128,27 @@ The orchestrator honors that. An agent declaring a blocker is a finding, not noi
 ## Layout
 
 ```
-feature-factory/
-├── harness/          gates, schemas, error taxonomy, state, context building
-├── runner/           Agent SDK dispatch, tool grants, output schemas, CLI
-├── agents/           the 10 agent contracts (each becomes a system prompt)
-├── workflows/        the orchestrator
-├── docs/             deeper docs
-├── reference/        lookup tables (contracts, schemas, errors, state)
-└── test/             152 tests — all offline
+factory/
+├── harness/          SHARED: gates, schemas, error taxonomy, state, context building
+├── runner/           SHARED: Agent SDK dispatch, tool grants, output schemas, CLI
+├── test/             152 tests — all offline, no model, no tokens
+│
+├── feature/          Tier 2 — the feature pipeline (this is "Feature Factory")
+│   ├── agents/       the 10 agent contracts (each becomes a system prompt)
+│   ├── workflows/    the orchestrator
+│   ├── docs/         deeper docs
+│   ├── reference/    lookup tables (contracts, schemas, errors, state)
+│   └── SKILL.md
+│
+├── e2e/              Tier 3 — post-merge E2E system (see status table above)
+└── (product/)        Tier 1 — Strategist / Architect / Decomposer. NOT BUILT.
 
-e2e-loop/             separate post-merge E2E system (see status table above)
 skills/               standalone Claude Code skills — catalogue below
-docs/REFACTOR_PLAN.md the phased plan, including known open bugs
+scripts/link-skills.sh  symlink them into ~/.claude/skills/
+docs/REFACTOR_PLAN.md   the phased plan, including known open bugs
 ```
+
+`harness/` and `runner/` sit at the top because they are **shared**. Tier 1, when it lands, gets a `product/` sibling to `feature/` and reuses the same gates — that is the whole point of the two-tier design: one deterministic harness, swappable tiers above it.
 
 ---
 
@@ -154,7 +162,13 @@ Read skills/security-audit.md
 
 Some are single files; some are directories with a `SKILL.md` and a `reference/` folder. The full catalogue is below.
 
-> **Note:** this repo used to be published as `@cypher-digital/claude-skills` with a `npx cypher-skills sync` command. That channel is dead — the package is private and the repo is the single source of truth. Clone it and read the files.
+To wire them into `~/.claude/skills/` so Claude Code always reads the latest:
+
+```bash
+./scripts/link-skills.sh        # symlinks, so they can never go stale
+```
+
+> **Note:** this repo used to be published as `@cypher-digital/claude-skills` with an `npx cypher-skills sync` command that **copied** files into each project — which meant they went stale the moment you edited the source. That channel is dead; `install.js` and `cli.js` are deleted. The repo is the single source of truth, and the linker above uses symlinks, which cannot drift.
 
 ---
 
@@ -359,7 +373,7 @@ Enforces strict RED → GREEN → REFACTOR cycle. Write failing test first, watc
 #### `e2e-pipeline` _(directory skill)_
 
 **Source:** cypher-claude-skills (custom)  
-**Location:** `e2e-loop/` (organized harness-driven system)  
+**Location:** `factory/e2e/` (organized harness-driven system)  
 **Version:** 1.0 (Harness-Driven, 100% Acceptance)
 
 Complete E2E test suite orchestration system with **guaranteed reliability**. Manages the full lifecycle from codebase audit through test generation, validation, and automated remediation with guardrails at every phase.
@@ -376,19 +390,19 @@ Complete E2E test suite orchestration system with **guaranteed reliability**. Ma
 
 ```bash
 # Quick start (5 min)
-Read e2e-loop/docs/README.md
+Read factory/e2e/docs/README.md
 
 # Full implementation guide
-Read e2e-loop/docs/QUICK_START.md
+Read factory/e2e/docs/QUICK_START.md
 
 # Architecture & design decisions
-Read e2e-loop/docs/ARCHITECTURE.md
+Read factory/e2e/docs/ARCHITECTURE.md
 
 # Detailed phase-by-phase walkthrough
-Read e2e-loop/docs/PHASE_GUIDE.md
+Read factory/e2e/docs/PHASE_GUIDE.md
 
 # Quick reference (error categories, contracts, etc.)
-Read e2e-loop/reference/QUICK_REFERENCE.md
+Read factory/e2e/reference/QUICK_REFERENCE.md
 ```
 
 **Workflow (4 Phases):**
@@ -411,10 +425,10 @@ Read e2e-loop/reference/QUICK_REFERENCE.md
 - ✅ **Clear Escalation** — Human review with full context when needed
 
 **Files to Know:**
-- `e2e-loop/harness/phase-gates.ts` — Phase contracts & validation
-- `e2e-loop/harness/error-categories.ts` — Error → fix mapping
-- `e2e-loop/harness/remediation-engine.ts` — Loop orchestrator
-- `e2e-loop/workflows/e2e-full-loop-with-remediation.ts` — Orchestrator
+- `factory/e2e/harness/phase-gates.ts` — Phase contracts & validation
+- `factory/e2e/harness/error-categories.ts` — Error → fix mapping
+- `factory/e2e/harness/remediation-engine.ts` — Loop orchestrator
+- `factory/e2e/workflows/e2e-full-loop-with-remediation.ts` — Orchestrator
 
 **Learn more:** Pair with `e2e-testing-playwright` for tactical Playwright patterns.
 
@@ -898,7 +912,7 @@ Structured commit message discipline. Enforces conventional commits format with 
 
 | Skill | Type | Used in Feature Factory | Standalone | Trigger phrase |
 |---|---|---|---|---|
-| `feature-factory` | Chain (7 agents) | — | ✅ | `Read .claude/skills/feature-factory/SKILL.md` |
+| `feature-factory` | Chain (7 agents) | — | ✅ | `Read .claude/skills/factory/feature/SKILL.md` |
 | `e2e-pipeline` | Orchestration (8 agents) | Test Verifier | ✅ | `Read .claude/skills/software/e2e-pipeline/E2E_PIPELINE_ORCHESTRATION.md` |
 | `architecture-patterns` | Workflow | Researcher · Spec Writer | ✅ | "Design this architecture" |
 | `api-design-principles` | Workflow | Spec Writer · Backend Builder | ✅ | "Review this API design" |

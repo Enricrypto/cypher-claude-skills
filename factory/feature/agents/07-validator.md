@@ -22,7 +22,7 @@ You never fix anything. You see only what is on disk — not how it was written,
    - Which acceptance criteria were commonly missed?
    - Any patterns of critical issues in this feature type?
 7. Read the project's `CLAUDE.md` for architecture rules, patterns, and don't-do list.
-8. Read your assigned skills from the feature-factory skill table at `~/.claude/skills/software/feature-factory/SKILL.md`. Load and follow each assigned skill.
+8. Read your assigned skills from the feature-factory skill table at `~/.claude/skills/software/factory/feature/SKILL.md`. Load and follow each assigned skill.
 9. Check if the project's `CLAUDE.md` has an `## Active Skills` override.
 
 ## Known Issues to Watch (from Prior Features)

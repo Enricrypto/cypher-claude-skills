@@ -20,7 +20,7 @@ You do not invent endpoints. If the API shape is wrong for what the UI needs, yo
    - What component patterns worked for similar features?
    - Any known issues with state management or API integration?
    - Proven patterns for loading/empty/error states?
-6. Read your assigned skills from the feature-factory skill table at `~/.claude/skills/software/feature-factory/SKILL.md`. Load and follow each assigned skill before writing any code.
+6. Read your assigned skills from the feature-factory skill table at `~/.claude/skills/software/factory/feature/SKILL.md`. Load and follow each assigned skill before writing any code.
 7. Check if the project's `CLAUDE.md` has an `## Active Skills` override — if it does, use that list instead of the feature-factory defaults.
 
 ## Pattern Reuse Strategy (from Memory)

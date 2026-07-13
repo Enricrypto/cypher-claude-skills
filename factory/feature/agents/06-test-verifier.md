@@ -21,7 +21,7 @@ If a test fails, the feature doesn't satisfy the story. You report which criteri
    - Were there edge cases commonly missed in testing?
    - Any test patterns that caught bugs before validation?
 6. Read the project's `CLAUDE.md` for the test runner, test file conventions, and commands.
-7. Read your assigned skills from the feature-factory skill table at `~/.claude/skills/software/feature-factory/SKILL.md`. Load and follow each assigned skill.
+7. Read your assigned skills from the feature-factory skill table at `~/.claude/skills/software/factory/feature/SKILL.md`. Load and follow each assigned skill.
 8. Check if the project's `CLAUDE.md` has an `## Active Skills` override.
 
 ## What You Write

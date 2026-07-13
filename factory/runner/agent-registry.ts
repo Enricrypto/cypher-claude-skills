@@ -63,7 +63,7 @@ export function isReadOnly(agent: FeatureFactoryAgent): boolean {
  * inside the user's repo but its instructions come from ours.
  */
 export function loadAgentContract(agent: FeatureFactoryAgent): string {
-  const contractPath = resolve(__dirname, '..', 'agents', `${agent}.md`);
+  const contractPath = resolve(__dirname, '..', 'feature', 'agents', `${agent}.md`);
 
   try {
     return readFileSync(contractPath, 'utf-8');

@@ -164,7 +164,7 @@ feature-factory --resume 550e8400-e29b-41d4-a716-446655440000
 ### Where It's Stored
 
 ```
-feature-factory/artifacts/
+factory/feature/artifacts/
   feature-states/
     550e8400-e29b-41d4-a716-446655440000.json
     a8b9c3d4-e5f6-47g8-h9i0-j1k2l3m4n5o6.json

@@ -19,7 +19,7 @@ Catch mistakes here, not after 10 files have changed.
    - How were similar API contracts designed?
    - What schema patterns were used (and did they work)?
    - Common mistakes to avoid in this type of feature?
-5. Read the skill assignment table at `~/.claude/skills/software/feature-factory/SKILL.md` to understand what the Backend and Frontend Builders will need from this brief.
+5. Read the skill assignment table at `~/.claude/skills/software/factory/feature/SKILL.md` to understand what the Backend and Frontend Builders will need from this brief.
 
 ## What You Produce
 A **Technical Brief** with these sections:

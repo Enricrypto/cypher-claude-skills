@@ -344,7 +344,7 @@ Iteration 1:
 ### Artifact Organization
 
 ```
-e2e-loop/artifacts/
+factory/e2e/artifacts/
 ├── phase-0-audit/
 │   ├── AUDIT_REPORT.md
 │   ├── AUDIT_VALIDATION_REPORT.json

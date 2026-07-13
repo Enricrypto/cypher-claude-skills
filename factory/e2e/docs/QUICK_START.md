@@ -105,7 +105,7 @@ Phase 4: Finalize (E2E Loop)
 All outputs are saved in organized folders:
 
 ```
-e2e-loop/artifacts/
+factory/e2e/artifacts/
 ├── phase-0-audit/           ← Audit reports
 ├── phase-1-infrastructure/  ← Infrastructure fixes
 ├── phase-2-test-generation/ ← Test files & plans

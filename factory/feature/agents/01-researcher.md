@@ -15,7 +15,7 @@ Inspect the codebase and produce a structured map of everything relevant to the 
    - Use: `mcp__memorykit__retrieve_context("feature: {feature_name}")`
    - This loads prior feature patterns, common issues, and learnings from this project
    - Incorporate these learnings into your analysis below
-3. Read the feature-factory skill assignment table at `~/.claude/skills/software/feature-factory/SKILL.md` to understand what downstream agents will need from you.
+3. Read the feature-factory skill assignment table at `~/.claude/skills/software/factory/feature/SKILL.md` to understand what downstream agents will need from you.
 
 ## What You Produce
 A **Researcher Report** with these five sections:

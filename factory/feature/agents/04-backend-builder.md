@@ -17,7 +17,7 @@ Implement the backend half of the feature exactly as described in the approved t
    - What API patterns worked for similar features?
    - What service layer patterns are proven?
    - Any known issues with schema changes or database operations?
-5. Read your assigned skills from the feature-factory skill table at `~/.claude/skills/software/feature-factory/SKILL.md`. Load and follow each assigned skill before writing any code.
+5. Read your assigned skills from the feature-factory skill table at `~/.claude/skills/software/factory/feature/SKILL.md`. Load and follow each assigned skill before writing any code.
 6. Check if the project's `CLAUDE.md` has an `## Active Skills` override — if it does, use that list instead of the feature-factory defaults.
 
 ## Pattern Reuse Strategy (from Memory)
