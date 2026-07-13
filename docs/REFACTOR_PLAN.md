@@ -136,10 +136,16 @@ from gstack.
   `skills/` with a recursive `copyDir` calling `copyFileSync` on symlink entries, so the
   installer crashes (EISDIR) or recurses on this path. Dead only because the npm install
   path is no longer used.
-- **Forked harness:** `factory/harness/error-categories.ts` (429 lines) and
-  `factory/e2e/harness/error-categories.ts` (426 lines) export the *identical* six symbols
-  (`errorPatterns`, `analyzeError`, `getFixCodeTemplate`, `getRemediationInstruction`,
-  `ErrorAnalysis`, `ErrorPattern`). The error taxonomy is maintained twice.
+- **~~Forked harness~~ — THIS FINDING WAS WRONG (corrected in Phase 1).**
+  `factory/harness/error-categories.ts` and `factory/e2e/harness/error-categories.ts` export the
+  identical six symbols, which is what the original grep matched on. But they are **not** a fork:
+  they are two domain-specific taxonomies. The first categorises **compile and test** failures
+  (`TYPE_ERROR`, `IMPORT_ERROR`, `SYNTAX_ERROR`, `MIGRATION_ERROR`, `SCHEMA_MISMATCH`,
+  `MISSING_IMPLEMENTATION`); the second categorises **browser and infrastructure** failures
+  (`ENVIRONMENT_ISSUE`, `SETUP_FAILURE`). Only 7 patterns genuinely overlap.
+  **They must NOT be merged.** `analyzeError()` is first-match-wins, so flattening both tables
+  into one would let a pattern from one domain shadow a specific pattern from the other — which
+  is exactly BUG-3, already fixed once. Both files now carry a comment saying so.
 - **Not actually duplicated (verified):** `agents/` -> `feature-factory/agents` and
   `skills/e2e-pipeline` -> `../factory/e2e/skills/e2e-pipeline` are **symlinks**, not copies.
   No content drift. These are fine; only the self-referential one is broken.
@@ -158,9 +164,8 @@ in `docs/archive/`; the README is rewritten (1,612 -> ~950 lines) with the inven
 the "PRODUCTION READY" banner removed; the empty `workflows/` and the now-broken root `agents/`
 symlink are gone. Root is `CLAUDE.md` + `README.md`.
 
-**Still open:** the forked `error-categories.ts` (`factory/harness/` vs `factory/e2e/harness/`).
-Merging them is a behaviour change to a subsystem that is not yet typechecked, so it is deferred
-to Phase 1 rather than bundled into a file move.
+**Resolved in Phase 1:** the "forked `error-categories.ts`" turned out not to be a fork at all —
+see the corrected finding above. No merge was performed, and both files now document why.
 
 ---
 
@@ -171,7 +176,8 @@ to Phase 1 rather than bundled into a file move.
 | **0a** — compile, test, CI | ✅ done (`72eed7f`) |
 | **0b** — real agent dispatch + real gate evidence | ✅ done (`e0f0ce8`, `ce1c548`), verified live |
 | **0c** — reorg + honest docs | ✅ done (`7d0662e`, `7a300bd`, + this) |
-| **1** — the `preSuppliedSpec` seam | ⬜ next |
+| **1** — the `preSuppliedSpec` seam | ✅ done |
+| **1.5** — prove stages 2–5 live (NEW — see below) | ⬜ next |
 | **2** — Tier 1 (Decomposer first) | ⬜ |
 | **3** — memory + parallelism | ⬜ |
 
@@ -423,7 +429,7 @@ without rework.
 - [ ] Add optional `preSuppliedSpec` to `OrchestrationOptions`; make stages 1–2
       **satisfy-or-run** (validate through the *same* `canAdvanceStage`; advance if it
       passes, **escalate if it does not** — never silently fall back to running stage 2).
-- [ ] Merge the forked `error-categories.ts` into one shared copy under `factory/harness/`.
+- [x] ~~Merge the forked `error-categories.ts`~~ — investigated and NOT merged. They are two domain-specific taxonomies, not a fork. See the corrected audit finding above.
 
 **Exit criteria:** three integration tests — (1) no `preSuppliedSpec` -> identical behavior
 to Phase 0b; (2) a hand-written spec fixture -> skips to stage 3; (3) a deliberately

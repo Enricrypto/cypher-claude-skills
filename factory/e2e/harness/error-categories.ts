@@ -1,14 +1,10 @@
 /**
- * Error Categorization & Fix Mapping
+ * E2E Error Categories — BROWSER AND INFRASTRUCTURE failures.
  *
- * Deterministic lookup table for categorizing test failures.
- * Harness identifies error category → agent applies suggested fix.
- *
- * Key principle: "Error categorization is deterministic"
- * Don't ask agents to infer; tell them what category it is.
- * Agents apply fixes, harness validates.
+ * Deliberately separate from factory/harness/error-categories.ts. See the note at the top of
+ * that file: these are two domain-specific taxonomies, not a fork, and merging them would let
+ * patterns from one domain shadow the other in a first-match-wins table.
  */
-
 export interface ErrorPattern {
   pattern: RegExp; // Regex to match error message
   category: ErrorCategory;

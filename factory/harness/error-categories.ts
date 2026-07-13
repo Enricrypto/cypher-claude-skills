@@ -1,12 +1,22 @@
 /**
- * Feature Factory Error Categorization & Fix Mapping
+ * Feature Factory Error Categories — BUILD AND TEST failures.
  *
- * Deterministic lookup table: error pattern → category → fix class → suggested fix
+ * NOT a duplicate of factory/e2e/harness/error-categories.ts, despite the identical export
+ * surface. That similarity is why an earlier audit wrongly listed these as a "forked harness"
+ * to be merged. They are two DOMAIN-SPECIFIC taxonomies:
  *
- * Adapted from: e2e-loop/harness/error-categories.ts
- * Extended with: Feature Factory specific errors (TypeScript, imports, schema)
+ *   this file        — TYPE_ERROR, IMPORT_ERROR, SYNTAX_ERROR, MIGRATION_ERROR,
+ *                      SCHEMA_MISMATCH, MISSING_IMPLEMENTATION ... compile/test failures
+ *   factory/e2e/...  — ENVIRONMENT_ISSUE, SETUP_FAILURE ... browser/infrastructure failures
+ *
+ * DO NOT MERGE THEM. analyzeError() is first-match-wins, so pouring both tables together would
+ * let a generic browser pattern shadow a specific compile pattern (or vice versa) — which is
+ * exactly the bug this file already had once, where MISSING_IMPLEMENTATION's /does not exist/
+ * swallowed "column X does not exist" and returned IMPLEMENT instead of CREATE_MIGRATION.
+ *
+ * If the seven genuinely shared patterns ever need to be maintained in one place, extract a
+ * shared BASE table that each domain EXTENDS. Do not flatten them into one.
  */
-
 export interface ErrorPattern {
   pattern: RegExp;
   category: ErrorCategory;

@@ -58,6 +58,7 @@ import {
 
 import { AgentInvoker } from '../../runner/invoke-agent';
 import { buildStageContext, persistArtifacts, StageOutputs } from '../../harness/stage-context';
+import { acceptFeatureSpec, FeatureSpec } from '../../contracts/feature-spec';
 
 import {
   FeatureState,
@@ -93,6 +94,17 @@ export interface OrchestrationOptions {
   cwd: string;
 
   /**
+   * A spec produced upstream — by a Tier 1 Decomposer, by a human, by anything.
+   *
+   * OPTIONAL, and that is the whole point. Omit it and Feature Factory runs its own Researcher,
+   * Story Writer and Spec Writer exactly as it always has. Supply it and those stages are
+   * skipped — but only if it passes the very same gates their output would have had to pass.
+   *
+   * See contracts/feature-spec.ts.
+   */
+  preSuppliedSpec?: FeatureSpec;
+
+  /**
    * How agents are run. Injected rather than imported so the gates can be exercised without a
    * network: production passes createSdkInvoker(...), tests pass a scripted fake. The harness
    * is indifferent to which — it judges the output, not its provenance.
@@ -121,160 +133,204 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
     log(`Feature ID: ${state.featureId}`);
 
     // ========================================================================
-    // STAGE 1: DISCOVER (Researcher)
+    // SATISFY-OR-RUN: stages 1 and 2
+    //
+    // If a spec was supplied from upstream (a Tier 1 Decomposer, a human, anything), we do not
+    // re-plan the feature — but we do NOT take its word for it either. It goes through the same
+    // canAdvanceStage() the Story Writer's own output goes through. Being upstream buys no
+    // leniency: the gate is the contract.
+    //
+    // If nothing was supplied, this runs exactly the code path it always has. That is the
+    // invariant: Feature Factory stays runnable standalone on an existing project, with no Tier 1
+    // artifacts, and the no-spec path is byte-for-byte unchanged.
     // ========================================================================
 
-    phase('Stage 1: Discover');
+    if (options.preSuppliedSpec) {
+      phase('Stages 1-2: Pre-supplied spec');
 
-    const researcherOutput = await invokeAgent({
-      stage: 1,
-      agent: '01-researcher',
-      prompt: `Analyze the codebase for feature: "${options.featureDescription}"`,
-      maxAttempts: 1
-    });
+      const acceptance = await acceptFeatureSpec(options.preSuppliedSpec, cwd);
 
-    // Validate output schema
-    const researchValidation = validateOutputSchema(1, '01-researcher', researcherOutput);
-    if (!researchValidation.valid) {
-      state = recordEscalation(
-        state,
-        1,
-        '01-researcher',
-        'SCHEMA_VALIDATION',
-        `Output schema validation failed: ${researchValidation.errors.join(', ')}`
-      );
-      return completeFeature(state, 'ESCALATED', 'Schema validation failed at Stage 1');
+      if (!acceptance.accepted) {
+        // Deliberately NOT falling back to running stages 1-2 ourselves. A spec that fails the
+        // gate means the upstream producer is broken, and silently re-planning around it would
+        // hide that — the Decomposer would look like it worked while Tier 2 quietly did its job.
+        state = recordEscalation(
+          state,
+          2,
+          'tier-1',
+          'CRITICAL_ISSUE',
+          `Pre-supplied spec rejected by the stage gates (${acceptance.passRate.toFixed(0)}%).`,
+          { blockers: acceptance.blockers }
+        );
+        return completeFeature(state, 'ESCALATED', 'Pre-supplied spec did not pass the gates');
+      }
+
+      outputs.researcher = options.preSuppliedSpec.researcher;
+      outputs.story = options.preSuppliedSpec.story;
+      outputs.spec = options.preSuppliedSpec.spec;
+
+      state = recordAgentStep(state, 2, 'tier-1', 'PASS', options.preSuppliedSpec.spec);
+      log(`✅ Pre-supplied spec accepted — skipping Discover and Plan`);
+
+      state = advanceToStage(state, 3);
+    } else {
+      // ========================================================================
+      // STAGE 1: DISCOVER (Researcher)
+      // ========================================================================
+
+      phase('Stage 1: Discover');
+
+      const researcherOutput = await invokeAgent({
+        stage: 1,
+        agent: '01-researcher',
+        prompt: `Analyze the codebase for feature: "${options.featureDescription}"`,
+        maxAttempts: 1
+      });
+
+      // Validate output schema
+      const researchValidation = validateOutputSchema(1, '01-researcher', researcherOutput);
+      if (!researchValidation.valid) {
+        state = recordEscalation(
+          state,
+          1,
+          '01-researcher',
+          'SCHEMA_VALIDATION',
+          `Output schema validation failed: ${researchValidation.errors.join(', ')}`
+        );
+        return completeFeature(state, 'ESCALATED', 'Schema validation failed at Stage 1');
+      }
+
+      if (agentDeclaredBlocked(researcherOutput)) {
+        state = recordEscalation(
+          state,
+          1,
+          '01-researcher',
+          'CRITICAL_ISSUE',
+          `01-researcher reported ${researcherOutput.status}: ${researcherOutput.details.summary}`
+        );
+        return completeFeature(state, 'ESCALATED', `01-researcher declared the feature blocked`);
+      }
+
+      outputs.researcher = researcherOutput;
+      state = recordAgentStep(state, 1, '01-researcher', 'PASS', researcherOutput);
+
+      // Check Stage 1 gate
+      const stage1Decision = await checkStageGate(1, cwd, outputs);
+      if (!stage1Decision.canAdvance) {
+        state = recordEscalation(
+          state,
+          1,
+          'harness',
+          'CRITICAL_ISSUE',
+          `Stage 1 gate failed: ${stage1Decision.reason}`,
+          { blockers: stage1Decision.blockers }
+        );
+        return completeFeature(state, 'ESCALATED', stage1Decision.reason);
+      }
+
+      log(`✅ Stage 1 passed: ${stage1Decision.passRate.toFixed(0)}% criteria met`);
+      state = advanceToStage(state, 2);
+
+      // ========================================================================
+      // STAGE 2: PLAN (Story Writer + Spec Writer)
+      // ========================================================================
+
+      phase('Stage 2: Plan');
+
+      // Story Writer
+      const storyOutput = await invokeAgent({
+        stage: 2,
+        agent: '02-story-writer',
+        prompt: `Write user story for: "${options.featureDescription}" based on researcher report`,
+        maxAttempts: 1
+      });
+
+      const storyValidation = validateOutputSchema(2, '02-story-writer', storyOutput);
+      if (!storyValidation.valid) {
+        state = recordEscalation(
+          state,
+          2,
+          '02-story-writer',
+          'SCHEMA_VALIDATION',
+          `Story output schema invalid: ${storyValidation.errors[0]}`
+        );
+        return completeFeature(state, 'ESCALATED', 'Story schema validation failed');
+      }
+
+      if (agentDeclaredBlocked(storyOutput)) {
+        state = recordEscalation(
+          state,
+          2,
+          '02-story-writer',
+          'CRITICAL_ISSUE',
+          `02-story-writer reported ${storyOutput.status}: ${storyOutput.details.summary}`
+        );
+        return completeFeature(state, 'ESCALATED', `02-story-writer declared the feature blocked`);
+      }
+
+      outputs.story = storyOutput;
+      state = recordAgentStep(state, 2, '02-story-writer', 'PASS', storyOutput);
+
+      // CHECKPOINT 1: Approve story
+      log('⏸️  CHECKPOINT 1: Awaiting story approval');
+      state = recordCheckpointApproval(state, 2, 'Story Approval');
+
+      // Spec Writer
+      const specOutput = await invokeAgent({
+        stage: 2,
+        agent: '03-spec-writer',
+        prompt: `Write technical brief for approved story`,
+        maxAttempts: 1
+      });
+
+      const specValidation = validateOutputSchema(2, '03-spec-writer', specOutput);
+      if (!specValidation.valid) {
+        state = recordEscalation(
+          state,
+          2,
+          '03-spec-writer',
+          'SCHEMA_VALIDATION',
+          `Spec output schema invalid: ${specValidation.errors[0]}`
+        );
+        return completeFeature(state, 'ESCALATED', 'Spec schema validation failed');
+      }
+
+      if (agentDeclaredBlocked(specOutput)) {
+        state = recordEscalation(
+          state,
+          2,
+          '03-spec-writer',
+          'CRITICAL_ISSUE',
+          `03-spec-writer reported ${specOutput.status}: ${specOutput.details.summary}`
+        );
+        return completeFeature(state, 'ESCALATED', `03-spec-writer declared the feature blocked`);
+      }
+
+      outputs.spec = specOutput;
+      state = recordAgentStep(state, 2, '03-spec-writer', 'PASS', specOutput);
+
+      // Check Stage 2 gate
+      const stage2Decision = await checkStageGate(2, cwd, outputs);
+      if (!stage2Decision.canAdvance) {
+        state = recordEscalation(
+          state,
+          2,
+          'harness',
+          'CRITICAL_ISSUE',
+          `Stage 2 gate failed: ${stage2Decision.reason}`
+        );
+        return completeFeature(state, 'ESCALATED', stage2Decision.reason);
+      }
+
+      log(`✅ Stage 2 passed: Story & Spec approved`);
+
+      // CHECKPOINT 2: Approve brief
+      log('⏸️  CHECKPOINT 2: Awaiting brief approval');
+      state = recordCheckpointApproval(state, 2, 'Brief Approval');
+
+      state = advanceToStage(state, 3);
     }
 
-    if (agentDeclaredBlocked(researcherOutput)) {
-      state = recordEscalation(
-        state,
-        1,
-        '01-researcher',
-        'CRITICAL_ISSUE',
-        `01-researcher reported ${researcherOutput.status}: ${researcherOutput.details.summary}`
-      );
-      return completeFeature(state, 'ESCALATED', `01-researcher declared the feature blocked`);
-    }
-
-    outputs.researcher = researcherOutput;
-    state = recordAgentStep(state, 1, '01-researcher', 'PASS', researcherOutput);
-
-    // Check Stage 1 gate
-    const stage1Decision = await checkStageGate(1, cwd, outputs);
-    if (!stage1Decision.canAdvance) {
-      state = recordEscalation(
-        state,
-        1,
-        'harness',
-        'CRITICAL_ISSUE',
-        `Stage 1 gate failed: ${stage1Decision.reason}`,
-        { blockers: stage1Decision.blockers }
-      );
-      return completeFeature(state, 'ESCALATED', stage1Decision.reason);
-    }
-
-    log(`✅ Stage 1 passed: ${stage1Decision.passRate.toFixed(0)}% criteria met`);
-    state = advanceToStage(state, 2);
-
-    // ========================================================================
-    // STAGE 2: PLAN (Story Writer + Spec Writer)
-    // ========================================================================
-
-    phase('Stage 2: Plan');
-
-    // Story Writer
-    const storyOutput = await invokeAgent({
-      stage: 2,
-      agent: '02-story-writer',
-      prompt: `Write user story for: "${options.featureDescription}" based on researcher report`,
-      maxAttempts: 1
-    });
-
-    const storyValidation = validateOutputSchema(2, '02-story-writer', storyOutput);
-    if (!storyValidation.valid) {
-      state = recordEscalation(
-        state,
-        2,
-        '02-story-writer',
-        'SCHEMA_VALIDATION',
-        `Story output schema invalid: ${storyValidation.errors[0]}`
-      );
-      return completeFeature(state, 'ESCALATED', 'Story schema validation failed');
-    }
-
-    if (agentDeclaredBlocked(storyOutput)) {
-      state = recordEscalation(
-        state,
-        2,
-        '02-story-writer',
-        'CRITICAL_ISSUE',
-        `02-story-writer reported ${storyOutput.status}: ${storyOutput.details.summary}`
-      );
-      return completeFeature(state, 'ESCALATED', `02-story-writer declared the feature blocked`);
-    }
-
-    outputs.story = storyOutput;
-    state = recordAgentStep(state, 2, '02-story-writer', 'PASS', storyOutput);
-
-    // CHECKPOINT 1: Approve story
-    log('⏸️  CHECKPOINT 1: Awaiting story approval');
-    state = recordCheckpointApproval(state, 2, 'Story Approval');
-
-    // Spec Writer
-    const specOutput = await invokeAgent({
-      stage: 2,
-      agent: '03-spec-writer',
-      prompt: `Write technical brief for approved story`,
-      maxAttempts: 1
-    });
-
-    const specValidation = validateOutputSchema(2, '03-spec-writer', specOutput);
-    if (!specValidation.valid) {
-      state = recordEscalation(
-        state,
-        2,
-        '03-spec-writer',
-        'SCHEMA_VALIDATION',
-        `Spec output schema invalid: ${specValidation.errors[0]}`
-      );
-      return completeFeature(state, 'ESCALATED', 'Spec schema validation failed');
-    }
-
-    if (agentDeclaredBlocked(specOutput)) {
-      state = recordEscalation(
-        state,
-        2,
-        '03-spec-writer',
-        'CRITICAL_ISSUE',
-        `03-spec-writer reported ${specOutput.status}: ${specOutput.details.summary}`
-      );
-      return completeFeature(state, 'ESCALATED', `03-spec-writer declared the feature blocked`);
-    }
-
-    outputs.spec = specOutput;
-    state = recordAgentStep(state, 2, '03-spec-writer', 'PASS', specOutput);
-
-    // Check Stage 2 gate
-    const stage2Decision = await checkStageGate(2, cwd, outputs);
-    if (!stage2Decision.canAdvance) {
-      state = recordEscalation(
-        state,
-        2,
-        'harness',
-        'CRITICAL_ISSUE',
-        `Stage 2 gate failed: ${stage2Decision.reason}`
-      );
-      return completeFeature(state, 'ESCALATED', stage2Decision.reason);
-    }
-
-    log(`✅ Stage 2 passed: Story & Spec approved`);
-
-    // CHECKPOINT 2: Approve brief
-    log('⏸️  CHECKPOINT 2: Awaiting brief approval');
-    state = recordCheckpointApproval(state, 2, 'Brief Approval');
-
-    state = advanceToStage(state, 3);
 
     // ========================================================================
     // STAGE 3: EXECUTE (Backend Builder + Frontend Builder with loop-backs)
