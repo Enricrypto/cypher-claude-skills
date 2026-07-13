@@ -14,7 +14,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
-import { mkdtempSync, rmSync, existsSync } from 'fs';
+import { mkdtempSync, rmSync, existsSync, mkdirSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 
@@ -91,6 +91,27 @@ function story(): any {
         { id: 'AC-3', given: 'a', when: 'b', then: 'c', priority: 'MUST', testable: true }
       ],
       edgeCases: [], assumptions: [], outOfScope: []
+    }
+  };
+}
+
+function spec(): any {
+  return {
+    stage: 2,
+    agent: '03-spec-writer',
+    timestamp: new Date().toISOString(),
+    status: 'PASS',
+    details: {
+      summary: 'Technical brief.',
+      artifacts: [
+        { name: 'TECHNICAL_BRIEF.md', path: 'TECHNICAL_BRIEF.md', description: 'Brief', content: '# Technical Brief\n\nTOTP via speakeasy.' },
+        { name: 'FILE_LIST.md', path: 'FILE_LIST.md', description: 'Files', content: '# Files\n\n- src/a.ts (CREATE)' }
+      ],
+      apiContract: { endpoints: [], errorHandling: 'RFC7807' },
+      fileList: [{ path: 'src/a.ts', type: 'CREATE', reason: 'core', complexity: 'SIMPLE' }],
+      testStrategy: { unitTests: [], integrationTests: [], e2eTests: [] },
+      dataModel: { tables: [] },
+      uiComponents: []
     }
   };
 }
@@ -183,6 +204,74 @@ describe('the three human checkpoints', () => {
   });
 });
 
+describe('the workspace the agents read', () => {
+  /**
+   * A live Backend Builder found FOUR technical briefs for the same feature in .factory/, from
+   * four separate runs, every one still saying "reply 'approved' when ready to continue" — and
+   * refused to write any code at all:
+   *
+   *     "No spec in this repo is approved... 'Newest wins' is not a safe inference: these are
+   *      parallel runs, not revisions of one another."
+   *
+   * It was right. The harness had littered the workspace with contradictory instructions and
+   * then asked an agent to implement "the approved spec".
+   */
+  it('removes previous runs\' artifacts, so no agent finds two contradictory "approved" specs', async () => {
+    // Leave a previous run's brief lying around.
+    mkdirSync(join(projectDir, '.factory', 'an-older-run'), { recursive: true });
+    writeFileSync(
+      join(projectDir, '.factory', 'an-older-run', 'TECHNICAL_BRIEF.md'),
+      '# A brief from an unrelated run\n\nReply "approved" when ready to continue.'
+    );
+
+    const state = await runFeatureFactory({
+      featureName: 'clean-workspace',
+      featureDescription: 'add 2FA',
+      cwd: projectDir,
+      approveCheckpoint: async () => true,
+      invoke: planningInvoker([])
+    });
+
+    // The stale run is gone; this run's own directory is intact.
+    expect(existsSync(join(projectDir, '.factory', 'an-older-run'))).toBe(false);
+    expect(existsSync(join(projectDir, '.factory', state.featureId, 'USER_STORY.md'))).toBe(true);
+  });
+
+  it('BELIEVES a builder that says it is blocked, instead of reporting "passed"', async () => {
+    // The orchestrator printed "✅ Backend builder passed (first try)" while the builder was
+    // reporting ESCALATE and had written no code whatsoever. agentDeclaredBlocked() was wired
+    // for the read-only agents and never for the builders.
+    const state = await runFeatureFactory({
+      featureName: 'builder-refuses',
+      featureDescription: 'add 2FA',
+      cwd: projectDir,
+      approveCheckpoint: async () => true,
+      invoke: async (call: AgentInvocation) => {
+        if (call.agent === '01-researcher') return researcher();
+        if (call.agent === '02-story-writer') return story();
+        if (call.agent === '03-spec-writer') return spec();
+
+        // The builder refuses.
+        return {
+          stage: 3, agent: call.agent, timestamp: new Date().toISOString(),
+          status: 'ESCALATE',
+          details: {
+            summary: 'No spec in this repo is approved — I found four and cannot tell which.',
+            artifacts: [], filesModified: [],
+            implementation: { services: [], routes: [], migrations: [] },
+            testing: { testsWritten: 0, testsPassed: 0, testsFailed: 0 },
+            patterns: { reused: [], created: [] }
+          }
+        };
+      }
+    });
+
+    expect(state.completionStatus).toBe('ESCALATED');
+    expect(state.escalations.at(-1)!.agent).toBe('04-backend-builder');
+    expect(state.escalations.at(-1)!.context.message).toMatch(/refused to build/i);
+  });
+});
+
 describe('artifact persistence and sequencing', () => {
   /**
    * The bug a live Spec Writer caught: persistArtifacts() only ran at the STAGE GATE, which is
@@ -236,10 +325,17 @@ describe('artifact persistence and sequencing', () => {
     const second = await run();
 
     expect(first.featureId).not.toBe(second.featureId);
-    expect(existsSync(join(projectDir, '.factory', first.featureId, 'RESEARCHER_REPORT.md'))).toBe(true);
+
+    // The current run's artifacts are present...
     expect(existsSync(join(projectDir, '.factory', second.featureId, 'RESEARCHER_REPORT.md'))).toBe(true);
 
-    // And nothing was dumped in the project root to be overwritten next time.
+    // ...and the previous run's are GONE. Leaving them would put two contradictory "approved"
+    // briefs in the workspace the agents read, which is exactly what made a live builder refuse
+    // to write any code. Namespacing stops them overwriting each other; cleanup stops them
+    // confusing each other.
+    expect(existsSync(join(projectDir, '.factory', first.featureId))).toBe(false);
+
+    // And nothing was dumped in the project root.
     expect(existsSync(join(projectDir, 'RESEARCHER_REPORT.md'))).toBe(false);
   });
 });

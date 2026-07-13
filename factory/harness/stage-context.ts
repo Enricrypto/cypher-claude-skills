@@ -21,7 +21,7 @@
  * the filesystem. Nothing is assumed, and nothing defaults to a passing value.
  */
 
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'fs';
 import { basename, dirname, isAbsolute, join, resolve } from 'path';
 
 import { StageContext } from './stage-gates';
@@ -88,6 +88,40 @@ const HARNESS_PERSISTED_AGENTS = new Set([
 export interface PersistedArtifact {
   agent: string;
   path: string;
+}
+
+/**
+ * Remove artifact directories from previous runs.
+ *
+ * Artifacts are namespaced per run (.factory/<featureId>/), which stops one feature's documents
+ * overwriting another's. But nothing removed the old directories, so they accumulated inside the
+ * project the agents READ.
+ *
+ * A live Backend Builder found FOUR technical briefs for the same feature, from four separate
+ * runs, every one of them still saying "reply 'approved' when ready to continue" — and refused
+ * to write any code:
+ *
+ *     "No spec in this repo is approved... 'Newest wins' is not a safe inference: these are
+ *      parallel runs, not revisions of one another."
+ *
+ * It was right to refuse. The harness had littered the workspace with contradictory instructions
+ * and then asked an agent to act on "the approved spec".
+ *
+ * The current run's directory is preserved; every other one is removed.
+ */
+export function clearStaleArtifacts(cwd: string, keepFeatureId: string): string[] {
+  const factoryDir = resolve(cwd, '.factory');
+  if (!existsSync(factoryDir)) return [];
+
+  const removed: string[] = [];
+
+  for (const entry of readdirSync(factoryDir, { withFileTypes: true })) {
+    if (!entry.isDirectory() || entry.name === keepFeatureId) continue;
+    rmSync(join(factoryDir, entry.name), { recursive: true, force: true });
+    removed.push(entry.name);
+  }
+
+  return removed;
 }
 
 /**

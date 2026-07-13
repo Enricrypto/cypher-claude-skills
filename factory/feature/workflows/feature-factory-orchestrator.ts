@@ -57,7 +57,7 @@ import {
 } from '../../harness/infrastructure-gates';
 
 import { AgentInvoker } from '../../runner/invoke-agent';
-import { buildStageContext, persistArtifacts, StageOutputs } from '../../harness/stage-context';
+import { buildStageContext, clearStaleArtifacts, persistArtifacts, StageOutputs } from '../../harness/stage-context';
 import { acceptFeatureSpec, FeatureSpec } from '../../contracts/feature-spec';
 
 import {
@@ -160,6 +160,40 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
     }
   };
 
+  /**
+   * Point the builder at ITS OWN approved brief.
+   *
+   * The prompt used to be "Implement backend for approved spec" — with no path. Meanwhile
+   * .factory/ accumulates one directory per run. A live Backend Builder read the project, found
+   * FOUR technical briefs for the same feature from four different runs, all still saying "reply
+   * 'approved' when ready", and refused to write any code:
+   *
+   *     "No spec in this repo is approved... 'Newest wins' is not a safe inference: these are
+   *      parallel runs, not revisions of one another."
+   *
+   * It was right. An agent cannot implement an approved spec if nothing tells it which spec is
+   * approved.
+   */
+  const builderPrompt = (half: 'backend' | 'frontend', attempt: number): string =>
+    [
+      `Implement the ${half} for the APPROVED technical brief of this feature.`,
+      ``,
+      `THE APPROVED BRIEF IS: ${artifactDir}/TECHNICAL_BRIEF.md`,
+      `The approved user story is: ${artifactDir}/USER_STORY.md`,
+      `The file list is:          ${artifactDir}/FILE_LIST.md`,
+      `The researcher report is:  ${artifactDir}/RESEARCHER_REPORT.md`,
+      ``,
+      `Those four files, and ONLY those, are the approved plan. ${artifactDir} is this run's`,
+      `directory. If .factory/ contains other directories they belong to unrelated runs — ignore`,
+      `them completely. Do not read them, do not reconcile them, do not treat them as revisions.`,
+      ``,
+      half === 'frontend'
+        ? `The backend is already built. Consume its API contract; do not invent endpoints.`
+        : `Your scope ends at the API contract. Do not touch frontend files.`,
+      ``,
+      attempt > 1 ? `This is attempt ${attempt} of 3. A previous attempt failed — fix it, do not start over.` : ``
+    ].join('\n');
+
   /** A checkpoint that actually blocks. Fails closed when no approver is configured. */
   const checkpoint = async (name: string, stage: number, summary: string): Promise<boolean> => {
     log(`⏸️  ${name}`);
@@ -190,6 +224,14 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
   try {
     log(`Starting Feature Factory: ${state.featureName}`);
     log(`Feature ID: ${state.featureId}`);
+
+    // Previous runs left their briefs in .factory/. The agents READ this project — leaving four
+    // contradictory "approved" specs lying around and then asking a builder to implement "the
+    // approved spec" is how you get an agent that correctly refuses to do anything.
+    const stale = clearStaleArtifacts(cwd, state.featureId);
+    if (stale.length > 0) {
+      log(`  🧹 Removed ${stale.length} artifact director${stale.length === 1 ? 'y' : 'ies'} from previous runs`);
+    }
 
     // ========================================================================
     // SATISFY-OR-RUN: stages 1 and 2
@@ -412,9 +454,22 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
       const candidate: BackendBuilderOutput = await invokeAgent({
         stage: 3,
         agent: '04-backend-builder',
-        prompt: `Implement backend for approved spec${backendLoopCount > 1 ? ` (Attempt ${backendLoopCount})` : ''}`,
+        prompt: builderPrompt('backend', backendLoopCount),
         maxAttempts: 1
       });
+
+      // A builder that declares itself blocked is believed. It is the one that just read the
+      // code; when it says it cannot proceed, that is a finding, not noise.
+      if (candidate.status === 'ESCALATE') {
+        state = recordEscalation(
+          state,
+          3,
+          '04-backend-builder',
+          'CRITICAL_ISSUE',
+          `04-backend-builder refused to build: ${candidate.details.summary}`
+        );
+        return completeFeature(state, 'ESCALATED', `04-backend-builder declared the build blocked`);
+      }
 
       const backendValidation = validateOutputSchema(3, '04-backend-builder', candidate);
       if (!backendValidation.valid) {
@@ -496,9 +551,22 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
       const candidate: FrontendBuilderOutput = await invokeAgent({
         stage: 3,
         agent: '05-frontend-builder',
-        prompt: `Implement frontend for approved spec and backend API${frontendLoopCount > 1 ? ` (Attempt ${frontendLoopCount})` : ''}`,
+        prompt: builderPrompt('frontend', frontendLoopCount),
         maxAttempts: 1
       });
+
+      // A builder that declares itself blocked is believed. It is the one that just read the
+      // code; when it says it cannot proceed, that is a finding, not noise.
+      if (candidate.status === 'ESCALATE') {
+        state = recordEscalation(
+          state,
+          3,
+          '05-frontend-builder',
+          'CRITICAL_ISSUE',
+          `05-frontend-builder refused to build: ${candidate.details.summary}`
+        );
+        return completeFeature(state, 'ESCALATED', `05-frontend-builder declared the build blocked`);
+      }
 
       const frontendValidation = validateOutputSchema(3, '05-frontend-builder', candidate);
       if (!frontendValidation.valid) {
