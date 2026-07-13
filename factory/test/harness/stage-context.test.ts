@@ -295,13 +295,16 @@ describe('the materialization gate checks the PROJECT, not the harness', () => {
   });
 
   it('DOES accept a file the builder really wrote into the project', async () => {
-    writeFile('src/services/PreferencesService.ts', 'export class PreferencesService {}');
+    // The approved brief (specOutput) lists exactly src/auth/totp.ts, so that is what the
+    // builder must write. The gate compares the SETS — writing a different file, however good,
+    // is a deviation from the approved contract.
+    writeFile('src/auth/totp.ts', 'export const totp = () => {};');
 
     const backend: any = {
       stage: 3, agent: '04-backend-builder', timestamp: new Date().toISOString(), status: 'PASS',
       details: {
         summary: 'Built it.', artifacts: [],
-        filesModified: [{ path: 'src/services/PreferencesService.ts', type: 'CREATE', description: 'service', linesAdded: 1, linesRemoved: 0 }],
+        filesModified: [{ path: 'src/auth/totp.ts', type: 'CREATE', description: 'TOTP', linesAdded: 1, linesRemoved: 0 }],
         implementation: { services: [], routes: [], migrations: [] },
         testing: { testsWritten: 5, testsPassed: 5, testsFailed: 0 },
         patterns: { reused: [], created: [] }
@@ -315,6 +318,74 @@ describe('the materialization gate checks the PROJECT, not the harness', () => {
     );
 
     expect(decision.canAdvance).toBe(true);
+  });
+});
+
+describe('the approved brief is the contract', () => {
+  /**
+   * The gate used to compare COUNTS: `modifiedCount < expectedCount`. That is a fake gate. It
+   * fails on 8-of-9, but would happily pass nine COMPLETELY DIFFERENT files — and its message,
+   * "Only 8/9 files modified", never said which one was missing, so nobody could act on it.
+   *
+   * A live run blocked on exactly that and left us unable to tell whether the builder had
+   * skipped work or the brief had over-listed.
+   */
+  it('BLOCKS when a file the brief called for was never written — and NAMES it', async () => {
+    writeFile('src/auth/totp.ts', 'export const totp = () => {};');
+
+    const spec = specOutput();
+    spec.details.fileList = [
+      { path: 'src/auth/totp.ts', type: 'CREATE', reason: 'TOTP', complexity: 'MODERATE' },
+      { path: 'src/auth/recovery.ts', type: 'CREATE', reason: 'Recovery codes', complexity: 'MODERATE' }
+    ] as any;
+
+    const backend: any = {
+      stage: 3, agent: '04-backend-builder', timestamp: new Date().toISOString(), status: 'PASS',
+      details: {
+        summary: 'Built half of it.', artifacts: [],
+        filesModified: [{ path: 'src/auth/totp.ts', type: 'CREATE', description: 'TOTP', linesAdded: 40, linesRemoved: 0 }],
+        implementation: { services: [], routes: [], migrations: [] },
+        testing: { testsWritten: 5, testsPassed: 5, testsFailed: 0 },
+        patterns: { reused: [], created: [] }
+      }
+    };
+
+    const decision = await canAdvanceStage(
+      3,
+      stageContracts[3],
+      buildStageContext({ stage: 3, cwd: projectDir, outputs: { spec, backend } })
+    );
+
+    expect(decision.canAdvance).toBe(false);
+    // The whole point: it says WHICH file.
+    expect(decision.blockers.join('\n')).toContain('src/auth/recovery.ts');
+  });
+
+  it('does not pass a builder that wrote the right NUMBER of the wrong files', async () => {
+    writeFile('src/auth/somethingelse.ts', 'export const x = 1;');
+
+    const spec = specOutput();   // brief asks for src/auth/totp.ts
+
+    const backend: any = {
+      stage: 3, agent: '04-backend-builder', timestamp: new Date().toISOString(), status: 'PASS',
+      details: {
+        summary: 'Built something.', artifacts: [],
+        // One file for one file — the old count-based gate would have waved this through.
+        filesModified: [{ path: 'src/auth/somethingelse.ts', type: 'CREATE', description: 'x', linesAdded: 1, linesRemoved: 0 }],
+        implementation: { services: [], routes: [], migrations: [] },
+        testing: { testsWritten: 5, testsPassed: 5, testsFailed: 0 },
+        patterns: { reused: [], created: [] }
+      }
+    };
+
+    const decision = await canAdvanceStage(
+      3,
+      stageContracts[3],
+      buildStageContext({ stage: 3, cwd: projectDir, outputs: { spec, backend } })
+    );
+
+    expect(decision.canAdvance).toBe(false);
+    expect(decision.blockers.join('\n')).toContain('src/auth/totp.ts');
   });
 });
 

@@ -459,17 +459,42 @@ async function validateACTestable(ctx: StageContext): Promise<CriterionResult> {
 }
 
 async function validateAllFilesModified(ctx: StageContext): Promise<CriterionResult> {
-  const modifiedCount = ctx.metadata.filesModified || 0;
-  const expectedCount = ctx.metadata.filesExpected || 0;
-  if (modifiedCount < expectedCount) {
+  const expected: string[] = ctx.metadata.expectedFiles ?? [];
+  const modified: string[] = ctx.metadata.modifiedFiles ?? [];
+
+  if (expected.length === 0) {
+    return { passed: true, score: 100, details: 'No approved file list to check against' };
+  }
+
+  // Compare SETS, not counts. The old gate did `modifiedCount < expectedCount`, which fails on
+  // 8-of-9 but would happily pass nine completely different files — and its message, "Only 8/9
+  // files modified", never said WHICH one, so nobody could act on it.
+  const touched = new Set(modified);
+  const missing = expected.filter(path => !touched.has(path));
+
+  if (missing.length > 0) {
     return {
       passed: false,
-      score: (modifiedCount / expectedCount) * 100,
-      details: `Only ${modifiedCount}/${expectedCount} files from FILE_LIST modified`,
-      blockers: ['Complete implementation of all files in FILE_LIST']
+      score: Math.round(((expected.length - missing.length) / expected.length) * 100),
+      details: `${missing.length} of ${expected.length} files from the approved brief were not written`,
+      blockers: [
+        `The approved technical brief said these files would be created or modified, and they were not:`,
+        ...missing.map(path => `  - ${path}`),
+        `Either the builder skipped work the brief called for, or the brief listed a file that did`,
+        `not turn out to be needed. Both are worth a human's attention — the brief is the contract.`
+      ]
     };
   }
-  return { passed: true, score: 100, details: `All ${modifiedCount} files from FILE_LIST modified` };
+
+  const extra = modified.filter(path => !expected.includes(path));
+
+  return {
+    passed: true,
+    score: 100,
+    details:
+      `All ${expected.length} files from the approved brief were written` +
+      (extra.length > 0 ? ` (plus ${extra.length} not in the brief: ${extra.join(', ')})` : '')
+  };
 }
 
 async function validateUnitTestsPass(ctx: StageContext): Promise<CriterionResult> {

@@ -58,6 +58,11 @@ export interface BuildStageContextInput {
   knowledgeStored?: boolean;
 }
 
+/** Paths are compared as sets, so they must be compared in one canonical form. */
+function normalise(path: string): string {
+  return path.replace(/^\.\//, '').replace(/^\/+/, '');
+}
+
 /** Markers that mean a builder left work unfinished. */
 const ABANDONED_MARKERS = /\b(TODO|FIXME|XXX|HACK)\b/g;
 
@@ -215,11 +220,19 @@ export function buildStageContext(input: BuildStageContextInput): StageContext {
     ];
 
     metadata.filesModified = filesModified.length;
+    metadata.modifiedFiles = filesModified.map(f => normalise(f.path));
 
-    // Expected file count comes from the approved spec. If there is no spec, we cannot claim
-    // to know what was expected — fall back to what was written rather than inventing a target
-    // the builders are guaranteed to hit.
-    metadata.filesExpected = outputs.spec?.details.fileList?.length ?? filesModified.length;
+    // The approved spec is the contract. Every file it says to CREATE or MODIFY must actually be
+    // created or modified — and the gate compares the SETS, not the counts. Comparing counts was
+    // a fake gate: "8 of 9" fails, but nine completely different files would have passed.
+    //
+    // DELETE entries are excluded: a deleted file is, correctly, not in filesModified.
+    const expected = (outputs.spec?.details.fileList ?? [])
+      .filter(f => f.type !== 'DELETE')
+      .map(f => normalise(f.path));
+
+    metadata.expectedFiles = expected;
+    metadata.filesExpected = expected.length > 0 ? expected.length : filesModified.length;
 
     metadata.claimedFiles = filesModified.map(
       (file): ArtifactRef => ({
