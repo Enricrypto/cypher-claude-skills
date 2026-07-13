@@ -12,6 +12,21 @@
  */
 
 import { existsSync, readFileSync } from 'fs';
+
+/**
+ * tsconfig.json is JSONC, not JSON — TypeScript officially permits comments and trailing
+ * commas, and real projects use them. JSON.parse() chokes on both, and the gate then reports a
+ * perfectly valid tsconfig as "invalid", blocking the build.
+ *
+ * (This harness's OWN tsconfig has five comment lines, which is how we found it.)
+ */
+function parseJsonc(text: string): any {
+  const withoutComments = text
+    .replace(/\/\*[\s\S]*?\*\//g, '')      // block comments
+    .replace(/(^|[^:"'\\])\/\/.*$/gm, '$1')  // line comments, but not inside a URL or string
+    .replace(/,(\s*[}\]])/g, '$1');          // trailing commas
+  return JSON.parse(withoutComments);
+}
 import { resolve } from 'path';
 
 export interface InfrastructureCheck {
@@ -63,16 +78,18 @@ async function checkNpmScripts(projectRoot: string): Promise<InfrastructureCheck
     const scripts = packageJson.scripts || {};
 
     const requiredScripts = [
-      { name: 'test', description: 'Unit/integration tests' },
-      { name: 'build', description: 'Build for production' },
-      { name: 'dev', description: 'Development server' }
+      { name: 'test', description: 'Unit/integration tests', severity: 'CRITICAL' as const },
+      { name: 'build', description: 'Build for production', severity: 'CRITICAL' as const },
+      // NOT critical. A backend API, a library, or a CLI has no dev server and never will.
+      // Demanding one blocked a perfectly good backend feature.
+      { name: 'dev', description: 'Development server', severity: 'WARNING' as const }
     ];
 
     for (const script of requiredScripts) {
       const exists = scripts[script.name] !== undefined;
       checks.push({
         name: `npm script '${script.name}'`,
-        severity: 'CRITICAL',
+        severity: script.severity,
         passed: exists,
         message: exists
           ? `✓ Script exists: ${scripts[script.name]}`
@@ -131,7 +148,7 @@ async function checkTypeScriptConfig(projectRoot: string): Promise<Infrastructur
       return checks;
     }
 
-    const tsconfig = JSON.parse(readFileSync(tsconfigPath, 'utf-8'));
+    const tsconfig = parseJsonc(readFileSync(tsconfigPath, 'utf-8'));
 
     checks.push({
       name: 'tsconfig.json valid',

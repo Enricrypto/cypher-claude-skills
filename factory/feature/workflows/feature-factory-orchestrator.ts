@@ -619,7 +619,7 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
 
     let infrastructureAudit: InfrastructureAudit | null = null;
     try {
-      infrastructureAudit = await auditInfrastructure(process.cwd());
+      infrastructureAudit = await auditInfrastructure(cwd);
       log(generateInfrastructureReport(infrastructureAudit));
 
       const infrastructureDecision = validateInfrastructureGate(infrastructureAudit);
@@ -715,7 +715,7 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
 
     let executionAudit: ExecutionAudit | null = null;
     try {
-      executionAudit = await auditExecution(process.cwd());
+      executionAudit = await auditExecution(cwd);
       log(generateExecutionReport(executionAudit));
 
       const executionDecision = validateExecutionGate(executionAudit);
