@@ -68,10 +68,10 @@ import {
   recordEscalation,
   recordCheckpointApproval,
   advanceToStage,
-  completeFeature,
-  serializeState,
-  getStateSummary
+  completeFeature
 } from '../../harness/state-tracker';
+
+import { saveState, stateFilePath, StatePersistenceError } from '../../harness/state-store';
 
 /**
  * An agent that says it cannot proceed is believed.
@@ -83,6 +83,66 @@ import {
  */
 function agentDeclaredBlocked(output: FeatureFactoryAgentOutput): boolean {
   return output.status === 'ESCALATE' || output.status === 'FAIL';
+}
+
+/** Why the previous builder attempt did not count. */
+type BuilderFailure =
+  | { kind: 'test'; error: string }
+  | { kind: 'schema'; error: string };
+
+/**
+ * Tell a retrying builder what went wrong last time.
+ *
+ * Every builder attempt is a FRESH agent invocation — new context, no transcript of the attempt
+ * before it. The only thing carrying information across that boundary is this prompt, and it
+ * used to carry almost none:
+ *
+ *     "This is attempt 2 of 3. A previous attempt failed — fix it, do not start over."
+ *
+ * Which failed? How? The harness knew. analyzeError() had already classified the failure into a
+ * category and a fixClass with a confidence score, and getRemediationInstruction() had existed
+ * all along to format exactly this briefing — imported by this file and never once called. The
+ * classification went into the state record and nowhere else.
+ *
+ * So attempt 2 began blind, and its first move was necessarily to re-run the suite to rediscover
+ * what attempt 1 had already discovered AND classified. Up to six full agent contexts per run,
+ * each re-paying the contract and re-reading four artifacts, to re-derive a known answer.
+ *
+ * This is the dashed line in the recovery loop — FAIL · RETURN THE EXACT GAP · RETRY WITH A
+ * BOUND. The bound was real (three attempts, then MAX_LOOPS). The exact gap was being dropped
+ * on the floor.
+ */
+function retryBriefing(attempt: number, failure?: BuilderFailure): string {
+  if (attempt <= 1) return '';
+
+  const header = `This is attempt ${attempt} of 3. Do not start over — fix what is named below.`;
+
+  if (!failure) {
+    // No classified cause. Say so plainly rather than implying a diagnosis we do not have.
+    return `${header}\nThe previous attempt failed, but the harness could not classify why.`;
+  }
+
+  if (failure.kind === 'schema') {
+    return [
+      header,
+      ``,
+      `The previous attempt produced work but returned a MALFORMED result envelope, so the`,
+      `harness could not read it. The code may be fine; the output contract was not met:`,
+      ``,
+      `    ${failure.error}`,
+      ``,
+      `Put your findings in the STRUCTURED FIELDS this time, not only in \`summary\`.`
+    ].join('\n');
+  }
+
+  return [
+    header,
+    ``,
+    `The previous attempt left a failing test. The harness has ALREADY classified it — fix`,
+    `exactly this, and do not re-run the full suite merely to rediscover it:`,
+    ``,
+    getRemediationInstruction(failure.error)
+  ].join('\n');
 }
 
 export interface OrchestrationOptions {
@@ -150,6 +210,53 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
   const artifactDir = `.factory/${state.featureId}`;
 
   /**
+   * Persist the run's state after a transition, and hand it back so call sites read naturally:
+   *
+   *     state = commit(recordAgentStep(state, 1, '01-researcher', 'PASS', output));
+   *
+   * WHERE this is called is the design, not an implementation detail. It wraps exactly the
+   * transitions a resume could restart from — a completed agent step, and a stage advance.
+   * Nothing finer is worth saving because nothing finer is resumable: an agent that died
+   * halfway through has to be re-run from the beginning regardless, since its partial work
+   * never reached the harness.
+   *
+   * FAILS CLOSED. saveState throws StatePersistenceError and this does not catch it.
+   *
+   * An earlier version warned and continued, reasoning that losing resumability was cheaper than
+   * discarding completed agent work. That traded the wrong thing away. Everything this harness
+   * guarantees is a guarantee about evidence, and a run that cannot write its record produces
+   * none — it keeps spending tokens, keeps writing code into the project, and arrives at an
+   * outcome nobody can audit or resume. Stopping costs the work in flight. Continuing costs the
+   * work in flight, plus everything spent after, plus any way to reconstruct what happened.
+   *
+   * The throw lands in runFeatureFactory's outer catch, which records the escalation and calls
+   * finish() — whose own save fails the same way, so the error reaches the CLI and the process
+   * exits non-zero. That is the correct end state: loud, and impossible to mistake for success.
+   */
+  const commit = (next: FeatureState): FeatureState => {
+    saveState(cwd, next);
+    return next;
+  };
+
+  /**
+   * End the run, and leave the receipt on disk.
+   *
+   * Every exit from runFeatureFactory goes through here — twenty-six escalations and the one
+   * success — which is what makes "a finished run always has a state file" true by construction
+   * rather than by remembering to add a save next to each `return`. If you add an exit path,
+   * use this; a bare completeFeature() would return a run that left no record of why it ended.
+   */
+  const finish = (
+    current: FeatureState,
+    status: 'SUCCESS' | 'ESCALATED' | 'MANUAL_STOP',
+    summary: string
+  ): FeatureState => {
+    const completed = commit(completeFeature(current, status, summary));
+    log(`  📋 Run record: ${stateFilePath(cwd, completed.featureId)}`);
+    return completed;
+  };
+
+  /**
    * Persist a read-only agent's documents to disk IMMEDIATELY, so the next agent in the stage
    * can actually read them. Waiting until the stage gate is what left the Spec Writer with no
    * USER_STORY.md to translate.
@@ -174,7 +281,11 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
    * It was right. An agent cannot implement an approved spec if nothing tells it which spec is
    * approved.
    */
-  const builderPrompt = (half: 'backend' | 'frontend', attempt: number): string =>
+  const builderPrompt = (
+    half: 'backend' | 'frontend',
+    attempt: number,
+    previousFailure?: BuilderFailure
+  ): string =>
     [
       `Implement the ${half} for the APPROVED technical brief of this feature.`,
       ``,
@@ -191,7 +302,7 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
         ? `The backend is already built. Consume its API contract; do not invent endpoints.`
         : `Your scope ends at the API contract. Do not touch frontend files.`,
       ``,
-      attempt > 1 ? `This is attempt ${attempt} of 3. A previous attempt failed — fix it, do not start over.` : ``
+      retryBriefing(attempt, previousFailure)
     ].join('\n');
 
   /** A checkpoint that actually blocks. Fails closed when no approver is configured. */
@@ -263,17 +374,17 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
           `Pre-supplied spec rejected by the stage gates (${acceptance.passRate.toFixed(0)}%).`,
           { blockers: acceptance.blockers }
         );
-        return completeFeature(state, 'ESCALATED', 'Pre-supplied spec did not pass the gates');
+        return finish(state, 'ESCALATED', 'Pre-supplied spec did not pass the gates');
       }
 
       outputs.researcher = options.preSuppliedSpec.researcher;
       outputs.story = options.preSuppliedSpec.story;
       outputs.spec = options.preSuppliedSpec.spec;
 
-      state = recordAgentStep(state, 2, 'tier-1', 'PASS', options.preSuppliedSpec.spec);
+      state = commit(recordAgentStep(state, 2, 'tier-1', 'PASS', options.preSuppliedSpec.spec));
       log(`✅ Pre-supplied spec accepted — skipping Discover and Plan`);
 
-      state = advanceToStage(state, 3);
+      state = commit(advanceToStage(state, 3));
     } else {
       // ========================================================================
       // STAGE 1: DISCOVER (Researcher)
@@ -298,7 +409,7 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
           'SCHEMA_VALIDATION',
           `Output schema validation failed: ${researchValidation.errors.join(', ')}`
         );
-        return completeFeature(state, 'ESCALATED', 'Schema validation failed at Stage 1');
+        return finish(state, 'ESCALATED', 'Schema validation failed at Stage 1');
       }
 
       if (agentDeclaredBlocked(researcherOutput)) {
@@ -309,12 +420,12 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
           'CRITICAL_ISSUE',
           `01-researcher reported ${researcherOutput.status}: ${researcherOutput.details.summary}`
         );
-        return completeFeature(state, 'ESCALATED', `01-researcher declared the feature blocked`);
+        return finish(state, 'ESCALATED', `01-researcher declared the feature blocked`);
       }
 
       outputs.researcher = researcherOutput;
       persist({ researcher: researcherOutput });
-      state = recordAgentStep(state, 1, '01-researcher', 'PASS', researcherOutput);
+      state = commit(recordAgentStep(state, 1, '01-researcher', 'PASS', researcherOutput));
 
       // Check Stage 1 gate
       const stage1Decision = await checkStageGate(1, cwd, outputs);
@@ -327,11 +438,11 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
           `Stage 1 gate failed: ${stage1Decision.reason}`,
           { blockers: stage1Decision.blockers }
         );
-        return completeFeature(state, 'ESCALATED', stage1Decision.reason);
+        return finish(state, 'ESCALATED', stage1Decision.reason);
       }
 
       log(`✅ Stage 1 passed: ${stage1Decision.passRate.toFixed(0)}% criteria met`);
-      state = advanceToStage(state, 2);
+      state = commit(advanceToStage(state, 2));
 
       // ========================================================================
       // STAGE 2: PLAN (Story Writer + Spec Writer)
@@ -356,7 +467,7 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
           'SCHEMA_VALIDATION',
           `Story output schema invalid: ${storyValidation.errors[0]}`
         );
-        return completeFeature(state, 'ESCALATED', 'Story schema validation failed');
+        return finish(state, 'ESCALATED', 'Story schema validation failed');
       }
 
       if (agentDeclaredBlocked(storyOutput)) {
@@ -367,15 +478,15 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
           'CRITICAL_ISSUE',
           `02-story-writer reported ${storyOutput.status}: ${storyOutput.details.summary}`
         );
-        return completeFeature(state, 'ESCALATED', `02-story-writer declared the feature blocked`);
+        return finish(state, 'ESCALATED', `02-story-writer declared the feature blocked`);
       }
 
       outputs.story = storyOutput;
       persist({ story: storyOutput });   // <- the Spec Writer must be able to READ this
-      state = recordAgentStep(state, 2, '02-story-writer', 'PASS', storyOutput);
+      state = commit(recordAgentStep(state, 2, '02-story-writer', 'PASS', storyOutput));
 
       if (!(await checkpoint('CHECKPOINT 1: Approve the story', 2, storyOutput.details.summary))) {
-        return completeFeature(state, 'ESCALATED', 'Story not approved');
+        return finish(state, 'ESCALATED', 'Story not approved');
       }
 
       // Spec Writer
@@ -395,7 +506,7 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
           'SCHEMA_VALIDATION',
           `Spec output schema invalid: ${specValidation.errors[0]}`
         );
-        return completeFeature(state, 'ESCALATED', 'Spec schema validation failed');
+        return finish(state, 'ESCALATED', 'Spec schema validation failed');
       }
 
       if (agentDeclaredBlocked(specOutput)) {
@@ -406,12 +517,12 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
           'CRITICAL_ISSUE',
           `03-spec-writer reported ${specOutput.status}: ${specOutput.details.summary}`
         );
-        return completeFeature(state, 'ESCALATED', `03-spec-writer declared the feature blocked`);
+        return finish(state, 'ESCALATED', `03-spec-writer declared the feature blocked`);
       }
 
       outputs.spec = specOutput;
       persist({ spec: specOutput });
-      state = recordAgentStep(state, 2, '03-spec-writer', 'PASS', specOutput);
+      state = commit(recordAgentStep(state, 2, '03-spec-writer', 'PASS', specOutput));
 
       // Check Stage 2 gate
       const stage2Decision = await checkStageGate(2, cwd, outputs);
@@ -423,16 +534,16 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
           'CRITICAL_ISSUE',
           `Stage 2 gate failed: ${stage2Decision.reason}`
         );
-        return completeFeature(state, 'ESCALATED', stage2Decision.reason);
+        return finish(state, 'ESCALATED', stage2Decision.reason);
       }
 
       log(`✅ Stage 2 passed: Story & Spec approved`);
 
       if (!(await checkpoint('CHECKPOINT 2: Approve the technical brief', 2, specOutput.details.summary))) {
-        return completeFeature(state, 'ESCALATED', 'Technical brief not approved');
+        return finish(state, 'ESCALATED', 'Technical brief not approved');
       }
 
-      state = advanceToStage(state, 3);
+      state = commit(advanceToStage(state, 3));
     }
 
 
@@ -446,6 +557,8 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
     let backendLoopCount = 0;
     let backendOutput: BackendBuilderOutput | null = null;
     let backendPassed = false;
+    /** Carried into the next attempt's prompt — the only channel between two fresh contexts. */
+    let backendFailure: BuilderFailure | undefined;
 
     while (backendLoopCount < 3 && !backendPassed) {
       backendLoopCount++;
@@ -454,7 +567,7 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
       const candidate: BackendBuilderOutput = await invokeAgent({
         stage: 3,
         agent: '04-backend-builder',
-        prompt: builderPrompt('backend', backendLoopCount),
+        prompt: builderPrompt('backend', backendLoopCount, backendFailure),
         maxAttempts: 1
       });
 
@@ -468,11 +581,54 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
           'CRITICAL_ISSUE',
           `04-backend-builder refused to build: ${candidate.details.summary}`
         );
-        return completeFeature(state, 'ESCALATED', `04-backend-builder declared the build blocked`);
+        return finish(state, 'ESCALATED', `04-backend-builder declared the build blocked`);
+      }
+
+      // FAILING TESTS ARE CHECKED BEFORE THE SCHEMA, and the order is the point.
+      //
+      // validateOutputSchema treats testsFailed > 0 as a schema error ("Builder has failing
+      // tests: N") — it validates "acceptable work", not just envelope shape. So while the
+      // schema check ran first, a builder that reported a failing test was classified as having
+      // returned a malformed envelope, this branch `continue`d before reaching the analysis
+      // below, and analyzeError() in the builder loop was DEAD CODE from the day it was written.
+      //
+      // A builder that honestly reports a failing test has satisfied its output contract
+      // exactly. That is a work result with a designed remediation path, not a contract
+      // violation, and it is handled here. The schema check below still catches every genuinely
+      // malformed envelope, which is what it is for.
+      if (candidate.details.testing && candidate.details.testing.testsFailed > 0) {
+        const failedTest = candidate.details.testing.failingTests?.[0];
+
+        if (failedTest?.error) {
+          // Classify, and CARRY THE CLASSIFICATION INTO THE NEXT ATTEMPT. The state record
+          // alone is not enough: the next builder is a fresh context that cannot read it.
+          const errorAnalysis = analyzeError(failedTest.error);
+          backendFailure = { kind: 'test', error: failedTest.error };
+          state = recordLoopBack(
+            state,
+            3,
+            '04-backend-builder',
+            `${errorAnalysis.category}: ${failedTest.error}`,
+            'FAIL',
+            `Apply: ${errorAnalysis.fixClass}`
+          );
+        } else {
+          // Tests failed but the builder named none. Do not invent a diagnosis.
+          backendFailure = undefined;
+          state = recordLoopBack(
+            state,
+            3,
+            '04-backend-builder',
+            `${candidate.details.testing.testsFailed} test(s) failing, none named`,
+            'FAIL'
+          );
+        }
+        continue;
       }
 
       const backendValidation = validateOutputSchema(3, '04-backend-builder', candidate);
       if (!backendValidation.valid) {
+        backendFailure = { kind: 'schema', error: backendValidation.errors[0] };
         state = recordLoopBack(
           state,
           3,
@@ -483,26 +639,9 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
         continue;
       }
 
-      if (candidate.details.testing?.testsFailed && candidate.details.testing.testsFailed > 0) {
-        // Tests failed — analyze errors and loop back
-        const failedTest = candidate.details.testing.failingTests?.[0];
-        if (failedTest) {
-          const errorAnalysis = analyzeError(failedTest.error);
-          state = recordLoopBack(
-            state,
-            3,
-            '04-backend-builder',
-            `${errorAnalysis.category}: ${failedTest.error}`,
-            'FAIL',
-            `Apply: ${errorAnalysis.fixClass}`
-          );
-        }
-        continue;
-      }
-
       // Backend tests passed
       backendOutput = candidate;
-      state = recordAgentStep(state, 3, '04-backend-builder', 'PASS', candidate);
+      state = commit(recordAgentStep(state, 3, '04-backend-builder', 'PASS', candidate));
       backendPassed = true;
     }
 
@@ -515,7 +654,7 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
         `Backend builder exceeded max attempts (${backendLoopCount})`,
         { loopCount: backendLoopCount }
       );
-      return completeFeature(state, 'ESCALATED', 'Backend builder max loops exceeded');
+      return finish(state, 'ESCALATED', 'Backend builder max loops exceeded');
     }
 
     log(`✅ Backend builder passed (${backendLoopCount === 1 ? 'first try' : `after ${backendLoopCount} attempts`})`);
@@ -543,6 +682,8 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
     let frontendLoopCount = 0;
     let frontendOutput: FrontendBuilderOutput | null = null;
     let frontendPassed = false;
+    /** Carried into the next attempt's prompt — the only channel between two fresh contexts. */
+    let frontendFailure: BuilderFailure | undefined;
 
     while (needsFrontend && frontendLoopCount < 3 && !frontendPassed) {
       frontendLoopCount++;
@@ -551,7 +692,7 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
       const candidate: FrontendBuilderOutput = await invokeAgent({
         stage: 3,
         agent: '05-frontend-builder',
-        prompt: builderPrompt('frontend', frontendLoopCount),
+        prompt: builderPrompt('frontend', frontendLoopCount, frontendFailure),
         maxAttempts: 1
       });
 
@@ -565,11 +706,41 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
           'CRITICAL_ISSUE',
           `05-frontend-builder refused to build: ${candidate.details.summary}`
         );
-        return completeFeature(state, 'ESCALATED', `05-frontend-builder declared the build blocked`);
+        return finish(state, 'ESCALATED', `05-frontend-builder declared the build blocked`);
+      }
+
+      // Failing tests before schema — see the Backend Builder above for why the order matters.
+      if (candidate.details.testing && candidate.details.testing.testsFailed > 0) {
+        const failedTest = candidate.details.testing.failingTests?.[0];
+
+        if (failedTest?.error) {
+          const errorAnalysis = analyzeError(failedTest.error);
+          frontendFailure = { kind: 'test', error: failedTest.error };
+          state = recordLoopBack(
+            state,
+            3,
+            '05-frontend-builder',
+            `${errorAnalysis.category}: ${failedTest.error}`,
+            'FAIL',
+            `Apply: ${errorAnalysis.fixClass}`
+          );
+        } else {
+          // Tests failed but the builder named none. Do not invent a diagnosis.
+          frontendFailure = undefined;
+          state = recordLoopBack(
+            state,
+            3,
+            '05-frontend-builder',
+            `${candidate.details.testing.testsFailed} test(s) failing, none named`,
+            'FAIL'
+          );
+        }
+        continue;
       }
 
       const frontendValidation = validateOutputSchema(3, '05-frontend-builder', candidate);
       if (!frontendValidation.valid) {
+        frontendFailure = { kind: 'schema', error: frontendValidation.errors[0] };
         state = recordLoopBack(
           state,
           3,
@@ -580,24 +751,8 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
         continue;
       }
 
-      if (candidate.details.testing?.testsFailed && candidate.details.testing.testsFailed > 0) {
-        const failedTest = candidate.details.testing.failingTests?.[0];
-        if (failedTest) {
-          const errorAnalysis = analyzeError(failedTest.error);
-          state = recordLoopBack(
-            state,
-            3,
-            '05-frontend-builder',
-            `${errorAnalysis.category}: ${failedTest.error}`,
-            'FAIL',
-            `Apply: ${errorAnalysis.fixClass}`
-          );
-        }
-        continue;
-      }
-
       frontendOutput = candidate;
-      state = recordAgentStep(state, 3, '05-frontend-builder', 'PASS', candidate);
+      state = commit(recordAgentStep(state, 3, '05-frontend-builder', 'PASS', candidate));
       frontendPassed = true;
     }
 
@@ -610,7 +765,7 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
         `Frontend builder exceeded max attempts (${frontendLoopCount})`,
         { loopCount: frontendLoopCount }
       );
-      return completeFeature(state, 'ESCALATED', 'Frontend builder max loops exceeded');
+      return finish(state, 'ESCALATED', 'Frontend builder max loops exceeded');
     }
 
     if (needsFrontend) {
@@ -655,7 +810,7 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
         `${artifactAudit.missingArtifacts.length} claimed files not materialized`,
         { missingFiles: artifactAudit.missingArtifacts.map(f => f.path) }
       );
-      return completeFeature(state, 'ESCALATED', 'Artifact materialization failed: builders claimed files that do not exist');
+      return finish(state, 'ESCALATED', 'Artifact materialization failed: builders claimed files that do not exist');
     }
 
     log(`\n✅ All ${claimedFiles.length} artifacts verified to exist on disk\n`);
@@ -672,11 +827,11 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
         'CRITICAL_ISSUE',
         `Stage 3 gate failed: ${stage3Decision.reason}`
       );
-      return completeFeature(state, 'ESCALATED', stage3Decision.reason);
+      return finish(state, 'ESCALATED', stage3Decision.reason);
     }
 
     log(`✅ Stage 3 passed: Implementation complete`);
-    state = advanceToStage(state, 4);
+    state = commit(advanceToStage(state, 4));
 
     // ========================================================================
     // INFRASTRUCTURE VERIFICATION GATE (Reality Check for Readiness)
@@ -712,7 +867,7 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
             remediation: infrastructureDecision.remediation
           }
         );
-        return completeFeature(state, 'ESCALATED', `Infrastructure not ready: ${infrastructureDecision.blockers[0]}`);
+        return finish(state, 'ESCALATED', `Infrastructure not ready: ${infrastructureDecision.blockers[0]}`);
       }
 
       if (infrastructureDecision.warnings.length > 0) {
@@ -769,10 +924,10 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
         'SCHEMA_VALIDATION',
         `Test output schema invalid: ${testValidation.errors[0]}`
       );
-      return completeFeature(state, 'ESCALATED', 'Test verifier schema validation failed');
+      return finish(state, 'ESCALATED', 'Test verifier schema validation failed');
     }
 
-    state = recordAgentStep(state, 4, '06-test-verifier', 'PASS', testOutput);
+    state = commit(recordAgentStep(state, 4, '06-test-verifier', 'PASS', testOutput));
 
     // ========================================================================
     // EXECUTION VERIFICATION GATE (Reality Check for Tests)
@@ -810,7 +965,7 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
             buildErrors: executionAudit.buildErrors
           }
         );
-        return completeFeature(state, 'ESCALATED', `Test execution failed: ${executionDecision.blockers[0]}`);
+        return finish(state, 'ESCALATED', `Test execution failed: ${executionDecision.blockers[0]}`);
       }
 
       log(`\n✅ All execution checks passed: Tests 100% passing, Build compiles, Dev server clean\n`);
@@ -843,7 +998,7 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
         'SCHEMA_VALIDATION',
         `Validator output schema invalid: ${validatorValidation.errors[0]}`
       );
-      return completeFeature(state, 'ESCALATED', 'Validator schema validation failed');
+      return finish(state, 'ESCALATED', 'Validator schema validation failed');
     }
 
     // Check for critical validation issues
@@ -858,13 +1013,13 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
         { issues: criticalIssues.map((i: { message: string }) => i.message) }
       );
       // Loop back to Stage 3 for fixes
-      state = advanceToStage(state, 3);
+      state = commit(advanceToStage(state, 3));
       log(`⚠️  Looping back to Stage 3: Fix critical issues`);
       // In a real scenario, would loop back. For now, escalate.
-      return completeFeature(state, 'ESCALATED', 'Critical validation issues require Stage 3 fixes');
+      return finish(state, 'ESCALATED', 'Critical validation issues require Stage 3 fixes');
     }
 
-    state = recordAgentStep(state, 4, '07-validator', 'PASS', validatorOutput);
+    state = commit(recordAgentStep(state, 4, '07-validator', 'PASS', validatorOutput));
 
     // Regression detection
     const testBaselineAfter = {
@@ -882,7 +1037,7 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
         `${regressions.length} regressions detected: previously passing tests now failing`,
         { regressions }
       );
-      return completeFeature(state, 'ESCALATED', 'Regressions detected');
+      return finish(state, 'ESCALATED', 'Regressions detected');
     }
 
     // Check Stage 4 gate
@@ -895,11 +1050,11 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
         'CRITICAL_ISSUE',
         `Stage 4 gate failed: ${stage4Decision.reason}`
       );
-      return completeFeature(state, 'ESCALATED', stage4Decision.reason);
+      return finish(state, 'ESCALATED', stage4Decision.reason);
     }
 
     log(`✅ Stage 4 passed: All tests & validations passed`);
-    state = advanceToStage(state, 5);
+    state = commit(advanceToStage(state, 5));
 
     // ========================================================================
     // STAGE 5: DELIVER (Feature Consolidator — after merge)
@@ -927,10 +1082,10 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
         'SCHEMA_VALIDATION',
         `Consolidator output schema invalid: ${consolidatorValidation.errors[0]}`
       );
-      return completeFeature(state, 'ESCALATED', 'Consolidator schema validation failed');
+      return finish(state, 'ESCALATED', 'Consolidator schema validation failed');
     }
 
-    state = recordAgentStep(state, 5, '08-feature-consolidator', 'PASS', consolidatorOutput);
+    state = commit(recordAgentStep(state, 5, '08-feature-consolidator', 'PASS', consolidatorOutput));
 
     // Check Stage 5 gate
     const stage5Decision = await checkStageGate(5, cwd, outputs, { knowledgeStored: true });
@@ -944,7 +1099,7 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
     // COMPLETION
     // ========================================================================
 
-    state = completeFeature(state, 'SUCCESS', 'All 5 stages completed successfully');
+    state = finish(state, 'SUCCESS', 'All 5 stages completed successfully');
 
     log(`\n✅ Feature Factory Complete: ${state.featureName}`);
     log(`Total time: ${Math.round(state.metrics.totalTime / 1000 / 60)} minutes`);
@@ -953,6 +1108,16 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
     return state;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+
+    // The record itself is what failed. There is nowhere to write an escalation TO, so do not
+    // pretend to record one — rethrow, and let the CLI exit non-zero with the real reason. The
+    // alternative is returning a state that says ESCALATED while no file on disk says anything,
+    // which is the one outcome worse than stopping: an unrecorded run that looks recorded.
+    if (error instanceof StatePersistenceError) {
+      log(`❌ ${message}`);
+      throw error;
+    }
+
     log(`❌ Orchestration failed: ${message}`);
     state = recordEscalation(
       state,
@@ -961,7 +1126,7 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
       'MANUAL',
       `Orchestration error: ${message}`
     );
-    return completeFeature(state, 'ESCALATED', message);
+    return finish(state, 'ESCALATED', message);
   }
 }
 

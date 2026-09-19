@@ -46,6 +46,55 @@ export const AGENT_TOOLS: Record<FeatureFactoryAgent, string[]> = {
 };
 
 /**
+ * What each agent COSTS to run.
+ *
+ * Every agent used to get the same model at the same effort, because createSdkInvoker took one
+ * model for the whole chain. That meant 02-story-writer — read-only, no tools but Read, whose
+ * entire job is turning a report it is handed into three Given/When/Then criteria — was billed
+ * identically to 04-backend-builder writing a migration against an unfamiliar schema.
+ *
+ * The tiers below follow the same logic as AGENT_TOOLS: what the job actually requires, decided
+ * once, here. Cheap where the input is already structured and the output is a transformation;
+ * expensive where the agent has to read an unfamiliar codebase and be RIGHT about it, because
+ * that is where a wrong answer costs a loop-back — and a loop-back costs more than the model
+ * ever saved.
+ *
+ * Overridable per run: --model on the CLI still forces one model for every agent, for A/B runs
+ * and for debugging a suspected model regression.
+ */
+export interface AgentCost {
+  model: string;
+  effort: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+  maxTurns: number;
+}
+
+export const AGENT_COST: Record<FeatureFactoryAgent, AgentCost> = {
+  // Reads an unfamiliar codebase and every later stage inherits its mistakes. Most expensive
+  // on purpose: an error here is not caught until the Validator, five agents downstream.
+  '01-researcher': { model: 'claude-opus-5', effort: 'high', maxTurns: 40 },
+
+  // Transforms a report it is GIVEN into acceptance criteria. No codebase reading, one tool.
+  '02-story-writer': { model: 'claude-sonnet-5', effort: 'medium', maxTurns: 15 },
+
+  // Turns the story into an API contract and file list the builders are bound by. Cheaper than
+  // the Researcher (the hard reading is done) but still a design job the builders cannot undo.
+  '03-spec-writer': { model: 'claude-opus-5', effort: 'high', maxTurns: 30 },
+
+  // Write real code against a real schema, run tests, and self-correct. The expensive ones, and
+  // the only agents where a loop-back costs a whole extra invocation.
+  '04-backend-builder': { model: 'claude-opus-5', effort: 'high', maxTurns: 40 },
+  '05-frontend-builder': { model: 'claude-opus-5', effort: 'high', maxTurns: 40 },
+  '06-test-verifier': { model: 'claude-opus-5', effort: 'high', maxTurns: 40 },
+
+  // Judges finished work against a written story and brief. High effort because a missed
+  // CRITICAL is the failure this whole chain exists to prevent — but no writing, so fewer turns.
+  '07-validator': { model: 'claude-opus-5', effort: 'high', maxTurns: 25 },
+
+  // Reads memories after the fact and extracts patterns. Nothing depends on it within the run.
+  '08-feature-consolidator': { model: 'claude-haiku-4-5-20251001', effort: 'low', maxTurns: 15 }
+};
+
+/**
  * The EXACT document names each agent must produce.
  *
  * These are not a convention — they are the literal keys the gates look up:

@@ -3,6 +3,7 @@
  * Feature Factory CLI
  *
  *   npm run factory -- --feature "add a health check endpoint" [--cwd /path/to/project]
+ *   npm run factory -- --feature "..." --resume <featureId>    # continue a run that stopped
  *
  * Exits 0 only when all five stages passed their gates. Any escalation exits 1 — so CI, or a
  * shell script, can trust the exit code rather than reading the log.
@@ -12,7 +13,8 @@ import { resolve } from 'path';
 import { createInterface } from 'readline';
 import { runFeatureFactory } from '../feature/workflows/feature-factory-orchestrator';
 import { createSdkInvoker } from './invoke-agent';
-import { getStateSummary } from '../harness/state-tracker';
+import { FeatureState, getRecommendedAction, getStateSummary, isResumable } from '../harness/state-tracker';
+import { loadState, stateFilePath } from '../harness/state-store';
 
 interface CliArgs {
   feature: string;
@@ -21,6 +23,8 @@ interface CliArgs {
   model?: string;
   /** Approve all three human checkpoints without asking. Must be explicit — see below. */
   yes: boolean;
+  /** A featureId from a previous run's `.factory/<id>/state.json`, to continue it. */
+  resume?: string;
 }
 
 /**
@@ -87,7 +91,8 @@ export function parseArgs(argv: string[]): CliArgs {
     name: args.name ?? feature.slice(0, 60),
     cwd: resolve(args.cwd ?? process.cwd()),
     model: args.model,
-    yes: args.yes === 'true'
+    yes: args.yes === 'true',
+    resume: args.resume
   };
 }
 
@@ -112,10 +117,35 @@ async function main(): Promise<number> {
     console.log('  ⚠️  --yes: the three human checkpoints will be approved automatically.\n');
   }
 
+  // --resume continues a run whose record is on disk. A missing state file is a HARD error, not
+  // a quiet fallback to a fresh run: the operator asked to continue specific work, and silently
+  // starting over would re-run agents they believe are already done.
+  let resumeFromState: FeatureState | undefined;
+  if (args.resume) {
+    resumeFromState = loadState(args.cwd, args.resume);
+
+    if (!resumeFromState) {
+      throw new Error(
+        `No run ${args.resume} in ${args.cwd}. Expected ${stateFilePath(args.cwd, args.resume)}.`
+      );
+    }
+
+    if (!isResumable(resumeFromState)) {
+      throw new Error(
+        `Run ${args.resume} already finished (${resumeFromState.completionStatus}). ` +
+          `${getRecommendedAction(resumeFromState)}`
+      );
+    }
+
+    console.log(`  ▶️  Resuming ${resumeFromState.featureName} at Stage ${resumeFromState.currentStage}`);
+    console.log(`     ${getRecommendedAction(resumeFromState)}\n`);
+  }
+
   const state = await runFeatureFactory({
     featureName: args.name,
     featureDescription: args.feature,
     cwd: args.cwd,
+    resumeFromState,
     invoke,
     approveCheckpoint: args.yes ? async () => true : askHuman
   });
@@ -132,6 +162,11 @@ async function main(): Promise<number> {
         console.error(`    - ${blocker}`);
       }
     }
+
+    // The run left a full record. Say where, so the failure is inspectable rather than just
+    // whatever survived in the terminal scrollback.
+    console.error(`\n  Run record: ${stateFilePath(args.cwd, state.featureId)}`);
+    console.error(`  Resume with: npm run factory -- --feature "${args.feature}" --resume ${state.featureId}`);
 
     return 1;
   }

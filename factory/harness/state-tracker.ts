@@ -6,7 +6,13 @@
  * - Auditing execution history
  * - Learning from past feature runs
  *
- * State persisted to JSON file in feature-factory/artifacts/feature-states/
+ * This module is PURE — it builds and transforms FeatureState and touches no filesystem, so the
+ * transitions can be tested without a temp directory. The write lives in state-store.ts, and
+ * the orchestrator decides when it happens.
+ *
+ * (This header used to claim "State persisted to JSON file in
+ * feature-factory/artifacts/feature-states/". Nothing wrote one, and nothing ever had. The
+ * record now lands at <project>/.factory/<featureId>/state.json, beside that run's documents.)
  */
 
 import { FeatureFactoryAgentOutput } from './agent-output-schema';

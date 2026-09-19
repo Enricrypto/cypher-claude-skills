@@ -15,6 +15,8 @@
 
 import { agentOutputSchema } from './output-schemas';
 import {
+  AGENT_COST,
+  AgentCost,
   AGENT_TOOLS,
   AGENT_STAGE,
   REQUIRED_ARTIFACTS,
@@ -41,8 +43,17 @@ export type AgentInvoker = (call: AgentInvocation) => Promise<any>;
 export interface SdkInvokerConfig {
   /** The target project the agents operate on. NOT this repo. */
   cwd: string;
+  /**
+   * Force ONE model for every agent, overriding AGENT_COST.
+   *
+   * Left unset (the normal case), each agent runs at its own tier from the registry. Set it to
+   * A/B a model across the whole chain, or to check whether a suspected regression is the model
+   * rather than the harness — comparisons need one variable, not eight.
+   */
   model?: string;
+  /** Force one effort level for every agent, overriding AGENT_COST. Same rationale as `model`. */
   effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+  /** Force one turn cap for every agent, overriding AGENT_COST. Same rationale as `model`. */
   maxTurns?: number;
   /** Called with each denied tool attempt — an agent reaching beyond its contract. */
   onToolDenied?: (agent: string, toolName: string) => void;
@@ -77,9 +88,14 @@ export class AgentInvocationError extends Error {
   }
 }
 
-const DEFAULTS = {
-  model: 'claude-opus-4-8',
-  effort: 'high' as const,
+/**
+ * Used only when an agent has no entry in AGENT_COST — which, given the Record type, means
+ * someone added an agent and TypeScript already refused to compile. Belt and braces: if it ever
+ * happens at runtime, spend the SAFE amount rather than the cheap one.
+ */
+const FALLBACK_COST: AgentCost = {
+  model: 'claude-opus-5',
+  effort: 'high',
   maxTurns: 40
 };
 
@@ -152,6 +168,12 @@ export function createSdkInvoker(config: SdkInvokerConfig): AgentInvoker {
     const systemPrompt = loadAgentContract(agent) + outputContract(agent);
     const { query } = await loadSdk();
 
+    // The agent's own tier, unless the caller forced one across the whole chain.
+    const cost = AGENT_COST[agent] ?? FALLBACK_COST;
+    const model = config.model ?? cost.model;
+    const effort = config.effort ?? cost.effort;
+    const maxTurns = config.maxTurns ?? cost.maxTurns;
+
     let structuredOutput: unknown;
     let resultText = '';
     let failure: { subtype: string; errors: string[] } | null = null;
@@ -160,9 +182,9 @@ export function createSdkInvoker(config: SdkInvokerConfig): AgentInvoker {
       prompt: call.prompt,
       options: {
         cwd: config.cwd,
-        model: config.model ?? DEFAULTS.model,
-        effort: config.effort ?? DEFAULTS.effort,
-        maxTurns: config.maxTurns ?? DEFAULTS.maxTurns,
+        model,
+        effort,
+        maxTurns,
         systemPrompt,
 
         // The envelope is schema-forced; the SDK retries the model on a malformed response.
@@ -191,8 +213,12 @@ export function createSdkInvoker(config: SdkInvokerConfig): AgentInvoker {
       if (message.subtype === 'success') {
         structuredOutput = message.structured_output;
         resultText = message.result;
+        // The model is named because it now VARIES per agent. A turn count and a cost mean
+        // different things at different tiers, and a surprising bill should be traceable to
+        // which agent ran at which tier without re-reading the registry.
         log(
-          `  ${agent}: ${message.num_turns} turns, $${message.total_cost_usd.toFixed(4)}` +
+          `  ${agent}: ${message.num_turns} turns, $${message.total_cost_usd.toFixed(4)} ` +
+            `[${model} · ${effort}]` +
             (isReadOnly(agent) ? ' (read-only)' : '')
         );
       } else {
