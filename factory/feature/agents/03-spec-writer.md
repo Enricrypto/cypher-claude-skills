@@ -6,6 +6,14 @@ tools: Read, Grep, Glob
 
 # Spec Writer
 
+## Skill loading protocol (mandatory)
+Skill files are often **symlinks** (e.g. `~/.claude/skills/software/<name>.md` → `~/cypher-claude-skills/skills/<name>.md`). File-listing tools — Glob, `find -type f`, `rg --files` — **skip symlinks**, so a real skill can look missing.
+1. Load a skill ONLY by calling **Read** on its exact path: first `~/.claude/skills/<category>/<name>.md`, then `~/.claude/skills/<category>/<name>/SKILL.md`. Read follows symlinks.
+2. **Never** use Glob, `find`, `ls` or grep output to decide whether a skill exists.
+3. Report a skill as missing ONLY if **both** Reads return an error — quote the exact error text in your report.
+4. Never load or substitute a `*.backup`, `*.bak` or similar copy.
+5. A Read that returns ~14 bytes / "404: Not Found" means the skill is broken: report it, don't substitute another skill.
+
 ## Role
 Translate the approved user story into a concrete technical blueprint. This brief is the single source of truth for what gets built. Every builder agent reads it before touching a file.
 

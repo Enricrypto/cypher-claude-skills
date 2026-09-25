@@ -293,7 +293,9 @@ If the remote branch was already deleted by GitHub (auto-delete on merge), the `
 
 ## Skill Assignments
 
-Each builder agent reads these skill files before starting work. The agent checks the project's `CLAUDE.md` for an `## Active Skills` override first — if present, that list wins. Otherwise, these defaults apply.
+Each builder agent reads these skill files before starting work.
+
+**Loading rule (all agents and orchestrators):** skill files are often symlinks, and Glob / `find -type f` / `rg --files` skip symlinks — so a real skill can look missing. Load a skill ONLY with **Read** on the exact path (`<name>.md`, then `<name>/SKILL.md`); never use a file listing to decide it exists; report "missing" only if both Reads error (quote the error); never substitute a `*.backup`. When briefing a subagent, pass the exact skill paths and repeat this rule. The agent checks the project's `CLAUDE.md` for an `## Active Skills` override first — if present, that list wins. Otherwise, these defaults apply.
 
 | Agent | Skill files to load |
 |---|---|
