@@ -19,7 +19,11 @@ import {
   serializeState,
   deserializeState,
   isResumable,
-  getStateStats
+  getStateStats,
+  recordExecutionGate,
+  recordBuilderAttempt,
+  recordValidatorRound,
+  FeatureState
 } from '../../harness/state-tracker';
 import { FeatureFactoryAgentOutput } from '../../harness/agent-output-schema';
 
@@ -309,6 +313,97 @@ describe('State Tracker', () => {
       expect(stats.passedSteps).toBe(1);
       expect(stats.failedSteps).toBe(1);
       expect(stats.successRate).toBeCloseTo(50, 0);
+    });
+  });
+
+  describe('recordExecutionGate (D-12)', () => {
+    const measurement = { round: 0, total: 10, passed: 10, failed: 0, passRate: 1, canAdvance: true, referenceCount: 8 };
+
+    it('createFeatureState starts with an empty Gate 2 history', () => {
+      expect(createFeatureState('Test').executionGateHistory).toEqual([]);
+    });
+
+    it('appends the measurement with a recordedAt timestamp, in order', () => {
+      let state = createFeatureState('Test');
+      state = recordExecutionGate(state, measurement);
+      state = recordExecutionGate(state, { ...measurement, round: 1, total: 11, passed: 11, referenceCount: 10 });
+
+      expect(state.executionGateHistory).toHaveLength(2);
+      expect(state.executionGateHistory?.[0]).toMatchObject(measurement);
+      expect(Number.isNaN(Date.parse(state.executionGateHistory?.[0].recordedAt ?? ''))).toBe(false);
+      expect(state.executionGateHistory?.[1]).toMatchObject({ round: 1, total: 11, referenceCount: 10 });
+    });
+
+    it('tolerates a state file written before the history existed', () => {
+      const old = createFeatureState('Test') as FeatureState;
+      delete old.executionGateHistory;
+
+      const state = recordExecutionGate(old, measurement);
+
+      expect(state.executionGateHistory).toHaveLength(1);
+    });
+
+    it('keeps a missing reference missing, rather than inventing one', () => {
+      const { referenceCount: _omitted, ...noReference } = measurement;
+
+      const state = recordExecutionGate(createFeatureState('Test'), noReference);
+
+      expect(state.executionGateHistory?.[0].referenceCount).toBeUndefined();
+    });
+  });
+
+  describe('builder attempts and validator rounds (D-9, AC-70)', () => {
+    it('createFeatureState starts with no builder attempts and no validator rounds', () => {
+      const state = createFeatureState('Test');
+      expect(state.builderAttempts).toEqual({});
+      expect(state.validatorRoundsCompleted).toBe(0);
+    });
+
+    it('counts Stage 3 attempts and validator-round attempts separately, per builder', () => {
+      let state = createFeatureState('Test');
+      state = recordBuilderAttempt(state, '04-backend-builder', { phase: 'stage3' });
+      state = recordBuilderAttempt(state, '04-backend-builder', { phase: 'stage3' });
+      state = recordBuilderAttempt(state, '04-backend-builder', { phase: 'validator-round', round: 1 });
+      state = recordBuilderAttempt(state, '05-frontend-builder', { phase: 'validator-round', round: 2 });
+      state = recordBuilderAttempt(state, '04-backend-builder', { phase: 'validator-round', round: 1 });
+
+      expect(state.builderAttempts).toEqual({
+        '04-backend-builder': { stage3: 2, validatorRounds: { 1: 2 } },
+        '05-frontend-builder': { stage3: 0, validatorRounds: { 2: 1 } }
+      });
+    });
+
+    it('tolerates a state file written before the counters existed', () => {
+      const old = createFeatureState('Test') as FeatureState;
+      delete old.builderAttempts;
+      delete old.validatorRoundsCompleted;
+
+      let state = recordBuilderAttempt(old, '04-backend-builder', { phase: 'stage3' });
+      state = recordValidatorRound(state, 1);
+
+      expect(state.builderAttempts?.['04-backend-builder']).toEqual({ stage3: 1, validatorRounds: {} });
+      expect(state.validatorRoundsCompleted).toBe(1);
+    });
+
+    it('recordValidatorRound records the round number and never goes backwards', () => {
+      let state = createFeatureState('Test');
+      state = recordValidatorRound(state, 2);
+      state = recordValidatorRound(state, 1);
+      expect(state.validatorRoundsCompleted).toBe(2);
+    });
+
+    it('a step and a loop-back carry their phase and round when given, and nothing when not', () => {
+      let state = createFeatureState('Test');
+      state = recordAgentStep(state, 3, '04-backend-builder', 'PASS', undefined, undefined, { phase: 'validator-round', round: 1 });
+      state = recordAgentStep(state, 1, '01-researcher', 'PASS');
+      state = recordLoopBack(state, 3, '04-backend-builder', 'boom', 'FAIL', undefined, { phase: 'validator-round', round: 2 });
+      state = recordLoopBack(state, 3, '04-backend-builder', 'boom', 'FAIL');
+
+      expect([state.stageHistory[0].phase, state.stageHistory[0].round]).toEqual(['validator-round', 1]);
+      expect('phase' in state.stageHistory[1]).toBe(false);
+      expect('round' in state.stageHistory[1]).toBe(false);
+      expect([state.loopBacks[0].phase, state.loopBacks[0].round]).toEqual(['validator-round', 2]);
+      expect('phase' in state.loopBacks[1]).toBe(false);
     });
   });
 });

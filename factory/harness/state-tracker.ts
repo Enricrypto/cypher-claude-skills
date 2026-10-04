@@ -17,6 +17,26 @@
 
 import { FeatureFactoryAgentOutput } from './agent-output-schema';
 
+/**
+ * Where a builder step or loop-back happened (D-9). `stage3` is the original build;
+ * `validator-round` is a re-invocation for Validator CRITICAL issues, numbered from 1. Builder
+ * records keep stage 3 either way — the phase is what tells them apart.
+ */
+export type StepPhase = { phase?: 'stage3' | 'validator-round'; round?: number };
+
+export type BuilderAgent = '04-backend-builder' | '05-frontend-builder';
+
+/**
+ * How many times a builder has been invoked, per phase (AC-70). Stage 3 attempts and each
+ * validator round's attempts are separate budgets of MAX_BUILDER_ATTEMPTS: a builder that needed
+ * three tries to build still gets three tries to fix a Validator issue.
+ */
+export interface BuilderAttemptCounts {
+  stage3: number;
+  /** Keyed by validator round (1-based). */
+  validatorRounds: Record<number, number>;
+}
+
 export interface AgentStepRecord {
   stage: number;
   agent: string;
@@ -30,6 +50,9 @@ export interface AgentStepRecord {
     message: string;
     context?: any;
   };
+  /** Builder steps only: which phase (and validator round) this attempt belonged to. */
+  phase?: 'stage3' | 'validator-round';
+  round?: number;
 }
 
 export interface StageLoopBack {
@@ -41,6 +64,9 @@ export interface StageLoopBack {
   /** WARN: a non-fatal verification problem, recorded but not blocking. */
   result: 'PASS' | 'FAIL' | 'WARN';
   timestamp: string;
+  /** Builder loop-backs only: which phase (and validator round) the failed attempt belonged to. */
+  phase?: 'stage3' | 'validator-round';
+  round?: number;
 }
 
 export interface EscalationRecord {
@@ -86,6 +112,41 @@ export interface CheckpointApproval {
   notes?: string;
 }
 
+/**
+ * A non-blocking finding a human should see before approving the work (AC-17).
+ *
+ * IMPORTANT criteria no longer block a stage; only CRITICAL ones do. What an IMPORTANT failure
+ * produces instead is one of these, kept for the run's record (and, in A-2, for CP3).
+ * `source` says who raised it: 'stage-gate', 'gate-1.5', 'gate-2' or '07-validator'.
+ */
+export interface ImportantFinding {
+  stage: number;
+  source: string;
+  message: string;
+  recordedAt: string; // ISO8601
+}
+
+/**
+ * One Gate 2 evaluation, as the harness measured it (D-12).
+ *
+ * The counts come from the execution audit's own parse of the test output — never from an
+ * agent. `referenceCount` is what "No Regressions" judged the tests that RAN (`passed + failed`,
+ * not `total`: skipped/todo do not count — IMPORTANT-5) against: the ran-count in
+ * `.factory/baseline.json` for the run's first evaluation, the run's first record's ran-count afterwards,
+ * and undefined when there was neither (then only the 100% rule applies).
+ */
+export interface ExecutionGateRecord {
+  /** 0 for the evaluation after the Test Verifier; N for validator round N. */
+  round: number;
+  total: number;
+  passed: number;
+  failed: number;
+  passRate: number;
+  canAdvance: boolean;
+  referenceCount?: number;
+  recordedAt: string; // ISO8601
+}
+
 export interface FeatureState {
   // Identity
   featureId: string; // UUID
@@ -105,6 +166,21 @@ export interface FeatureState {
 
   // Approvals
   checkpointApprovals: CheckpointApproval[];
+
+  /** Non-blocking findings. Optional so a state file written before A-1 still loads. */
+  importantFindings?: ImportantFinding[];
+
+  /** Every Gate 2 evaluation, in order. Optional so a state file written before A-1 still loads. */
+  executionGateHistory?: ExecutionGateRecord[];
+
+  /**
+   * Builder invocations per phase, committed BEFORE each invocation so the count survives a kill
+   * (A-2 resume reads it). Optional so a state file written before A-1 still loads.
+   */
+  builderAttempts?: Partial<Record<BuilderAgent, BuilderAttemptCounts>>;
+
+  /** The highest validator round entered. Optional so a state file written before A-1 still loads. */
+  validatorRoundsCompleted?: number;
 
   // Metrics
   metrics: {
@@ -139,6 +215,10 @@ export function createFeatureState(featureName: string, createdBy?: string): Fea
     loopBacks: [],
     escalations: [],
     checkpointApprovals: [],
+    importantFindings: [],
+    executionGateHistory: [],
+    builderAttempts: {},
+    validatorRoundsCompleted: 0,
     metrics: {
       totalTime: 0,
       timePerStage: {},
@@ -157,7 +237,8 @@ export function recordAgentStep(
   agent: string,
   status: AgentStepRecord['status'],
   output?: FeatureFactoryAgentOutput,
-  error?: any
+  error?: any,
+  phase?: StepPhase
 ): FeatureState {
   const now = new Date();
 
@@ -168,7 +249,8 @@ export function recordAgentStep(
     startedAt: now.toISOString(),
     completedAt: now.toISOString(),
     loopCount: countLoopsForAgent(state, agent),
-    output
+    output,
+    ...phaseFields(phase)
   };
 
   if (error) {
@@ -191,7 +273,8 @@ export function recordLoopBack(
   agent: string,
   reason: string,
   result: 'PASS' | 'FAIL' | 'WARN',
-  fixApplied?: string
+  fixApplied?: string,
+  phase?: StepPhase
 ): FeatureState {
   const loopBack: StageLoopBack = {
     stage,
@@ -200,7 +283,8 @@ export function recordLoopBack(
     attempt: countLoopsForAgent(state, agent) + 1,
     fixApplied,
     result,
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
+    ...phaseFields(phase)
   };
 
   state.loopBacks.push(loopBack);
@@ -257,6 +341,78 @@ export function recordCheckpointApproval(
 
   state.checkpointApprovals.push(approval);
   return state;
+}
+
+/**
+ * Record non-blocking findings. Appends one entry per message; an empty list changes nothing.
+ * Touches no filesystem — the caller commits.
+ */
+export function recordImportantFindings(
+  state: FeatureState,
+  stage: number,
+  source: string,
+  messages: string[]
+): FeatureState {
+  if (messages.length === 0) return state;
+
+  const recordedAt = new Date().toISOString();
+  state.importantFindings = [
+    ...(state.importantFindings ?? []),
+    ...messages.map(message => ({ stage, source, message, recordedAt }))
+  ];
+  return state;
+}
+
+/**
+ * Record one Gate 2 evaluation. Touches no filesystem — the caller commits.
+ */
+export function recordExecutionGate(
+  state: FeatureState,
+  record: Omit<ExecutionGateRecord, 'recordedAt'>
+): FeatureState {
+  state.executionGateHistory = [
+    ...(state.executionGateHistory ?? []),
+    { ...record, recordedAt: new Date().toISOString() }
+  ];
+  return state;
+}
+
+/**
+ * Count one builder invocation in its phase (AC-70). Call it, and commit, BEFORE invoking the
+ * builder: an attempt that is killed mid-flight was still spent. Touches no filesystem.
+ */
+export function recordBuilderAttempt(
+  state: FeatureState,
+  agent: BuilderAgent,
+  at: { phase: 'stage3' } | { phase: 'validator-round'; round: number }
+): FeatureState {
+  const current = state.builderAttempts?.[agent] ?? { stage3: 0, validatorRounds: {} };
+  const next: BuilderAttemptCounts =
+    at.phase === 'stage3'
+      ? { stage3: current.stage3 + 1, validatorRounds: { ...current.validatorRounds } }
+      : {
+          stage3: current.stage3,
+          validatorRounds: { ...current.validatorRounds, [at.round]: (current.validatorRounds[at.round] ?? 0) + 1 }
+        };
+  state.builderAttempts = { ...(state.builderAttempts ?? {}), [agent]: next };
+  return state;
+}
+
+/**
+ * Record that validator round `round` has been entered: the Validator's CRITICAL issues were
+ * routed back to their builders. Never decreases. Touches no filesystem.
+ */
+export function recordValidatorRound(state: FeatureState, round: number): FeatureState {
+  state.validatorRoundsCompleted = Math.max(state.validatorRoundsCompleted ?? 0, round);
+  return state;
+}
+
+/** Only the phase fields that were given, so records without a phase stay exactly as before. */
+function phaseFields(phase?: StepPhase): StepPhase {
+  const fields: StepPhase = {};
+  if (phase?.phase !== undefined) fields.phase = phase.phase;
+  if (phase?.round !== undefined) fields.round = phase.round;
+  return fields;
 }
 
 /**

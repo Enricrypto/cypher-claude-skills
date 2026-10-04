@@ -35,7 +35,6 @@ export interface AgentInvocation {
   stage: number;
   agent: string;
   prompt: string;
-  maxAttempts?: number;
 }
 
 export type AgentInvoker = (call: AgentInvocation) => Promise<any>;

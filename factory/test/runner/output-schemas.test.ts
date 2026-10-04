@@ -17,18 +17,25 @@ import { resolve } from 'path';
 
 import { agentOutputSchema } from '../../runner/output-schemas';
 import { REQUIRED_ARTIFACTS, AGENT_TOOLS, FeatureFactoryAgent } from '../../runner/agent-registry';
+import { stageContracts } from '../../harness/stage-gates';
+import { HARNESS_RENDERED_ARTIFACTS } from '../../harness/harness-documents';
+import { SECURITY_CHECKS } from '../../harness/agent-output-schema';
 
-/** Every exact filename the gates actually look up, scraped from the source of truth. */
+/**
+ * Every exact filename the gates demand: the literal `ctx.artifacts['…']` lookups scraped from
+ * the source, plus every contract's `artifacts.required` (canAdvanceStage enforces those too).
+ */
 function filenamesTheGatesDemand(): string[] {
   const source = readFileSync(resolve(__dirname, '../../harness/stage-gates.ts'), 'utf-8');
   const matches = source.matchAll(/ctx\.artifacts\['([^']+)'\]/g);
-  return [...new Set([...matches].map(m => m[1]))].sort();
+  const required = Object.values(stageContracts).flatMap(contract => contract.artifacts.required);
+  return [...new Set([...[...matches].map(m => m[1]), ...required])].sort();
 }
 
 describe('the gates and the agents agree on document names', () => {
-  it('every document a gate looks up is one some agent is REQUIRED to produce', () => {
+  it('every document a gate demands is one some agent is REQUIRED to produce, or the harness renders', () => {
     const demanded = filenamesTheGatesDemand();
-    const produced = new Set(Object.values(REQUIRED_ARTIFACTS).flat());
+    const produced = new Set<string>([...Object.values(REQUIRED_ARTIFACTS).flat(), ...HARNESS_RENDERED_ARTIFACTS]);
 
     const orphaned = demanded.filter(name => !produced.has(name));
 
@@ -41,8 +48,50 @@ describe('the gates and the agents agree on document names', () => {
     const demanded = new Set(filenamesTheGatesDemand());
     const produced = Object.values(REQUIRED_ARTIFACTS).flat();
 
-    // The reverse: no agent should be forced to write a document nobody reads.
+    // The reverse: no agent should be forced to write a document nobody reads. (Harness-rendered
+    // documents are not on this side: no agent is forced to write them.)
     expect(produced.filter(name => !demanded.has(name))).toEqual([]);
+  });
+
+  it('the Validator must return VALIDATION_REPORT.md, the document Stage 4 requires', () => {
+    expect(REQUIRED_ARTIFACTS['07-validator']).toEqual(['VALIDATION_REPORT.md']);
+    expect(stageContracts[4].artifacts.required).toContain('VALIDATION_REPORT.md');
+  });
+
+  it('no agent is asked to write TEST_REPORT.md — the harness renders it', () => {
+    expect(Object.values(REQUIRED_ARTIFACTS).flat()).not.toContain('TEST_REPORT.md');
+    expect(HARNESS_RENDERED_ARTIFACTS).toContain('TEST_REPORT.md');
+  });
+});
+
+describe('security schemas (AC-67, AC-68)', () => {
+  it('each Validator security check accepts true, false or "not_applicable", with optional reasons', () => {
+    const schema: any = agentOutputSchema('07-validator');
+    const security = schema.properties.details.properties.security;
+
+    expect(security.required).toEqual([...SECURITY_CHECKS]);
+    for (const check of SECURITY_CHECKS) {
+      expect(security.properties[check].anyOf).toEqual([
+        { type: 'boolean' },
+        { type: 'string', enum: ['not_applicable'] }
+      ]);
+    }
+    expect(security.properties.notApplicableReasons.type).toBe('object');
+    expect(Object.keys(security.properties.notApplicableReasons.properties).sort()).toEqual([...SECURITY_CHECKS].sort());
+    expect(security.required).not.toContain('notApplicableReasons');
+  });
+
+  it('the Spec Writer must declare its security surface, each one PRESENT or ABSENT', () => {
+    const schema: any = agentOutputSchema('03-spec-writer');
+    const details = schema.properties.details;
+    const surface = details.properties.securitySurface;
+
+    expect(details.required).toContain('securitySurface');
+    const surfaces = ['auth', 'userInput', 'secrets', 'sqlDatabase', 'htmlRendering'];
+    expect(surface.required).toEqual(surfaces);
+    for (const name of surfaces) {
+      expect(surface.properties[name].enum).toEqual(['PRESENT', 'ABSENT']);
+    }
   });
 });
 

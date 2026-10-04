@@ -22,9 +22,11 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'fs';
-import { basename, dirname, isAbsolute, join, resolve } from 'path';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'path';
 
-import { StageContext } from './stage-gates';
+import { ExecutionMeasurement, Stage4Metadata, StageContext } from './stage-gates';
+import { evaluateSecurityChecks } from './security-checks';
+import { HARNESS_RENDERED_ARTIFACTS } from './harness-documents';
 import {
   ArtifactRef,
   FeatureFactoryAgentOutput,
@@ -56,12 +58,79 @@ export interface BuildStageContextInput {
   outputs: StageOutputs;
   loops?: { backend?: number; frontend?: number };
   knowledgeStored?: boolean;
+  /**
+   * This run's directory, relative to `cwd` (`.factory/<featureId>`). Top-level documents in it
+   * are readable by the gates even when no agent claimed them — that is how the harness-rendered
+   * TEST_REPORT.md reaches the Stage 4 gate.
+   */
+  artifactDir?: string;
+  /**
+   * What the HARNESS measured, passed by the orchestrator and never by an agent (D-5): the latest
+   * Gate 2 measurement and the regression reference it is judged against.
+   */
+  harness?: { execution?: ExecutionMeasurement; regressionReferenceCount?: number };
 }
 
-/** Paths are compared as sets, so they must be compared in one canonical form. */
-function normalise(path: string): string {
-  return path.replace(/^\.\//, '').replace(/^\/+/, '');
+/**
+ * Paths are compared as sets, so they must be compared in one canonical form. With `cwd`, an
+ * absolute path inside the project becomes project-relative; then a leading `./` and any leading
+ * `/` are stripped.
+ */
+export function normalisePath(path: string, cwd?: string): string {
+  let p = path;
+  if (cwd && isAbsolute(p)) {
+    const root = resolve(cwd);
+    const abs = resolve(p);
+    if (abs === root || abs.startsWith(root + sep)) p = relative(root, abs);
+  }
+  return p.replace(/^\.\//, '').replace(/^\/+/, '');
 }
+
+/**
+ * The files the builders claim to have written: what the materialization gate (Gate 1) checks
+ * and what the Stage 3 gate reads. ONE implementation, used by the orchestrator and by
+ * buildStageContext alike, so the two can never disagree about what was claimed.
+ *
+ * Only the builders' own `filesModified`. Documents the harness renders (BACKEND_SUMMARY.md and
+ * friends) are never claimed files: a gate that checked the harness's own output would prove
+ * nothing about the builders.
+ */
+export function claimedFilesFromBuilders(
+  backend?: BackendBuilderOutput,
+  frontend?: FrontendBuilderOutput
+): ArtifactRef[] {
+  const claim = (who: string) => (file: { path: string; description: string }): ArtifactRef => ({
+    name: basename(file.path),
+    path: file.path,
+    description: `${who}: ${file.description}`
+  });
+  return [
+    ...(backend?.details?.filesModified ?? []).map(claim('Backend Builder')),
+    ...(frontend?.details?.filesModified ?? []).map(claim('Frontend Builder'))
+  ];
+}
+
+/**
+ * The claimed paths that resolve inside `<cwd>/.factory/` — the harness's own directory.
+ *
+ * Everything there was written by the harness (run documents, state.json, baseline.json), so a
+ * builder claiming such a file would satisfy the materialization gate with the harness's own
+ * output: the gate would be verifying its own handiwork. The orchestrator rejects any claim this
+ * returns before it checks existence. Paths are resolved (so `src/../.factory/x` counts) but
+ * symlinks are not followed. Returned exactly as claimed, so the escalation names what the
+ * builder wrote.
+ */
+export function claimsInsideFactoryDir(claims: ArtifactRef[], cwd: string): string[] {
+  const factoryDir = resolve(cwd, '.factory');
+  return claims
+    .map(claim => claim.path)
+    .filter(path => {
+      const absolute = isAbsolute(path) ? resolve(path) : resolve(cwd, path);
+      return absolute === factoryDir || absolute.startsWith(factoryDir + sep);
+    });
+}
+
+const HARNESS_RENDERED: ReadonlySet<string> = new Set(HARNESS_RENDERED_ARTIFACTS);
 
 /** Markers that mean a builder left work unfinished. */
 const ABANDONED_MARKERS = /\b(TODO|FIXME|XXX|HACK)\b/g;
@@ -88,6 +157,22 @@ const HARNESS_PERSISTED_AGENTS = new Set([
 export interface PersistedArtifact {
   agent: string;
   path: string;
+}
+
+/**
+ * An agent asked the harness to write a document somewhere it must not: a name that is not a
+ * plain filename, or (with no run directory) a path that is absolute or escapes the project.
+ *
+ * Thrown, never skipped. The read-only agents have no Write tool precisely so they cannot touch
+ * the filesystem; a document path that tries to leave the run directory is either a malformed
+ * output or a prompt injection, and either way the run must stop and say so — silently dropping
+ * the document would let the stage proceed on a run dir that is missing what the agent produced.
+ */
+export class UnsafeArtifactPathError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'UnsafeArtifactPathError';
+  }
 }
 
 /**
@@ -139,13 +224,27 @@ export function clearStaleArtifacts(cwd: string, keepFeatureId: string): string[
  *
  * Artifact paths are REWRITTEN in place to the namespaced location, so persistArtifacts() and
  * readArtifactContents() can never disagree about where a document lives.
+ *
+ * Where a document is written (IMPORTANT-1, IMPORTANT-2):
+ *  - With `artifactDir`, ALWAYS `<artifactDir>/<artifact.name>`. The path the agent supplied is
+ *    ignored — absolute or relative — so a read-only agent cannot place a file anywhere else, and
+ *    the file is saved under the name the gates and the next agent's prompt look it up by.
+ *    A `name` that is not a plain filename (contains `/`, `\`, `..`, is absolute, or is `.`/empty)
+ *    throws UnsafeArtifactPathError.
+ *  - Without `artifactDir` (legacy callers), the agent's path is used only if it is relative and
+ *    resolves inside `cwd`; an absolute path, or one that escapes `cwd`, throws.
+ *
+ * Every artifact is checked BEFORE anything is written, so a refused call leaves no partial
+ * output behind. The throw is the fail-closed choice: in the orchestrator it reaches the outer
+ * catch and escalates the run, naming the offending artifact.
  */
 export function persistArtifacts(
   outputs: StageOutputs,
   cwd: string,
   artifactDir?: string
 ): PersistedArtifact[] {
-  const written: PersistedArtifact[] = [];
+  const root = resolve(cwd);
+  const planned: Array<{ agent: string; artifact: ArtifactRef; path: string; absolutePath: string }> = [];
 
   for (const output of Object.values(outputs)) {
     const agentOutput = output as FeatureFactoryAgentOutput | undefined;
@@ -155,21 +254,57 @@ export function persistArtifacts(
     for (const artifact of agentOutput.details.artifacts) {
       if (typeof artifact.content !== 'string' || artifact.content.length === 0) continue;
 
-      if (artifactDir && !isAbsolute(artifact.path)) {
-        artifact.path = join(artifactDir, basename(artifact.path));
+      const path = artifactDir
+        ? join(artifactDir, plainArtifactName(agentOutput.agent, artifact.name))
+        : legacyArtifactPath(agentOutput.agent, artifact.path);
+      const absolutePath = resolve(root, path);
+
+      const container = artifactDir ? resolve(root, artifactDir) : root;
+      if (!absolutePath.startsWith(container + sep)) {
+        throw new UnsafeArtifactPathError(
+          `${agentOutput.agent}: artifact "${artifact.name}" would be written to ${absolutePath}, outside ${container}.`
+        );
       }
 
-      const absolutePath = isAbsolute(artifact.path)
-        ? artifact.path
-        : resolve(cwd, artifact.path);
-
-      mkdirSync(dirname(absolutePath), { recursive: true });
-      writeFileSync(absolutePath, artifact.content, 'utf-8');
-      written.push({ agent: agentOutput.agent, path: artifact.path });
+      planned.push({ agent: agentOutput.agent, artifact, path, absolutePath });
     }
   }
 
-  return written;
+  return planned.map(({ agent, artifact, path, absolutePath }) => {
+    artifact.path = path;
+    mkdirSync(dirname(absolutePath), { recursive: true });
+    writeFileSync(absolutePath, artifact.content as string, 'utf-8');
+    return { agent, path };
+  });
+}
+
+/** The artifact name, if it is a plain filename; otherwise throw. */
+function plainArtifactName(agent: string, name: unknown): string {
+  if (
+    typeof name !== 'string' ||
+    name.length === 0 ||
+    name === '.' ||
+    name.includes('/') ||
+    name.includes('\\') ||
+    name.includes('..') ||
+    name.includes('\0') ||
+    isAbsolute(name)
+  ) {
+    throw new UnsafeArtifactPathError(
+      `${agent}: artifact name ${JSON.stringify(name)} is not a plain filename; refusing to write it.`
+    );
+  }
+  return name;
+}
+
+/** Legacy (no run dir): the agent's path, if relative; otherwise throw. Containment is checked by the caller. */
+function legacyArtifactPath(agent: string, path: unknown): string {
+  if (typeof path !== 'string' || path.length === 0 || isAbsolute(path) || path.includes('\0')) {
+    throw new UnsafeArtifactPathError(
+      `${agent}: artifact path ${JSON.stringify(path)} is absolute or empty; without a run directory only paths inside the project are written.`
+    );
+  }
+  return path;
 }
 
 /**
@@ -179,10 +314,19 @@ export function persistArtifacts(
  *
  * A claimed file that does not exist is simply absent from the map. That is deliberate: the
  * gate then sees nothing and fails, which is the correct outcome for a hallucinated artifact.
+ *
+ * With `artifactDir`, the top-level regular files of `<cwd>/<artifactDir>/` are read too, keyed
+ * by filename, filling only keys no claimed artifact set. Subdirectories are not descended into.
+ *
+ * One exception to "claimed wins": for a name in HARNESS_RENDERED_ARTIFACTS, the run-dir file the
+ * HARNESS wrote wins over any artifact an agent claimed under that name. The harness renders those
+ * documents from the structured output the gates judge; an agent's same-named file cannot stand in
+ * for — or overrule — them.
  */
 export function readArtifactContents(
   outputs: StageOutputs,
-  cwd: string
+  cwd: string,
+  artifactDir?: string
 ): Record<string, string> {
   const contents: Record<string, string> = {};
 
@@ -204,6 +348,21 @@ export function readArtifactContents(
         contents[basename(absolutePath)] = content;
       } catch {
         // Unreadable is the same as absent, for gate purposes.
+      }
+    }
+  }
+
+  if (artifactDir) {
+    const runDir = resolve(cwd, artifactDir);
+    if (existsSync(runDir)) {
+      for (const entry of readdirSync(runDir, { withFileTypes: true })) {
+        if (!entry.isFile()) continue;
+        if (contents[entry.name] !== undefined && !HARNESS_RENDERED.has(entry.name)) continue;
+        try {
+          contents[entry.name] = readFileSync(join(runDir, entry.name), 'utf-8');
+        } catch {
+          // Unreadable is the same as absent, for gate purposes.
+        }
       }
     }
   }
@@ -234,7 +393,7 @@ export function countAbandonedMarkers(files: Array<{ path: string }>, cwd: strin
 export function buildStageContext(input: BuildStageContextInput): StageContext {
   const { stage, cwd, outputs } = input;
 
-  const artifacts = readArtifactContents(outputs, cwd);
+  const artifacts = readArtifactContents(outputs, cwd, input.artifactDir);
   const metadata: Record<string, any> = {};
 
   // --- Stage 1: what the Researcher actually found -------------------------------------
@@ -254,7 +413,7 @@ export function buildStageContext(input: BuildStageContextInput): StageContext {
     ];
 
     metadata.filesModified = filesModified.length;
-    metadata.modifiedFiles = filesModified.map(f => normalise(f.path));
+    metadata.modifiedFiles = filesModified.map(f => normalisePath(f.path, cwd));
 
     // The approved spec is the contract. Every file it says to CREATE or MODIFY must actually be
     // created or modified — and the gate compares the SETS, not the counts. Comparing counts was
@@ -263,18 +422,12 @@ export function buildStageContext(input: BuildStageContextInput): StageContext {
     // DELETE entries are excluded: a deleted file is, correctly, not in filesModified.
     const expected = (outputs.spec?.details.fileList ?? [])
       .filter(f => f.type !== 'DELETE')
-      .map(f => normalise(f.path));
+      .map(f => normalisePath(f.path, cwd));
 
     metadata.expectedFiles = expected;
     metadata.filesExpected = expected.length > 0 ? expected.length : filesModified.length;
 
-    metadata.claimedFiles = filesModified.map(
-      (file): ArtifactRef => ({
-        name: basename(file.path),
-        path: file.path,
-        description: file.description
-      })
-    );
+    metadata.claimedFiles = claimedFilesFromBuilders(backend, frontend);
 
     // Real pass rate. Previously hardcoded to 1.0, which made this CRITICAL gate unfailable.
     // With zero tests written, the rate is 0 — "no tests" is not "all tests passed".
@@ -290,33 +443,44 @@ export function buildStageContext(input: BuildStageContextInput): StageContext {
   }
 
   // --- Stage 4: what the Test Verifier and Validator actually reported ------------------
+  // Nothing here defaults to a passing value: a missing input stays undefined and the Stage 4
+  // criteria fail closed on it (AC-62).
+  const stage4: Stage4Metadata = {};
+
   if (outputs.test) {
     const acceptance = outputs.test.details.acceptanceTests;
-    metadata.acceptanceCriteriaTotalCount = acceptance?.totalAC ?? 0;
-    metadata.acceptanceCriteriaTestedCount = acceptance?.tested ?? 0;
+    stage4.acceptanceCriteriaTotalCount = acceptance?.totalAC;
+    stage4.acceptanceCriteriaTestedCount = acceptance?.tested;
+    stage4.acceptanceCriteriaNotCoverableCount = acceptance?.notCoverable;
+  }
+
+  // The denominator comes from the approved story, never from the agent being graded (AC-18).
+  if (outputs.story && Array.isArray(outputs.story.details.acceptanceCriteria)) {
+    stage4.storyAcceptanceCriteriaCount = outputs.story.details.acceptanceCriteria.length;
   }
 
   if (outputs.validator) {
     const details = outputs.validator.details;
 
-    metadata.criticalIssuesCount =
+    stage4.criticalIssuesCount =
       details.issues?.filter(issue => issue.severity === 'CRITICAL').length ?? 0;
 
-    // A security check that is false IS a security issue — the booleans are the findings, so a
-    // clean `issues` array does not mean a clean security posture.
-    const security = details.security;
-    const failedSecurityChecks = security
-      ? [
-          security.authImplemented,
-          security.inputValidated,
-          security.noHardcodedSecrets,
-          security.sqlInjectionProtected,
-          security.xssProtected
-        ].filter(passed => passed === false).length
-      : 0;
+    // Tri-state, judged against the brief's declared surface (AC-67, AC-68). A false check, an
+    // unearned "not_applicable", a missing check and every listed issue each count as one.
+    const security = evaluateSecurityChecks(details.security, outputs.spec?.details.securitySurface);
+    stage4.securityIssuesCount = security.blockers.length;
+    stage4.securityBlockers = security.blockers;
 
-    metadata.securityIssuesCount = failedSecurityChecks + (security?.issues?.length ?? 0);
-    metadata.regressionCount = details.regressions?.count ?? 0;
+    // details.regressions is deliberately NOT read: "No Regressions" judges the harness's own
+    // Gate 2 count below, never a number the Validator reports about the work it is grading.
+  }
+
+  // Harness-side: the orchestrator's Gate 2 measurement and the reference it is judged against.
+  stage4.executionMeasurement = input.harness?.execution;
+  stage4.regressionReferenceCount = input.harness?.regressionReferenceCount;
+
+  for (const [key, value] of Object.entries(stage4)) {
+    if (value !== undefined) metadata[key] = value;
   }
 
   // --- Stage 5: what the Consolidator actually extracted --------------------------------

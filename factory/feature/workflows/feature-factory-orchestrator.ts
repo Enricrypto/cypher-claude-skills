@@ -8,56 +8,79 @@
  * 1. DISCOVER (Researcher) — Map codebase
  * 2. PLAN (Story Writer → Spec Writer) — Design feature
  * 3. EXECUTE (Backend Builder → Frontend Builder) — Implement with loop-backs
- * 4. VERIFY (Test Verifier → Validator) — Test with regression detection
+ * 4. VERIFY (Test Verifier → Gate 2 → Validator) — the harness measures regressions itself
  * 5. DELIVER (Feature Consolidator) — Consolidate after merge
  */
 
 import {
   stageContracts,
   canAdvanceStage,
-  StageContext,
+  ExecutionMeasurement,
   StageAdvancementDecision
 } from '../../harness/stage-gates';
 
+import { readRegressionBaseline, regressionReference } from '../../harness/regression-baseline';
+
 import {
-  ArtifactRef,
   validateOutputSchema,
   FeatureFactoryAgentOutput,
-  ResearcherOutput,
-  StoryWriterOutput,
-  SpecWriterOutput,
   BackendBuilderOutput,
   FrontendBuilderOutput,
-  TestVerifierOutput,
-  ValidatorOutput,
-  FeatureConsolidatorOutput,
+  ValidatorIssue,
   verifyArtifactMaterialization,
-  generateMaterializationReport,
-  MaterializationAudit
+  generateMaterializationReport
 } from '../../harness/agent-output-schema';
 
 import {
-  analyzeError,
-  getRemediationInstruction,
-  getFixCodeTemplate
-} from '../../harness/error-categories';
+  HarnessRenderedArtifact,
+  renderApiContract,
+  renderBackendSummary,
+  renderFrontendSummary,
+  renderTestReport,
+  writeHarnessDocument
+} from '../../harness/harness-documents';
+
+import {
+  BuilderFailure,
+  builderPrompt,
+  ValidatorRoundFailure,
+  consolidatorPrompt,
+  PromptContext,
+  researcherPrompt,
+  specPrompt,
+  storyPrompt,
+  testVerifierPrompt,
+  validatorPrompt
+} from '../../harness/agent-prompts';
+
+import { analyzeError } from '../../harness/error-categories';
 
 import {
   auditExecution,
   validateExecutionGate,
   generateExecutionReport,
-  ExecutionAudit
+  ExecutionAudit,
+  ExecutionGateDecision
 } from '../../harness/execution-gates';
 
 import {
   auditInfrastructure,
   validateInfrastructureGate,
   generateInfrastructureReport,
-  InfrastructureAudit
+  InfrastructureAudit,
+  InfrastructureGateDecision
 } from '../../harness/infrastructure-gates';
 
 import { AgentInvoker } from '../../runner/invoke-agent';
-import { buildStageContext, clearStaleArtifacts, persistArtifacts, StageOutputs } from '../../harness/stage-context';
+import {
+  buildStageContext,
+  BuildStageContextInput,
+  claimedFilesFromBuilders,
+  claimsInsideFactoryDir,
+  clearStaleArtifacts,
+  persistArtifacts,
+  StageOutputs
+} from '../../harness/stage-context';
 import { acceptFeatureSpec, FeatureSpec } from '../../contracts/feature-spec';
 
 import {
@@ -67,11 +90,78 @@ import {
   recordLoopBack,
   recordEscalation,
   recordCheckpointApproval,
+  recordImportantFindings,
+  recordExecutionGate,
+  recordBuilderAttempt,
+  recordValidatorRound,
   advanceToStage,
-  completeFeature
+  completeFeature,
+  BuilderAgent,
+  StepPhase
 } from '../../harness/state-tracker';
 
+import { LOOP_BACK_RULES, MAX_BUILDER_ATTEMPTS, MAX_VALIDATOR_ROUNDS } from '../../harness/loop-rules';
+import { specRequiresFrontend } from '../../harness/frontend-files';
+import {
+  criticalIssues,
+  describeIssue,
+  mergeBuilderOutput,
+  routeCriticalIssues,
+  UnroutableReason
+} from '../../harness/validator-routing';
+
+/** The loop-back table and its bounds (D-9), re-exported so SKILL.md's claims can be checked against them. */
+export { LOOP_BACK_RULES, MAX_BUILDER_ATTEMPTS, MAX_VALIDATOR_ROUNDS };
+export type { LoopBackRule, LoopBackSituation } from '../../harness/loop-rules';
+
 import { saveState, stateFilePath, StatePersistenceError } from '../../harness/state-store';
+
+/**
+ * The two audits that run real commands in the target project: Gate 1.5 (infrastructure) and
+ * Gate 2 (execution).
+ *
+ * Injected for the same reason `invoke` is: so the orchestrator can be driven end to end in a
+ * test without running `npm run build/test/dev` in a temp directory. Only the AUDITS are
+ * injectable. validateInfrastructureGate / validateExecutionGate stay real, so a test exercises
+ * the orchestrator's real judgement of whatever evidence the audit returns.
+ */
+export interface OrchestrationGates {
+  auditInfrastructure: (projectRoot: string) => Promise<InfrastructureAudit>;
+  auditExecution: (projectRoot: string) => Promise<ExecutionAudit>;
+}
+
+/** The real audits. Production never passes `gates`, so this is what runs. */
+export const DEFAULT_GATES: Readonly<OrchestrationGates> = Object.freeze({
+  auditInfrastructure,
+  auditExecution
+});
+
+/**
+ * A human checkpoint the program enforces (D-11). The numbers are what SKILL.md documents; the
+ * doc-drift test checks the two against each other, so a checkpoint cannot be added, removed or
+ * renumbered in one place only.
+ */
+export interface CheckpointDefinition {
+  readonly id: number;
+  readonly name: string;
+  readonly stage: 1 | 2 | 3 | 4 | 5;
+}
+
+/**
+ * Every checkpoint the orchestrator asks a human to approve. There are two in this version: PR
+ * review is a human step outside the program, not a checkpoint it enforces.
+ */
+export const CHECKPOINTS = {
+  STORY: { id: 1, name: 'CHECKPOINT 1: Approve the story', stage: 2 },
+  BRIEF: { id: 2, name: 'CHECKPOINT 2: Approve the technical brief', stage: 2 }
+} as const satisfies Record<string, CheckpointDefinition>;
+
+/** What a human is asked to approve at a checkpoint. */
+export interface CheckpointRequest {
+  name: string;
+  stage: number;
+  summary: string;
+}
 
 /**
  * An agent that says it cannot proceed is believed.
@@ -85,66 +175,6 @@ function agentDeclaredBlocked(output: FeatureFactoryAgentOutput): boolean {
   return output.status === 'ESCALATE' || output.status === 'FAIL';
 }
 
-/** Why the previous builder attempt did not count. */
-type BuilderFailure =
-  | { kind: 'test'; error: string }
-  | { kind: 'schema'; error: string };
-
-/**
- * Tell a retrying builder what went wrong last time.
- *
- * Every builder attempt is a FRESH agent invocation — new context, no transcript of the attempt
- * before it. The only thing carrying information across that boundary is this prompt, and it
- * used to carry almost none:
- *
- *     "This is attempt 2 of 3. A previous attempt failed — fix it, do not start over."
- *
- * Which failed? How? The harness knew. analyzeError() had already classified the failure into a
- * category and a fixClass with a confidence score, and getRemediationInstruction() had existed
- * all along to format exactly this briefing — imported by this file and never once called. The
- * classification went into the state record and nowhere else.
- *
- * So attempt 2 began blind, and its first move was necessarily to re-run the suite to rediscover
- * what attempt 1 had already discovered AND classified. Up to six full agent contexts per run,
- * each re-paying the contract and re-reading four artifacts, to re-derive a known answer.
- *
- * This is the dashed line in the recovery loop — FAIL · RETURN THE EXACT GAP · RETRY WITH A
- * BOUND. The bound was real (three attempts, then MAX_LOOPS). The exact gap was being dropped
- * on the floor.
- */
-function retryBriefing(attempt: number, failure?: BuilderFailure): string {
-  if (attempt <= 1) return '';
-
-  const header = `This is attempt ${attempt} of 3. Do not start over — fix what is named below.`;
-
-  if (!failure) {
-    // No classified cause. Say so plainly rather than implying a diagnosis we do not have.
-    return `${header}\nThe previous attempt failed, but the harness could not classify why.`;
-  }
-
-  if (failure.kind === 'schema') {
-    return [
-      header,
-      ``,
-      `The previous attempt produced work but returned a MALFORMED result envelope, so the`,
-      `harness could not read it. The code may be fine; the output contract was not met:`,
-      ``,
-      `    ${failure.error}`,
-      ``,
-      `Put your findings in the STRUCTURED FIELDS this time, not only in \`summary\`.`
-    ].join('\n');
-  }
-
-  return [
-    header,
-    ``,
-    `The previous attempt left a failing test. The harness has ALREADY classified it — fix`,
-    `exactly this, and do not re-run the full suite merely to rediscover it:`,
-    ``,
-    getRemediationInstruction(failure.error)
-  ].join('\n');
-}
-
 export interface OrchestrationOptions {
   featureName: string;
   featureDescription: string;
@@ -154,7 +184,7 @@ export interface OrchestrationOptions {
   cwd: string;
 
   /**
-   * The three human checkpoints. Called before the run is allowed to continue.
+   * The human checkpoints (CHECKPOINTS). Called before the run is allowed to continue.
    *
    * The orchestrator used to log "⏸️  CHECKPOINT 1: Awaiting story approval" and then
    * immediately record its own approval. It never waited for anyone. The system was claiming a
@@ -165,11 +195,7 @@ export interface OrchestrationOptions {
    * run escalates. Auto-approval must be asked for explicitly (the CLI's --yes), because a
    * checkpoint you can skip by forgetting to configure it is not a checkpoint.
    */
-  approveCheckpoint?: (checkpoint: {
-    name: string;
-    stage: number;
-    summary: string;
-  }) => Promise<boolean>;
+  approveCheckpoint?: (checkpoint: CheckpointRequest) => Promise<boolean>;
 
   /**
    * A spec produced upstream — by a Tier 1 Decomposer, by a human, by anything.
@@ -189,6 +215,12 @@ export interface OrchestrationOptions {
    */
   invoke: AgentInvoker;
 
+  /**
+   * Replace Gate 1.5 / Gate 2's audits. Omitted entries fall back to DEFAULT_GATES, the real
+   * ones. Tests pass fakes; production passes nothing.
+   */
+  gates?: Partial<OrchestrationGates>;
+
   logger?: (message: string) => void;
 }
 
@@ -200,6 +232,12 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
 
   const invokeAgent = options.invoke;
   const cwd = options.cwd;
+
+  /** Audits are called ONLY through this object, so an injected gate can never be bypassed. */
+  const gates: OrchestrationGates = {
+    auditInfrastructure: options.gates?.auditInfrastructure ?? DEFAULT_GATES.auditInfrastructure,
+    auditExecution: options.gates?.auditExecution ?? DEFAULT_GATES.auditExecution
+  };
   const log = options.logger ?? ((message: string) => console.log(`[FF] ${message}`));
   const phase = (title: string) => log(`\n=== ${title} ===`);
 
@@ -268,45 +306,82 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
   };
 
   /**
-   * Point the builder at ITS OWN approved brief.
+   * The count a Gate 2 evaluation must not fall below (D-12). The run's first evaluation
+   * (round 0) is judged against `.factory/baseline.json`; every later one — the validator rounds
+   * — against the run's first record.
    *
-   * The prompt used to be "Implement backend for approved spec" — with no path. Meanwhile
-   * .factory/ accumulates one directory per run. A live Backend Builder read the project, found
-   * FOUR technical briefs for the same feature from four different runs, all still saying "reply
-   * 'approved' when ready", and refused to write any code:
-   *
-   *     "No spec in this repo is approved... 'Newest wins' is not a safe inference: these are
-   *      parallel runs, not revisions of one another."
-   *
-   * It was right. An agent cannot implement an approved spec if nothing tells it which spec is
-   * approved.
+   * Called BEFORE the audit and OUTSIDE its try: a baseline file that exists but cannot be
+   * trusted throws RegressionBaselineError, which must reach the outer catch and escalate the run.
+   * It is never read as "no baseline" — that would quietly lower the bar.
    */
-  const builderPrompt = (
-    half: 'backend' | 'frontend',
-    attempt: number,
-    previousFailure?: BuilderFailure
-  ): string =>
-    [
-      `Implement the ${half} for the APPROVED technical brief of this feature.`,
-      ``,
-      `THE APPROVED BRIEF IS: ${artifactDir}/TECHNICAL_BRIEF.md`,
-      `The approved user story is: ${artifactDir}/USER_STORY.md`,
-      `The file list is:          ${artifactDir}/FILE_LIST.md`,
-      `The researcher report is:  ${artifactDir}/RESEARCHER_REPORT.md`,
-      ``,
-      `Those four files, and ONLY those, are the approved plan. ${artifactDir} is this run's`,
-      `directory. If .factory/ contains other directories they belong to unrelated runs — ignore`,
-      `them completely. Do not read them, do not reconcile them, do not treat them as revisions.`,
-      ``,
-      half === 'frontend'
-        ? `The backend is already built. Consume its API contract; do not invent endpoints.`
-        : `Your scope ends at the API contract. Do not touch frontend files.`,
-      ``,
-      retryBriefing(attempt, previousFailure)
-    ].join('\n');
+  const gate2Reference = (round: number): number | undefined =>
+    regressionReference(state.executionGateHistory, round === 0 ? readRegressionBaseline(cwd) : undefined);
+
+  /** Record and commit one Gate 2 evaluation, from the audit's own parse of the test output. */
+  const recordGate2 = (round: number, decision: ExecutionGateDecision, referenceCount: number | undefined) => {
+    const stats = decision.testStats;
+    state = commit(
+      recordExecutionGate(state, {
+        round,
+        total: stats?.total ?? 0,
+        passed: stats?.passed ?? 0,
+        failed: stats?.failed ?? 0,
+        passRate: decision.passRate,
+        canAdvance: decision.canAdvance,
+        referenceCount
+      })
+    );
+  };
+
+  /** What the Stage 4 gate judges "No Regressions" on: the latest Gate 2 record, and its reference. */
+  const latestGate2 = (): HarnessMeasurements => {
+    const history = state.executionGateHistory ?? [];
+    const latest = history[history.length - 1];
+    if (!latest) return {};
+    const execution: ExecutionMeasurement = {
+      total: latest.total,
+      passed: latest.passed,
+      failed: latest.failed,
+      passRate: latest.passRate
+    };
+    return { execution, regressionReferenceCount: latest.referenceCount };
+  };
+
+  /**
+   * Record non-blocking findings and commit (AC-17). IMPORTANT criteria no longer block; this is
+   * where what they found goes instead, so it is never silently dropped.
+   */
+  const recordFindings = (stage: number, source: string, messages: string[]) => {
+    if (messages.length === 0) return;
+    for (const message of messages) log(`  ⚠️  [${source}] ${message}`);
+    state = commit(recordImportantFindings(state, stage, source, messages));
+  };
+
+  /** Evaluate a stage gate against this run's evidence, and keep its IMPORTANT findings. */
+  const stageGate = async (
+    stage: number,
+    extra?: {
+      loops?: { backend?: number; frontend?: number };
+      knowledgeStored?: boolean;
+      harness?: HarnessMeasurements;
+    }
+  ): Promise<StageAdvancementDecision> => {
+    const decision = await checkStageGate(stage, cwd, outputs, { ...extra, artifactDir });
+    recordFindings(stage, 'stage-gate', decision.importantFindings);
+    return decision;
+  };
+
+  /** What every prompt builder needs; prompts are built at invocation time (agent-prompts.ts). */
+  const promptCtx: PromptContext = { cwd, artifactDir, featureDescription: options.featureDescription };
+
+  /** Render a harness document into the run dir (only) and log where it went. */
+  const writeDocument = (name: HarnessRenderedArtifact, content: string) => {
+    log(`  📄 harness → ${writeHarnessDocument(cwd, artifactDir, name, content)}`);
+  };
 
   /** A checkpoint that actually blocks. Fails closed when no approver is configured. */
-  const checkpoint = async (name: string, stage: number, summary: string): Promise<boolean> => {
+  const checkpoint = async (definition: CheckpointDefinition, summary: string): Promise<boolean> => {
+    const { name, stage } = definition;
     log(`⏸️  ${name}`);
 
     if (!options.approveCheckpoint) {
@@ -330,6 +405,330 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
     state = recordCheckpointApproval(state, stage, name);
     log(`✅ ${name} approved`);
     return true;
+  };
+
+  // ==========================================================================================
+  // Builders and the gates a validator round re-runs (D-9)
+  //
+  // Each helper returns the finished state when the run must stop, and undefined (or the
+  // builder's output) when it may continue. They are used by Stage 3 AND by every validator
+  // round, so a round is judged by exactly the code that judged the original build.
+  // ==========================================================================================
+
+  /** Attempts each builder used in its most recent loop: what the Stage 3 gate's loop criterion reads. */
+  const lastAttempts: { backend?: number; frontend?: number } = {};
+
+  /**
+   * Run one builder for up to MAX_BUILDER_ATTEMPTS attempts in one phase: the Stage 3 build, or
+   * one validator round. Each attempt is counted in state and committed BEFORE the invocation
+   * (AC-70). Records keep stage 3 and carry the phase; escalations use the stage the RUN is in —
+   * 3 while building, 4 during a validator round (AC-33).
+   */
+  const runBuilderLoop = async <H extends BuilderHalf>(
+    half: H,
+    run: BuilderRun
+  ): Promise<{ output: BuilderOutputFor<H> } | { finished: FeatureState }> => {
+    const agent = BUILDER_AGENT[half];
+    const label = half === 'backend' ? 'Backend' : 'Frontend';
+    const inRound = run.phase === 'validator-round';
+    const escalationStage = inRound ? 4 : 3;
+    const where = inRound ? ` in validator round ${run.round}` : '';
+    const phase: StepPhase = inRound ? { phase: 'validator-round', round: run.round } : { phase: 'stage3' };
+    const validatorRound: ValidatorRoundFailure | undefined = inRound
+      ? { kind: 'validator', round: run.round, maxRounds: MAX_VALIDATOR_ROUNDS, issues: run.issues }
+      : undefined;
+    /** Carried into the next attempt's prompt — the only channel between two fresh contexts. */
+    let failure: BuilderFailure | undefined;
+
+    for (let attempt = 1; attempt <= MAX_BUILDER_ATTEMPTS; attempt++) {
+      log(`${label} Builder${where}: Attempt ${attempt}/${MAX_BUILDER_ATTEMPTS}`);
+      state = commit(
+        recordBuilderAttempt(state, agent, inRound ? { phase: 'validator-round', round: run.round } : { phase: 'stage3' })
+      );
+
+      const candidate: BuilderOutputFor<H> = await invokeAgent({
+        stage: 3,
+        agent,
+        prompt: builderPrompt(promptCtx, half, attempt, failure, validatorRound)
+      });
+
+      // A builder that declares itself blocked is believed. It is the one that just read the
+      // code; when it says it cannot proceed, that is a finding, not noise.
+      if (candidate.status === 'ESCALATE') {
+        state = recordEscalation(
+          state,
+          escalationStage,
+          agent,
+          'CRITICAL_ISSUE',
+          `${agent} refused to build${where}: ${candidate.details?.summary}`
+        );
+        return { finished: finish(state, 'ESCALATED', `${agent} declared the build blocked`) };
+      }
+
+      // FAILING TESTS ARE CHECKED BEFORE THE SCHEMA, and the order is the point.
+      //
+      // validateOutputSchema treats testsFailed > 0 as a schema error ("Builder has failing
+      // tests: N") — it validates "acceptable work", not just envelope shape. So while the
+      // schema check ran first, a builder that reported a failing test was classified as having
+      // returned a malformed envelope, this branch `continue`d before reaching the analysis
+      // below, and analyzeError() in the builder loop was DEAD CODE from the day it was written.
+      //
+      // A builder that honestly reports a failing test has satisfied its output contract
+      // exactly. That is a work result with a designed remediation path, not a contract
+      // violation, and it is handled here. The schema check below still catches every genuinely
+      // malformed envelope, which is what it is for.
+      if (candidate.details?.testing && candidate.details.testing.testsFailed > 0) {
+        const failedTest = candidate.details.testing.failingTests?.[0];
+
+        if (failedTest?.error) {
+          // Classify, and CARRY THE CLASSIFICATION INTO THE NEXT ATTEMPT. The state record
+          // alone is not enough: the next builder is a fresh context that cannot read it.
+          const errorAnalysis = analyzeError(failedTest.error);
+          failure = { kind: 'test', error: failedTest.error };
+          state = recordLoopBack(
+            state,
+            3,
+            agent,
+            `${errorAnalysis.category}: ${failedTest.error}`,
+            'FAIL',
+            `Apply: ${errorAnalysis.fixClass}`,
+            phase
+          );
+        } else {
+          // Tests failed but the builder named none. Do not invent a diagnosis.
+          failure = undefined;
+          state = recordLoopBack(
+            state,
+            3,
+            agent,
+            `${candidate.details.testing.testsFailed} test(s) failing, none named`,
+            'FAIL',
+            undefined,
+            phase
+          );
+        }
+        continue;
+      }
+
+      const validation = validateOutputSchema(3, agent, candidate);
+      if (!validation.valid) {
+        failure = { kind: 'schema', error: validation.errors[0] };
+        state = recordLoopBack(state, 3, agent, `Output schema invalid: ${validation.errors[0]}`, 'FAIL', undefined, phase);
+        continue;
+      }
+
+      state = commit(recordAgentStep(state, 3, agent, 'PASS', candidate, undefined, phase));
+      lastAttempts[half] = attempt;
+      log(`✅ ${label} builder passed${where} (${attempt === 1 ? 'first try' : `after ${attempt} attempts`})`);
+      return { output: candidate };
+    }
+
+    state = recordEscalation(
+      state,
+      escalationStage,
+      agent,
+      'MAX_LOOPS',
+      `${label} builder exceeded max attempts (${MAX_BUILDER_ATTEMPTS})${where}`,
+      { loopCount: MAX_BUILDER_ATTEMPTS }
+    );
+    return { finished: finish(state, 'ESCALATED', `${label} builder max loops exceeded${where}`) };
+  };
+
+  /**
+   * Gate 1: every file the builders claim exists on disk — and none of them is the harness's own.
+   * Over the MERGED claims during a validator round.
+   */
+  const materializationGate = async (escalationStage: 3 | 4): Promise<FeatureState | undefined> => {
+    log('\n🔍 Verifying artifact materialization (checking if claimed files actually exist)...\n');
+
+    // The same claim set buildStageContext uses: one implementation (stage-context.ts).
+    const claimedFiles = claimedFilesFromBuilders(outputs.backend, outputs.frontend);
+
+    // Everything under .factory/ was written by the harness. A builder claiming it would satisfy
+    // this gate with the harness's own output, so such a claim is rejected before existence is
+    // even checked: it names a file the builder did not write.
+    const harnessOwned = claimsInsideFactoryDir(claimedFiles, cwd);
+    if (harnessOwned.length > 0) {
+      log('\n❌ CRITICAL: Builders claimed files inside .factory/, which only the harness writes:\n');
+      harnessOwned.forEach(p => log(`  ❌ ${p}`));
+      state = recordEscalation(
+        state,
+        escalationStage,
+        'harness',
+        'HALLUCINATION_DETECTED',
+        `${harnessOwned.length} claimed file(s) inside .factory/, which only the harness writes: ${harnessOwned.join(', ')}`,
+        { blockers: harnessOwned.map(p => `${p} is inside .factory/; a builder cannot claim a harness-written file`) }
+      );
+      return finish(state, 'ESCALATED', 'Artifact materialization failed: builders claimed files inside .factory/');
+    }
+
+    const artifactAudit = await verifyArtifactMaterialization(3, 'builders', claimedFiles, cwd);
+
+    log(generateMaterializationReport(artifactAudit));
+
+    if (!artifactAudit.allMaterialized) {
+      log('\n❌ CRITICAL: Hallucination detected!\n');
+      log(`${artifactAudit.missingArtifacts.length} claimed files do not exist on disk:`);
+      artifactAudit.missingArtifacts.forEach(f => {
+        log(`  ❌ ${f.path}`);
+      });
+
+      state = recordEscalation(
+        state,
+        escalationStage,
+        'harness',
+        'HALLUCINATION_DETECTED',
+        `${artifactAudit.missingArtifacts.length} claimed files not materialized`,
+        { missingFiles: artifactAudit.missingArtifacts.map(f => f.path) }
+      );
+      return finish(state, 'ESCALATED', 'Artifact materialization failed: builders claimed files that do not exist');
+    }
+
+    log(`\n✅ All ${claimedFiles.length} artifacts verified to exist on disk\n`);
+    return undefined;
+  };
+
+  /** The Stage 3 gate, on whatever the builders' outputs now are (merged, in a round — I-8). */
+  const stage3Gate = async (escalationStage: 3 | 4): Promise<FeatureState | undefined> => {
+    const decision = await stageGate(3, { loops: { ...lastAttempts } });
+    if (decision.canAdvance) return undefined;
+
+    state = recordEscalation(
+      state,
+      escalationStage,
+      'harness',
+      'CRITICAL_ISSUE',
+      `Stage 3 gate failed: ${decision.reason}`,
+      { blockers: decision.blockers }
+    );
+    return finish(state, 'ESCALATED', decision.reason);
+  };
+
+  /** Gate 1.5. Always a Stage 4 gate: it runs at the start of Stage 4 and in every validator round. */
+  const infrastructureGate = async (): Promise<FeatureState | undefined> => {
+    log('\n🏗️  Verifying infrastructure prerequisites (npm scripts, database, config)...\n');
+
+    // FAILS CLOSED (AC-5). A gate that could not run has verified nothing, so it is an escalation,
+    // never a warning followed by the Test Verifier. Only the audit and its judgement sit inside
+    // the try: a failure to RECORD the escalation must still reach the outer catch untouched.
+    let infrastructureAudit: InfrastructureAudit;
+    let infrastructureDecision: InfrastructureGateDecision;
+    try {
+      infrastructureAudit = await gates.auditInfrastructure(cwd);
+      infrastructureDecision = validateInfrastructureGate(infrastructureAudit);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      log(`❌ Infrastructure verification could not run: ${message}`);
+      state = recordEscalation(
+        state,
+        4,
+        'harness',
+        'INFRASTRUCTURE_FAILURE',
+        `Infrastructure verification could not run: ${message}`,
+        { remediation: 'Fix whatever stopped the infrastructure audit from running, then re-run the feature.' }
+      );
+      return finish(state, 'ESCALATED', `Infrastructure verification error: ${message}`);
+    }
+
+    log(generateInfrastructureReport(infrastructureAudit));
+
+    if (!infrastructureDecision.canAdvance) {
+      log('\n❌ CRITICAL: Infrastructure prerequisites missing!\n');
+      log(`Blockers:`);
+      infrastructureDecision.blockers.forEach(b => {
+        log(`  ❌ ${b}`);
+      });
+      log(`\nRequired fixes:`);
+      log(infrastructureDecision.remediation);
+
+      state = recordEscalation(
+        state,
+        4,
+        'harness',
+        'INFRASTRUCTURE_FAILURE',
+        `Infrastructure verification failed: ${infrastructureDecision.reason}`,
+        {
+          blockers: infrastructureDecision.blockers,
+          remediation: infrastructureDecision.remediation
+        }
+      );
+      return finish(state, 'ESCALATED', `Infrastructure not ready: ${infrastructureDecision.blockers[0]}`);
+    }
+
+    // Non-blocking, but never dropped: each warning becomes an IMPORTANT finding (AC-17).
+    recordFindings(4, 'gate-1.5', infrastructureDecision.warnings);
+
+    log(`\n✅ Infrastructure ready: All prerequisites verified\n`);
+    return undefined;
+  };
+
+  /**
+   * Gate 2, evaluation `round`: 0 right after the Test Verifier, N in validator round N — judged
+   * against `.factory/baseline.json` for round 0 and the run's first record afterwards (D-12).
+   */
+  const executionGate = async (round: number): Promise<FeatureState | undefined> => {
+    log('\n🔍 Verifying test execution (ensuring tests actually ran and passed 100%)...\n');
+
+    // Outside the try: an untrustworthy baseline must escalate the run, never read as "none".
+    const referenceCount = gate2Reference(round);
+
+    // FAILS CLOSED (AC-6, AC-7). A Gate 2 that could not run escalates; it never hands an
+    // unverified build to the Validator for "human review" to catch.
+    let executionAudit: ExecutionAudit;
+    let executionDecision: ExecutionGateDecision;
+    try {
+      executionAudit = await gates.auditExecution(cwd);
+      executionDecision = validateExecutionGate(executionAudit);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      log(`❌ Execution verification could not run: ${message}`);
+      state = recordEscalation(
+        state,
+        4,
+        'harness',
+        'EXECUTION_FAILURE',
+        `Execution verification could not run: ${message}`,
+        { remediation: 'Fix whatever stopped the execution audit from running, then re-run the feature.' }
+      );
+      return finish(state, 'ESCALATED', `Execution verification error: ${message}`);
+    }
+
+    log(generateExecutionReport(executionAudit));
+
+    // Every evaluation is recorded — a blocking one too, so the run's record shows what Gate 2
+    // actually counted.
+    recordGate2(round, executionDecision, referenceCount);
+
+    if (!executionDecision.canAdvance) {
+      log('\n❌ CRITICAL: Test execution verification failed!\n');
+      log(`Pass rate: ${(executionDecision.passRate * 100).toFixed(1)}%`);
+      log(`Blockers:`);
+      executionDecision.blockers.forEach(b => {
+        log(`  ❌ ${b}`);
+      });
+      log(`\nRemediation: ${executionDecision.remediation}`);
+
+      state = recordEscalation(
+        state,
+        4,
+        'harness',
+        'EXECUTION_FAILURE',
+        `Test execution verification failed: ${executionDecision.reason}`,
+        {
+          passRate: executionDecision.passRate,
+          blockers: executionDecision.blockers,
+          failingTests: executionAudit.failedTests,
+          buildErrors: executionAudit.buildErrors
+        }
+      );
+      return finish(state, 'ESCALATED', `Test execution failed: ${executionDecision.blockers[0]}`);
+    }
+
+    // Skipped/todo tests and skipped build/dev checks: non-blocking, recorded (I-10).
+    recordFindings(4, 'gate-2', executionDecision.warnings);
+
+    log(`\n✅ Execution checks passed: every test that ran passed; no build or dev-server failure\n`);
+    return undefined;
   };
 
   try {
@@ -360,7 +759,8 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
     if (options.preSuppliedSpec) {
       phase('Stages 1-2: Pre-supplied spec');
 
-      const acceptance = await acceptFeatureSpec(options.preSuppliedSpec, cwd);
+      // Into the run dir, where the builders' prompts point (I-11).
+      const acceptance = await acceptFeatureSpec(options.preSuppliedSpec, cwd, artifactDir);
 
       if (!acceptance.accepted) {
         // Deliberately NOT falling back to running stages 1-2 ourselves. A spec that fails the
@@ -395,8 +795,7 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
       const researcherOutput = await invokeAgent({
         stage: 1,
         agent: '01-researcher',
-        prompt: `Analyze the codebase for feature: "${options.featureDescription}"`,
-        maxAttempts: 1
+        prompt: researcherPrompt(promptCtx)
       });
 
       // Validate output schema
@@ -428,7 +827,7 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
       state = commit(recordAgentStep(state, 1, '01-researcher', 'PASS', researcherOutput));
 
       // Check Stage 1 gate
-      const stage1Decision = await checkStageGate(1, cwd, outputs);
+      const stage1Decision = await stageGate(1);
       if (!stage1Decision.canAdvance) {
         state = recordEscalation(
           state,
@@ -454,8 +853,7 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
       const storyOutput = await invokeAgent({
         stage: 2,
         agent: '02-story-writer',
-        prompt: `Write the user story for: "${options.featureDescription}".\n\nThe Researcher Report is at ${artifactDir}/RESEARCHER_REPORT.md — read it first.\n\nWrite your USER_STORY.md into artifacts[].content; the harness will persist it for you.`,
-        maxAttempts: 1
+        prompt: storyPrompt(promptCtx)
       });
 
       const storyValidation = validateOutputSchema(2, '02-story-writer', storyOutput);
@@ -485,7 +883,7 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
       persist({ story: storyOutput });   // <- the Spec Writer must be able to READ this
       state = commit(recordAgentStep(state, 2, '02-story-writer', 'PASS', storyOutput));
 
-      if (!(await checkpoint('CHECKPOINT 1: Approve the story', 2, storyOutput.details.summary))) {
+      if (!(await checkpoint(CHECKPOINTS.STORY, storyOutput.details.summary))) {
         return finish(state, 'ESCALATED', 'Story not approved');
       }
 
@@ -493,8 +891,7 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
       const specOutput = await invokeAgent({
         stage: 2,
         agent: '03-spec-writer',
-        prompt: `Write the technical brief for the approved user story.\n\nUpstream documents are in ${artifactDir}/ — RESEARCHER_REPORT.md and USER_STORY.md. Read BOTH before you start; the acceptance criteria in the story are what the builders will be graded against, so do not invent them.\n\nWrite your TECHNICAL_BRIEF.md and FILE_LIST.md into artifacts[].content.`,
-        maxAttempts: 1
+        prompt: specPrompt(promptCtx)
       });
 
       const specValidation = validateOutputSchema(2, '03-spec-writer', specOutput);
@@ -525,21 +922,22 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
       state = commit(recordAgentStep(state, 2, '03-spec-writer', 'PASS', specOutput));
 
       // Check Stage 2 gate
-      const stage2Decision = await checkStageGate(2, cwd, outputs);
+      const stage2Decision = await stageGate(2);
       if (!stage2Decision.canAdvance) {
         state = recordEscalation(
           state,
           2,
           'harness',
           'CRITICAL_ISSUE',
-          `Stage 2 gate failed: ${stage2Decision.reason}`
+          `Stage 2 gate failed: ${stage2Decision.reason}`,
+          { blockers: stage2Decision.blockers }
         );
         return finish(state, 'ESCALATED', stage2Decision.reason);
       }
 
       log(`✅ Stage 2 passed: Story & Spec approved`);
 
-      if (!(await checkpoint('CHECKPOINT 2: Approve the technical brief', 2, specOutput.details.summary))) {
+      if (!(await checkpoint(CHECKPOINTS.BRIEF, specOutput.details.summary))) {
         return finish(state, 'ESCALATED', 'Technical brief not approved');
       }
 
@@ -553,282 +951,35 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
 
     phase('Stage 3: Execute');
 
-    // Backend Builder with loop-back
-    let backendLoopCount = 0;
-    let backendOutput: BackendBuilderOutput | null = null;
-    let backendPassed = false;
-    /** Carried into the next attempt's prompt — the only channel between two fresh contexts. */
-    let backendFailure: BuilderFailure | undefined;
+    const backendRun = await runBuilderLoop('backend', { phase: 'stage3' });
+    if ('finished' in backendRun) return backendRun.finished;
+    outputs.backend = backendRun.output;
 
-    while (backendLoopCount < 3 && !backendPassed) {
-      backendLoopCount++;
-      log(`Backend Builder: Attempt ${backendLoopCount}/3`);
+    // Rendered from the structured output, for the agents downstream (AC-25). Run dir only; never
+    // a claimed file — the materialization audit below sees only the builders' filesModified.
+    writeDocument('BACKEND_SUMMARY.md', renderBackendSummary(outputs.backend));
+    writeDocument('API_CONTRACT.md', renderApiContract(outputs.backend));
 
-      const candidate: BackendBuilderOutput = await invokeAgent({
-        stage: 3,
-        agent: '04-backend-builder',
-        prompt: builderPrompt('backend', backendLoopCount, backendFailure),
-        maxAttempts: 1
-      });
-
-      // A builder that declares itself blocked is believed. It is the one that just read the
-      // code; when it says it cannot proceed, that is a finding, not noise.
-      if (candidate.status === 'ESCALATE') {
-        state = recordEscalation(
-          state,
-          3,
-          '04-backend-builder',
-          'CRITICAL_ISSUE',
-          `04-backend-builder refused to build: ${candidate.details.summary}`
-        );
-        return finish(state, 'ESCALATED', `04-backend-builder declared the build blocked`);
-      }
-
-      // FAILING TESTS ARE CHECKED BEFORE THE SCHEMA, and the order is the point.
-      //
-      // validateOutputSchema treats testsFailed > 0 as a schema error ("Builder has failing
-      // tests: N") — it validates "acceptable work", not just envelope shape. So while the
-      // schema check ran first, a builder that reported a failing test was classified as having
-      // returned a malformed envelope, this branch `continue`d before reaching the analysis
-      // below, and analyzeError() in the builder loop was DEAD CODE from the day it was written.
-      //
-      // A builder that honestly reports a failing test has satisfied its output contract
-      // exactly. That is a work result with a designed remediation path, not a contract
-      // violation, and it is handled here. The schema check below still catches every genuinely
-      // malformed envelope, which is what it is for.
-      if (candidate.details.testing && candidate.details.testing.testsFailed > 0) {
-        const failedTest = candidate.details.testing.failingTests?.[0];
-
-        if (failedTest?.error) {
-          // Classify, and CARRY THE CLASSIFICATION INTO THE NEXT ATTEMPT. The state record
-          // alone is not enough: the next builder is a fresh context that cannot read it.
-          const errorAnalysis = analyzeError(failedTest.error);
-          backendFailure = { kind: 'test', error: failedTest.error };
-          state = recordLoopBack(
-            state,
-            3,
-            '04-backend-builder',
-            `${errorAnalysis.category}: ${failedTest.error}`,
-            'FAIL',
-            `Apply: ${errorAnalysis.fixClass}`
-          );
-        } else {
-          // Tests failed but the builder named none. Do not invent a diagnosis.
-          backendFailure = undefined;
-          state = recordLoopBack(
-            state,
-            3,
-            '04-backend-builder',
-            `${candidate.details.testing.testsFailed} test(s) failing, none named`,
-            'FAIL'
-          );
-        }
-        continue;
-      }
-
-      const backendValidation = validateOutputSchema(3, '04-backend-builder', candidate);
-      if (!backendValidation.valid) {
-        backendFailure = { kind: 'schema', error: backendValidation.errors[0] };
-        state = recordLoopBack(
-          state,
-          3,
-          '04-backend-builder',
-          `Output schema invalid: ${backendValidation.errors[0]}`,
-          'FAIL'
-        );
-        continue;
-      }
-
-      // Backend tests passed
-      backendOutput = candidate;
-      state = commit(recordAgentStep(state, 3, '04-backend-builder', 'PASS', candidate));
-      backendPassed = true;
-    }
-
-    if (!backendPassed || !backendOutput) {
-      state = recordEscalation(
-        state,
-        3,
-        '04-backend-builder',
-        'MAX_LOOPS',
-        `Backend builder exceeded max attempts (${backendLoopCount})`,
-        { loopCount: backendLoopCount }
-      );
-      return finish(state, 'ESCALATED', 'Backend builder max loops exceeded');
-    }
-
-    log(`✅ Backend builder passed (${backendLoopCount === 1 ? 'first try' : `after ${backendLoopCount} attempts`})`);
-    const backend: BackendBuilderOutput = backendOutput;
-
-    // Frontend Builder with loop-back
-    //
-    // ...but only if the approved brief actually calls for UI. A backend-only feature is a
-    // completely ordinary thing, and the Frontend Builder's schema requires filesModified to be
-    // non-empty — so invoking it with nothing to build guarantees three loop-backs and a bogus
-    // escalation. The spec is the authority on whether there is UI work: if the Spec Writer
-    // listed no UI components and no frontend files, there is none.
-    const specFileList = outputs.spec?.details.fileList ?? [];
-    const hasUiComponents = (outputs.spec?.details.uiComponents ?? []).length > 0;
-    const hasFrontendFiles = specFileList.some(f =>
-      /\.(tsx|jsx|vue|svelte)$/.test(f.path) ||
-      /(^|\/)(components|pages|app|views|screens)\//.test(f.path)
-    );
-    const needsFrontend = hasUiComponents || hasFrontendFiles;
-
-    if (!needsFrontend) {
+    // ...the Frontend Builder only if the approved brief actually calls for UI (frontend-files.ts).
+    if (specRequiresFrontend(outputs.spec)) {
+      const frontendRun = await runBuilderLoop('frontend', { phase: 'stage3' });
+      if ('finished' in frontendRun) return frontendRun.finished;
+      outputs.frontend = frontendRun.output;
+      writeDocument('FRONTEND_SUMMARY.md', renderFrontendSummary(outputs.frontend));
+    } else {
       log('⏭️  Frontend Builder skipped — the approved brief specifies no UI work.');
     }
-
-    let frontendLoopCount = 0;
-    let frontendOutput: FrontendBuilderOutput | null = null;
-    let frontendPassed = false;
-    /** Carried into the next attempt's prompt — the only channel between two fresh contexts. */
-    let frontendFailure: BuilderFailure | undefined;
-
-    while (needsFrontend && frontendLoopCount < 3 && !frontendPassed) {
-      frontendLoopCount++;
-      log(`Frontend Builder: Attempt ${frontendLoopCount}/3`);
-
-      const candidate: FrontendBuilderOutput = await invokeAgent({
-        stage: 3,
-        agent: '05-frontend-builder',
-        prompt: builderPrompt('frontend', frontendLoopCount, frontendFailure),
-        maxAttempts: 1
-      });
-
-      // A builder that declares itself blocked is believed. It is the one that just read the
-      // code; when it says it cannot proceed, that is a finding, not noise.
-      if (candidate.status === 'ESCALATE') {
-        state = recordEscalation(
-          state,
-          3,
-          '05-frontend-builder',
-          'CRITICAL_ISSUE',
-          `05-frontend-builder refused to build: ${candidate.details.summary}`
-        );
-        return finish(state, 'ESCALATED', `05-frontend-builder declared the build blocked`);
-      }
-
-      // Failing tests before schema — see the Backend Builder above for why the order matters.
-      if (candidate.details.testing && candidate.details.testing.testsFailed > 0) {
-        const failedTest = candidate.details.testing.failingTests?.[0];
-
-        if (failedTest?.error) {
-          const errorAnalysis = analyzeError(failedTest.error);
-          frontendFailure = { kind: 'test', error: failedTest.error };
-          state = recordLoopBack(
-            state,
-            3,
-            '05-frontend-builder',
-            `${errorAnalysis.category}: ${failedTest.error}`,
-            'FAIL',
-            `Apply: ${errorAnalysis.fixClass}`
-          );
-        } else {
-          // Tests failed but the builder named none. Do not invent a diagnosis.
-          frontendFailure = undefined;
-          state = recordLoopBack(
-            state,
-            3,
-            '05-frontend-builder',
-            `${candidate.details.testing.testsFailed} test(s) failing, none named`,
-            'FAIL'
-          );
-        }
-        continue;
-      }
-
-      const frontendValidation = validateOutputSchema(3, '05-frontend-builder', candidate);
-      if (!frontendValidation.valid) {
-        frontendFailure = { kind: 'schema', error: frontendValidation.errors[0] };
-        state = recordLoopBack(
-          state,
-          3,
-          '05-frontend-builder',
-          `Output schema invalid: ${frontendValidation.errors[0]}`,
-          'FAIL'
-        );
-        continue;
-      }
-
-      frontendOutput = candidate;
-      state = commit(recordAgentStep(state, 3, '05-frontend-builder', 'PASS', candidate));
-      frontendPassed = true;
-    }
-
-    if (needsFrontend && (!frontendPassed || !frontendOutput)) {
-      state = recordEscalation(
-        state,
-        3,
-        '05-frontend-builder',
-        'MAX_LOOPS',
-        `Frontend builder exceeded max attempts (${frontendLoopCount})`,
-        { loopCount: frontendLoopCount }
-      );
-      return finish(state, 'ESCALATED', 'Frontend builder max loops exceeded');
-    }
-
-    if (needsFrontend) {
-      log(`✅ Frontend builder passed (${frontendLoopCount === 1 ? 'first try' : `after ${frontendLoopCount} attempts`})`);
-    }
-    const frontend: FrontendBuilderOutput | null = frontendOutput;
-    outputs.backend = backend;
-    if (frontend) outputs.frontend = frontend;
 
     // ========================================================================
     // ARTIFACT MATERIALIZATION CHECK (Reality Verification)
     // ========================================================================
     // Prevent hallucinations: verify that claimed files actually exist on disk
 
-    log('\n🔍 Verifying artifact materialization (checking if claimed files actually exist)...\n');
+    const stage3Materialization = await materializationGate(3);
+    if (stage3Materialization) return stage3Materialization;
 
-    const claimedFiles: ArtifactRef[] = [
-      ...(backend.details.filesModified ?? []).map(f => ({
-        name: f.path.split('/').pop() ?? f.path, path: f.path, description: `Backend Builder: ${f.description}`
-      })),
-      ...(frontend?.details.filesModified ?? []).map(f => ({
-        name: f.path.split('/').pop() ?? f.path, path: f.path, description: `Frontend Builder: ${f.description}`
-      }))
-    ];
-
-    const artifactAudit = await verifyArtifactMaterialization(3, 'builders', claimedFiles, cwd);
-
-    log(generateMaterializationReport(artifactAudit));
-
-    if (!artifactAudit.allMaterialized) {
-      log('\n❌ CRITICAL: Hallucination detected!\n');
-      log(`${artifactAudit.missingArtifacts.length} claimed files do not exist on disk:`);
-      artifactAudit.missingArtifacts.forEach(f => {
-        log(`  ❌ ${f.path}`);
-      });
-
-      state = recordEscalation(
-        state,
-        3,
-        'harness',
-        'HALLUCINATION_DETECTED',
-        `${artifactAudit.missingArtifacts.length} claimed files not materialized`,
-        { missingFiles: artifactAudit.missingArtifacts.map(f => f.path) }
-      );
-      return finish(state, 'ESCALATED', 'Artifact materialization failed: builders claimed files that do not exist');
-    }
-
-    log(`\n✅ All ${claimedFiles.length} artifacts verified to exist on disk\n`);
-
-    // Check Stage 3 gate
-    const stage3Decision = await checkStageGate(3, cwd, outputs, {
-      loops: { backend: backendLoopCount, frontend: frontendLoopCount }
-    });
-    if (!stage3Decision.canAdvance) {
-      state = recordEscalation(
-        state,
-        3,
-        'harness',
-        'CRITICAL_ISSUE',
-        `Stage 3 gate failed: ${stage3Decision.reason}`
-      );
-      return finish(state, 'ESCALATED', stage3Decision.reason);
-    }
+    const stage3Failure = await stage3Gate(3);
+    if (stage3Failure) return stage3Failure;
 
     log(`✅ Stage 3 passed: Implementation complete`);
     state = commit(advanceToStage(state, 4));
@@ -838,81 +989,20 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
     // ========================================================================
     // Verify npm scripts, database setup, TypeScript config before running tests
 
-    log('\n🏗️  Verifying infrastructure prerequisites (npm scripts, database, config)...\n');
-
-    let infrastructureAudit: InfrastructureAudit | null = null;
-    try {
-      infrastructureAudit = await auditInfrastructure(cwd);
-      log(generateInfrastructureReport(infrastructureAudit));
-
-      const infrastructureDecision = validateInfrastructureGate(infrastructureAudit);
-
-      if (!infrastructureDecision.canAdvance) {
-        log('\n❌ CRITICAL: Infrastructure prerequisites missing!\n');
-        log(`Blockers:`);
-        infrastructureDecision.blockers.forEach(b => {
-          log(`  ❌ ${b}`);
-        });
-        log(`\nRequired fixes:`);
-        log(infrastructureDecision.remediation);
-
-        state = recordEscalation(
-          state,
-          4,
-          'harness',
-          'INFRASTRUCTURE_FAILURE',
-          `Infrastructure verification failed: ${infrastructureDecision.reason}`,
-          {
-            blockers: infrastructureDecision.blockers,
-            remediation: infrastructureDecision.remediation
-          }
-        );
-        return finish(state, 'ESCALATED', `Infrastructure not ready: ${infrastructureDecision.blockers[0]}`);
-      }
-
-      if (infrastructureDecision.warnings.length > 0) {
-        log(`\n⚠️  Warnings (non-blocking):`);
-        infrastructureDecision.warnings.forEach(w => {
-          log(`  ⚠️  ${w}`);
-        });
-      }
-
-      log(`\n✅ Infrastructure ready: All prerequisites verified\n`);
-    } catch (err: any) {
-      log(`⚠️  Could not run infrastructure verification: ${err.message}`);
-      log('Continuing to Test Verifier (manual infrastructure check recommended)');
-      state = recordLoopBack(
-        state,
-        4,
-        'harness',
-        `Infrastructure verification error: ${err.message}`,
-        'WARN'
-      );
-    }
+    const infrastructureFailure = await infrastructureGate();
+    if (infrastructureFailure) return infrastructureFailure;
 
     // ========================================================================
-    // STAGE 4: VERIFY (Test Verifier + Validator with regression detection)
+    // STAGE 4: VERIFY (Test Verifier → Gate 2 → Validator, with validator rounds)
     // ========================================================================
 
     phase('Stage 4: Verify');
-
-    // Capture baseline test state before verification
-    // testing has no `totalTests` field — it is {testsWritten, testsPassed, testsFailed}.
-    // Reading a non-existent field made this baseline {0, 0}, so detectRegressions compared
-    // `after.passingTests < 0` and could never fire. Regression detection was dead.
-    const backendTesting = backendOutput.details.testing;
-    const frontendTesting = frontendOutput?.details.testing;
-    const testBaselineBefore = {
-      totalTests: (backendTesting?.testsWritten ?? 0) + (frontendTesting?.testsWritten ?? 0),
-      passingTests: (backendTesting?.testsPassed ?? 0) + (frontendTesting?.testsPassed ?? 0)
-    };
 
     // Test Verifier
     const testOutput = await invokeAgent({
       stage: 4,
       agent: '06-test-verifier',
-      prompt: `Write acceptance tests for implemented feature`,
-      maxAttempts: 2
+      prompt: testVerifierPrompt(promptCtx)
     });
 
     const testValidation = validateOutputSchema(4, '06-test-verifier', testOutput);
@@ -927,128 +1017,196 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
       return finish(state, 'ESCALATED', 'Test verifier schema validation failed');
     }
 
+    // The Test Verifier's verdict is believed (AC-19). Anything but a clean PASS — status FAIL,
+    // LOOP_BACK (I-6) or ESCALATE, a failing test, or a CRITICAL issue — stops here: the step is
+    // not recorded PASS, Gate 2 does not run, and the Validator is never asked to bless it.
+    const testVerdict = testVerifierVerdict(testOutput);
+    if (!testVerdict.passed) {
+      state = commit(
+        recordAgentStep(state, 4, '06-test-verifier', testOutput.status === 'ESCALATE' ? 'ESCALATED' : 'FAIL', testOutput)
+      );
+      state = recordEscalation(
+        state,
+        4,
+        '06-test-verifier',
+        'CRITICAL_ISSUE',
+        `06-test-verifier did not pass: ${testVerdict.reasons.join('; ')}`,
+        { failingTests: testVerdict.failingCriteria, issues: testVerdict.issues }
+      );
+      return finish(state, 'ESCALATED', `06-test-verifier did not pass: ${testVerdict.reasons[0]}`);
+    }
+
+    outputs.test = testOutput;
+    // Rendered by the harness from the structured output the gate judges (I-5). Run dir only.
+    writeDocument('TEST_REPORT.md', renderTestReport(testOutput));
     state = commit(recordAgentStep(state, 4, '06-test-verifier', 'PASS', testOutput));
 
     // ========================================================================
-    // EXECUTION VERIFICATION GATE (Reality Check for Tests)
+    // GATE 2 → VALIDATOR, AND THE BOUNDED VALIDATOR LOOP-BACK (D-9)
     // ========================================================================
-    // Prevent test hallucinations: verify tests actually ran and passed
+    // Round 0 is the evaluation right after the Test Verifier. A fixable CRITICAL issue the
+    // Validator pins to a builder's file sends that builder back, then Gates 1, 3, 1.5 and 2
+    // re-run before the Validator is asked again — at most MAX_VALIDATOR_ROUNDS times. The run
+    // stays in Stage 4 throughout: it never claims to be back in Stage 3 (AC-33).
 
-    log('\n🔍 Verifying test execution (ensuring tests actually ran and passed 100%)...\n');
+    let round = 0;
+    for (;;) {
+      const executionFailure = await executionGate(round);
+      if (executionFailure) return executionFailure;
 
-    let executionAudit: ExecutionAudit | null = null;
-    try {
-      executionAudit = await auditExecution(cwd);
-      log(generateExecutionReport(executionAudit));
+      const validatorOutput = await invokeAgent({
+        stage: 4,
+        agent: '07-validator',
+        prompt: validatorPrompt(promptCtx)
+      });
 
-      const executionDecision = validateExecutionGate(executionAudit);
-
-      if (!executionDecision.canAdvance) {
-        log('\n❌ CRITICAL: Test execution verification failed!\n');
-        log(`Pass rate: ${(executionDecision.passRate * 100).toFixed(1)}%`);
-        log(`Blockers:`);
-        executionDecision.blockers.forEach(b => {
-          log(`  ❌ ${b}`);
-        });
-        log(`\nRemediation: ${executionDecision.remediation}`);
-
+      const validatorValidation = validateOutputSchema(4, '07-validator', validatorOutput);
+      if (!validatorValidation.valid) {
         state = recordEscalation(
           state,
           4,
-          'harness',
-          'EXECUTION_FAILURE',
-          `Test execution verification failed: ${executionDecision.reason}`,
-          {
-            passRate: executionDecision.passRate,
-            blockers: executionDecision.blockers,
-            failingTests: executionAudit.failedTests,
-            buildErrors: executionAudit.buildErrors
-          }
+          '07-validator',
+          'SCHEMA_VALIDATION',
+          `Validator output schema invalid: ${validatorValidation.errors[0]}`
         );
-        return finish(state, 'ESCALATED', `Test execution failed: ${executionDecision.blockers[0]}`);
+        return finish(state, 'ESCALATED', 'Validator schema validation failed');
       }
 
-      log(`\n✅ All execution checks passed: Tests 100% passing, Build compiles, Dev server clean\n`);
-    } catch (err: any) {
-      log(`⚠️  Could not run execution verification: ${err.message}`);
-      log('Continuing to Validator (human review will catch issues)');
-      state = recordLoopBack(
-        state,
-        4,
-        'harness',
-        `Execution verification error: ${err.message}`,
-        'WARN'
+      // The Validator's own document goes into the run dir now — the stage gate no longer persists.
+      persist({ validator: validatorOutput });
+      outputs.validator = validatorOutput;
+
+      const validatorIssues: ValidatorIssue[] = Array.isArray(validatorOutput.details.issues)
+        ? validatorOutput.details.issues
+        : [];
+
+      // ESCALATE is believed, and is never recorded PASS (AC-20).
+      if (validatorOutput.status === 'ESCALATE') {
+        state = commit(recordAgentStep(state, 4, '07-validator', 'ESCALATED', validatorOutput));
+        state = recordEscalation(
+          state,
+          4,
+          '07-validator',
+          'CRITICAL_ISSUE',
+          `07-validator escalated: ${validatorOutput.details.summary}`,
+          { issues: validatorIssues.map(i => i.message) }
+        );
+        return finish(state, 'ESCALATED', '07-validator declared the work blocked');
+      }
+
+      const critical = criticalIssues(validatorIssues);
+
+      if (critical.length === 0) {
+        // FAIL or LOOP_BACK with no CRITICAL issue to act on: the Validator says the work is not
+        // acceptable but names nothing fixable. Fail closed (I-6).
+        if (validatorOutput.status !== 'PASS') {
+          state = commit(recordAgentStep(state, 4, '07-validator', 'FAIL', validatorOutput));
+          state = recordEscalation(
+            state,
+            4,
+            '07-validator',
+            'CRITICAL_ISSUE',
+            `07-validator reported ${validatorOutput.status} with no CRITICAL issue: ${validatorOutput.details.summary}`,
+            { issues: validatorIssues.map(i => i.message) }
+          );
+          return finish(state, 'ESCALATED', `07-validator reported ${validatorOutput.status}`);
+        }
+
+        state = commit(recordAgentStep(state, 4, '07-validator', 'PASS', validatorOutput));
+        recordFindings(
+          4,
+          '07-validator',
+          validatorIssues
+            .filter(i => i.severity === 'IMPORTANT')
+            .map(i => `${i.file ? `[${i.file}${i.line !== undefined ? `:${i.line}` : ''}] ` : ''}${i.message}`)
+        );
+        break;
+      }
+
+      state = commit(recordAgentStep(state, 4, '07-validator', 'FAIL', validatorOutput));
+
+      // The bound (AC-32): the Validator has now judged MAX_VALIDATOR_ROUNDS rounds of fixes.
+      if (round === MAX_VALIDATOR_ROUNDS) {
+        state = recordEscalation(
+          state,
+          4,
+          '07-validator',
+          'MAX_LOOPS',
+          `${critical.length} CRITICAL issue(s) remain after ${MAX_VALIDATOR_ROUNDS} rounds`,
+          { issues: critical.map(describeIssue), loopCount: round }
+        );
+        return finish(state, 'ESCALATED', `CRITICAL issues remain after ${MAX_VALIDATOR_ROUNDS} rounds`);
+      }
+
+      const routing = routeCriticalIssues(
+        critical,
+        {
+          backend: (outputs.backend?.details.filesModified ?? []).map(f => f.path),
+          frontend: (outputs.frontend?.details.filesModified ?? []).map(f => f.path)
+        },
+        cwd
       );
+
+      // Anything the harness cannot hand to an owning builder goes to a human — all of it, with
+      // the reason, and before any builder spends a round on the part that could be routed (AC-31).
+      if (routing.unroutable.length > 0) {
+        const reasons = new Map<ValidatorIssue, UnroutableReason>(routing.unroutable.map(u => [u.issue, u.reason]));
+        state = recordEscalation(
+          state,
+          4,
+          '07-validator',
+          'CRITICAL_ISSUE',
+          `${routing.unroutable.length} of ${critical.length} CRITICAL issue(s) cannot be routed to a builder`,
+          {
+            issues: critical.map(i =>
+              reasons.has(i) ? `${describeIssue(i)} (unroutable: ${reasons.get(i)})` : describeIssue(i)
+            )
+          }
+        );
+        return finish(state, 'ESCALATED', 'Validator CRITICAL issues cannot be routed to a builder');
+      }
+
+      round++;
+      state = commit(recordValidatorRound(state, round));
+      log(`\n↩️  Validator round ${round} of ${MAX_VALIDATOR_ROUNDS}: ${critical.length} CRITICAL issue(s) back to their builders\n`);
+
+      if (routing.backend.length > 0) {
+        const fix = await runBuilderLoop('backend', { phase: 'validator-round', round, issues: routing.backend });
+        if ('finished' in fix) return fix.finished;
+        outputs.backend = outputs.backend ? mergeBuilderOutput(outputs.backend, fix.output) : fix.output;
+        writeDocument('BACKEND_SUMMARY.md', renderBackendSummary(outputs.backend));
+        writeDocument('API_CONTRACT.md', renderApiContract(outputs.backend));
+      }
+
+      if (routing.frontend.length > 0) {
+        const fix = await runBuilderLoop('frontend', { phase: 'validator-round', round, issues: routing.frontend });
+        if ('finished' in fix) return fix.finished;
+        outputs.frontend = outputs.frontend ? mergeBuilderOutput(outputs.frontend, fix.output) : fix.output;
+        writeDocument('FRONTEND_SUMMARY.md', renderFrontendSummary(outputs.frontend));
+      }
+
+      // The round is judged by the same gates as the original build, over the merged outputs.
+      const roundMaterialization = await materializationGate(4);
+      if (roundMaterialization) return roundMaterialization;
+
+      const roundStage3 = await stage3Gate(4);
+      if (roundStage3) return roundStage3;
+
+      const roundInfrastructure = await infrastructureGate();
+      if (roundInfrastructure) return roundInfrastructure;
     }
 
-    // Validator
-    const validatorOutput = await invokeAgent({
-      stage: 4,
-      agent: '07-validator',
-      prompt: `Validate implementation against approved story and spec`,
-      maxAttempts: 2
-    });
-
-    const validatorValidation = validateOutputSchema(4, '07-validator', validatorOutput);
-    if (!validatorValidation.valid) {
-      state = recordEscalation(
-        state,
-        4,
-        '07-validator',
-        'SCHEMA_VALIDATION',
-        `Validator output schema invalid: ${validatorValidation.errors[0]}`
-      );
-      return finish(state, 'ESCALATED', 'Validator schema validation failed');
-    }
-
-    // Check for critical validation issues
-    const criticalIssues = validatorOutput.details.issues?.filter((i: { severity: string }) => i.severity === 'CRITICAL') || [];
-    if (criticalIssues.length > 0) {
-      state = recordEscalation(
-        state,
-        4,
-        '07-validator',
-        'CRITICAL_ISSUE',
-        `${criticalIssues.length} critical validation issues found`,
-        { issues: criticalIssues.map((i: { message: string }) => i.message) }
-      );
-      // Loop back to Stage 3 for fixes
-      state = commit(advanceToStage(state, 3));
-      log(`⚠️  Looping back to Stage 3: Fix critical issues`);
-      // In a real scenario, would loop back. For now, escalate.
-      return finish(state, 'ESCALATED', 'Critical validation issues require Stage 3 fixes');
-    }
-
-    state = commit(recordAgentStep(state, 4, '07-validator', 'PASS', validatorOutput));
-
-    // Regression detection
-    const testBaselineAfter = {
-      totalTests: testOutput.details.testExecution?.totalTests || 0,
-      passingTests: testOutput.details.testExecution?.passed || 0
-    };
-
-    const regressions = detectRegressions(testBaselineBefore, testBaselineAfter);
-    if (regressions.length > 0) {
-      state = recordEscalation(
-        state,
-        4,
-        'harness',
-        'CRITICAL_ISSUE',
-        `${regressions.length} regressions detected: previously passing tests now failing`,
-        { regressions }
-      );
-      return finish(state, 'ESCALATED', 'Regressions detected');
-    }
-
-    // Check Stage 4 gate
-    const stage4Decision = await checkStageGate(4, cwd, outputs);
+    // Check Stage 4 gate. "No Regressions" judges the harness's own latest Gate 2 count against
+    // its reference — never anything the Validator says about regressions (AC-22).
+    const stage4Decision = await stageGate(4, { harness: latestGate2() });
     if (!stage4Decision.canAdvance) {
       state = recordEscalation(
         state,
         4,
         'harness',
         'CRITICAL_ISSUE',
-        `Stage 4 gate failed: ${stage4Decision.reason}`
+        `Stage 4 gate failed: ${stage4Decision.reason}`,
+        { blockers: stage4Decision.blockers }
       );
       return finish(state, 'ESCALATED', stage4Decision.reason);
     }
@@ -1069,8 +1227,7 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
     const consolidatorOutput = await invokeAgent({
       stage: 5,
       agent: '08-feature-consolidator',
-      prompt: `Consolidate feature execution and extract reusable patterns`,
-      maxAttempts: 1
+      prompt: consolidatorPrompt(promptCtx)
     });
 
     const consolidatorValidation = validateOutputSchema(5, '08-feature-consolidator', consolidatorOutput);
@@ -1085,10 +1242,13 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
       return finish(state, 'ESCALATED', 'Consolidator schema validation failed');
     }
 
+    // Into the run dir, like every other read-only agent's documents — never the project root.
+    persist({ consolidator: consolidatorOutput });
+    outputs.consolidator = consolidatorOutput;
     state = commit(recordAgentStep(state, 5, '08-feature-consolidator', 'PASS', consolidatorOutput));
 
-    // Check Stage 5 gate
-    const stage5Decision = await checkStageGate(5, cwd, outputs, { knowledgeStored: true });
+    // Check Stage 5 gate (logged only in A-1; its findings are still recorded)
+    const stage5Decision = await stageGate(5, { knowledgeStored: true });
     if (!stage5Decision.canAdvance) {
       log(`⚠️  Stage 5 gate incomplete: ${stage5Decision.reason}`);
     }
@@ -1131,6 +1291,56 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
 }
 
 /**
+ * The Test Verifier's verdict (AC-19, I-6). PASS only when the agent says PASS, no test failed,
+ * and it raised no CRITICAL issue. Pure: reads the output, decides, names why.
+ */
+function testVerifierVerdict(output: any): {
+  passed: boolean;
+  reasons: string[];
+  failingCriteria: string[];
+  issues: string[];
+} {
+  const details = output?.details ?? {};
+  const failed: number = details.testExecution?.failed ?? 0;
+  const issues: Array<{ acId?: string; severity?: string; issue?: string }> = Array.isArray(details.issues)
+    ? details.issues
+    : [];
+  const critical = issues.filter(i => i.severity === 'CRITICAL');
+
+  const reasons: string[] = [];
+  if (output?.status !== 'PASS') reasons.push(`status ${output?.status}`);
+  if (failed > 0) reasons.push(`${failed} test(s) failed`);
+  if (critical.length > 0) reasons.push(`${critical.length} CRITICAL issue(s)`);
+
+  const results: Array<{ acId?: string; status?: string }> = details.acceptanceTests?.results ?? [];
+  const failingCriteria = [
+    ...results.filter(r => r.status !== 'TESTED' && r.status !== 'NOT_COVERABLE').map(r => `${r.acId} (${r.status})`),
+    ...(details.testExecution?.failingTests ?? []).map((t: { name: string; error: string }) => `${t.name}: ${t.error}`)
+  ];
+
+  return {
+    passed: reasons.length === 0,
+    reasons,
+    failingCriteria,
+    issues: issues.map(i => `[${i.severity}] ${i.acId}: ${i.issue}`)
+  };
+}
+
+type BuilderHalf = 'backend' | 'frontend';
+type BuilderOutputFor<H extends BuilderHalf> = H extends 'backend' ? BackendBuilderOutput : FrontendBuilderOutput;
+
+const BUILDER_AGENT: Readonly<Record<BuilderHalf, BuilderAgent>> = {
+  backend: '04-backend-builder',
+  frontend: '05-frontend-builder'
+};
+
+/** Which phase a builder loop runs in: the Stage 3 build, or validator round `round` with its routed issues. */
+type BuilderRun = { phase: 'stage3' } | { phase: 'validator-round'; round: number; issues: ValidatorIssue[] };
+
+/** What the harness itself measured, for the Stage 4 gate (D-5). Never supplied by an agent. */
+type HarnessMeasurements = NonNullable<BuildStageContextInput['harness']>;
+
+/**
  * Helper: Check stage gate.
  *
  * The context is DERIVED — from what the agents produced and what is on disk. It used to be
@@ -1142,54 +1352,27 @@ async function checkStageGate(
   stage: number,
   cwd: string,
   outputs: StageOutputs,
-  extra?: { loops?: { backend?: number; frontend?: number }; knowledgeStored?: boolean }
+  extra: {
+    loops?: { backend?: number; frontend?: number };
+    knowledgeStored?: boolean;
+    artifactDir: string;
+    harness?: HarnessMeasurements;
+  }
 ): Promise<StageAdvancementDecision> {
-  // Read-only agents cannot write their own documents — they have no Write tool. Persist what
-  // they returned so the gates have something real to read. Builders are excluded: they must
-  // write their own code, or the materialization gate would be checking the harness's work.
-  persistArtifacts(outputs, cwd);
-
+  // This used to call persistArtifacts(outputs, cwd) with NO run directory — so any document not
+  // already persisted (the Validator's, the Consolidator's) would have been written into the
+  // project root. Every agent's documents are now persisted once, right after it returns, into
+  // the run directory. A gate only reads.
   const contract = stageContracts[stage];
   const context = buildStageContext({
     stage,
     cwd,
     outputs,
-    loops: extra?.loops,
-    knowledgeStored: extra?.knowledgeStored
+    loops: extra.loops,
+    knowledgeStored: extra.knowledgeStored,
+    artifactDir: extra.artifactDir,
+    harness: extra.harness
   });
 
   return canAdvanceStage(stage, contract, context);
 }
-
-/**
- * Helper: Detect regressions
- */
-function detectRegressions(
-  before: { totalTests: number; passingTests: number },
-  after: { totalTests: number; passingTests: number }
-): string[] {
-  const regressions: string[] = [];
-
-  // If previously passing tests are now failing
-  if (after.passingTests < before.passingTests) {
-    const failedCount = before.passingTests - after.passingTests;
-    regressions.push(`${failedCount} previously passing tests now failing`);
-  }
-
-  return regressions;
-}
-
-/**
- * Helper: Get stage name for folder
- */
-function getStageNameLowerCase(stage: number): string {
-  const names = {
-    1: 'discover',
-    2: 'plan',
-    3: 'execute',
-    4: 'verify',
-    5: 'deliver'
-  };
-  return names[stage as keyof typeof names] || 'unknown';
-}
-

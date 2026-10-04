@@ -63,6 +63,48 @@ export interface ErrorDetail {
 }
 
 // ============================================================================
+// SECURITY: tri-state checks and the brief's declared surface (AC-67, AC-68)
+// ============================================================================
+
+/** The five checks every Validator reports. */
+export const SECURITY_CHECKS = [
+  'authImplemented',
+  'inputValidated',
+  'noHardcodedSecrets',
+  'sqlInjectionProtected',
+  'xssProtected'
+] as const;
+export type SecurityCheckName = typeof SECURITY_CHECKS[number];
+
+/**
+ * true = checked and protected; false = a finding; 'not_applicable' = the feature has no such
+ * surface. The third value is only accepted when earned (see harness/security-checks.ts).
+ */
+export type SecurityCheckValue = boolean | 'not_applicable';
+
+export type SecuritySurfaceName = 'auth' | 'userInput' | 'secrets' | 'sqlDatabase' | 'htmlRendering';
+
+export const SECURITY_SURFACES: readonly SecuritySurfaceName[] = [
+  'auth',
+  'userInput',
+  'secrets',
+  'sqlDatabase',
+  'htmlRendering'
+];
+
+/** Which surface a check is about. A check may be not_applicable only if its surface is ABSENT. */
+export const SECURITY_CHECK_SURFACE: Readonly<Record<SecurityCheckName, SecuritySurfaceName>> = {
+  authImplemented: 'auth',
+  inputValidated: 'userInput',
+  noHardcodedSecrets: 'secrets',
+  sqlInjectionProtected: 'sqlDatabase',
+  xssProtected: 'htmlRendering'
+};
+
+/** The Spec Writer's declaration of which security surfaces the feature has. */
+export type SecuritySurfaceDeclaration = Record<SecuritySurfaceName, 'PRESENT' | 'ABSENT'> & { notes?: string };
+
+// ============================================================================
 // STAGE 1: RESEARCHER OUTPUT
 // ============================================================================
 
@@ -225,6 +267,13 @@ export interface SpecWriterOutput extends FeatureFactoryAgentOutput {
       integrationTests: string[];
       e2eTests: string[];
     };
+
+    /**
+     * Which security surfaces the feature has. Required by the SDK schema; optional here so an
+     * older or hand-built spec still type-checks. Absent means every surface is PRESENT, so no
+     * security check can be "not_applicable" (fail closed).
+     */
+    securitySurface?: SecuritySurfaceDeclaration;
   };
 }
 
@@ -477,12 +526,9 @@ export interface ValidatorOutput extends FeatureFactoryAgentOutput {
       issues?: string[];
     };
 
-    security: {
-      authImplemented: boolean;
-      inputValidated: boolean;
-      noHardcodedSecrets: boolean;
-      sqlInjectionProtected: boolean;
-      xssProtected: boolean;
+    security: Record<SecurityCheckName, SecurityCheckValue> & {
+      /** Required, non-blank, for every check reported as 'not_applicable'. */
+      notApplicableReasons?: Partial<Record<SecurityCheckName, string>>;
       issues?: string[];
     };
 
@@ -501,6 +547,8 @@ export interface ValidatorOutput extends FeatureFactoryAgentOutput {
     };
   };
 }
+
+export type ValidatorIssue = ValidatorOutput['details']['issues'][number];
 
 // ============================================================================
 // STAGE 5: FEATURE CONSOLIDATOR OUTPUT
@@ -582,6 +630,13 @@ export function validateOutputSchema(
 ): { valid: boolean; errors: string[] } {
   const errors: string[] = [];
 
+  // Never throw (AC-16). An agent can return anything; a validator that crashes on a malformed
+  // envelope turns a schema failure into an orchestration crash (escalated MANUAL), which hides
+  // the real cause.
+  if (output === null || typeof output !== 'object') {
+    return { valid: false, errors: ['output is not an object'] };
+  }
+
   // Check base schema
   if (!output.stage || output.stage !== stage) {
     errors.push(`stage mismatch: expected ${stage}, got ${output.stage}`);
@@ -596,7 +651,9 @@ export function validateOutputSchema(
     errors.push(`invalid status: ${output.status}`);
   }
   if (!output.details || typeof output.details !== 'object') {
+    // Everything below reads output.details.*; stop here rather than dereference it.
     errors.push('details missing or not object');
+    return { valid: false, errors };
   }
   if (!output.details.summary || typeof output.details.summary !== 'string') {
     errors.push('details.summary missing or not string');
