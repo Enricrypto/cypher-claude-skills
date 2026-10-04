@@ -129,6 +129,44 @@ describe('Agent Output Schema', () => {
 
       expect(result.valid).toBe(false);
     });
+
+    it('AC-16 output with no details returns a schema failure naming details and does not throw', () => {
+      const envelope = { stage: 3, agent: '04-backend-builder', timestamp: '2026-06-23T10:15:00Z', status: 'PASS' };
+      const agents: Array<[number, string]> = [
+        [1, '01-researcher'],
+        [2, '02-story-writer'],
+        [2, '03-spec-writer'],
+        [3, '04-backend-builder'],
+        [3, '05-frontend-builder'],
+        [4, '06-test-verifier'],
+        [4, '07-validator'],
+        [5, '08-feature-consolidator']
+      ];
+
+      for (const [stage, agent] of agents) {
+        // Missing details, and details that is not an object.
+        for (const details of [undefined, null, 'not an object', 42]) {
+          const output = { ...envelope, stage, agent, ...(details === undefined ? {} : { details }) };
+          let result: { valid: boolean; errors: string[] } | undefined;
+
+          expect(() => {
+            result = validateOutputSchema(stage, agent, output);
+          }).not.toThrow();
+          expect(result!.valid).toBe(false);
+          expect(result!.errors.some(e => e.includes('details'))).toBe(true);
+        }
+      }
+
+      // Not an object at all.
+      for (const output of [null, undefined, 'text', 7, true]) {
+        let result: { valid: boolean; errors: string[] } | undefined;
+        expect(() => {
+          result = validateOutputSchema(3, '04-backend-builder', output);
+        }).not.toThrow();
+        expect(result!.valid).toBe(false);
+        expect(result!.errors).toEqual(['output is not an object']);
+      }
+    });
   });
 
   describe('validateOutputSchema - Stage 1 Specific', () => {

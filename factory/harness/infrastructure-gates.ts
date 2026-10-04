@@ -34,7 +34,7 @@ import { existsSync, readFileSync } from 'fs';
  *
  * (This harness's OWN tsconfig has five comment lines, which is how we found it.)
  */
-function parseJsonc(text: string): any {
+export function parseJsonc(text: string): any {
   const withoutComments = text
     .replace(/\/\*[\s\S]*?\*\//g, '')      // block comments
     .replace(/(^|[^:"'\\])\/\/.*$/gm, '$1')  // line comments, but not inside a URL or string

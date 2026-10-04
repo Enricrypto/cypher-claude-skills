@@ -80,7 +80,13 @@ export interface SpecAcceptance {
  */
 export async function acceptFeatureSpec(
   featureSpec: FeatureSpec,
-  cwd: string
+  cwd: string,
+  /**
+   * This run's directory, relative to `cwd` (`.factory/<featureId>`). When given, the supplied
+   * documents are persisted there — where the builders' prompts point (I-11). Omitted, they go
+   * where their artifact paths say, as before.
+   */
+  artifactDir?: string
 ): Promise<SpecAcceptance> {
   const blockers: string[] = [];
 
@@ -117,7 +123,7 @@ export async function acceptFeatureSpec(
     story: featureSpec.story,
     spec: featureSpec.spec
   };
-  persistArtifacts(outputs, cwd);
+  persistArtifacts(outputs, cwd, artifactDir);
 
   // 3. Run the real gates — the same ones the orchestrator runs on its own agents.
   const stage1Ok = featureSpec.researcher

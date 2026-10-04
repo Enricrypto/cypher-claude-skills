@@ -12,11 +12,21 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 
-import { buildStageContext, countAbandonedMarkers } from '../../harness/stage-context';
+import {
+  buildStageContext,
+  claimedFilesFromBuilders,
+  claimsInsideFactoryDir,
+  countAbandonedMarkers,
+  normalisePath,
+  persistArtifacts,
+  readArtifactContents,
+  UnsafeArtifactPathError
+} from '../../harness/stage-context';
+import { ALL_SURFACES_PRESENT, backend, frontend, spec, story, testVerifier, validator } from '../fixtures/agent-outputs';
 import { canAdvanceStage, stageContracts } from '../../harness/stage-gates';
 import {
   ResearcherOutput,
@@ -469,5 +479,289 @@ describe('countAbandonedMarkers', () => {
 
   it('does not invent a passing zero for a file that does not exist', () => {
     expect(countAbandonedMarkers([{ path: 'src/ghost.ts' }], projectDir)).toBe(0);
+  });
+});
+
+describe('Stage 4 context — derived from the agents, never defaulted to a pass (AC-18, AC-21, AC-67)', () => {
+  it('reads the AC counts from the Test Verifier and the story count from the story itself', () => {
+    const ctx = buildStageContext({
+      stage: 4,
+      cwd: projectDir,
+      outputs: {
+        story: story({ acCount: 5 }),
+        test: testVerifier({ totalAC: 5, tested: 3, notCoverable: 1 })
+      }
+    });
+
+    expect(ctx.metadata).toMatchObject({
+      acceptanceCriteriaTotalCount: 5,
+      acceptanceCriteriaTestedCount: 3,
+      acceptanceCriteriaNotCoverableCount: 1,
+      storyAcceptanceCriteriaCount: 5
+    });
+  });
+
+  it('AC-22 takes the Gate 2 measurement and the regression reference from the harness', () => {
+    const ctx = buildStageContext({
+      stage: 4,
+      cwd: projectDir,
+      outputs: { test: testVerifier(), validator: validator() },
+      harness: { execution: { total: 12, passed: 12, failed: 0, passRate: 1 }, regressionReferenceCount: 10 }
+    });
+
+    expect(ctx.metadata.executionMeasurement).toEqual({ total: 12, passed: 12, failed: 0, passRate: 1 });
+    expect(ctx.metadata.regressionReferenceCount).toBe(10);
+  });
+
+  it('AC-22 never reads the Validator\'s details.regressions', () => {
+    const ctx = buildStageContext({
+      stage: 4,
+      cwd: projectDir,
+      outputs: { validator: validator({ regressions: { count: 3, tests: ['a', 'b', 'c'] } }) }
+    });
+
+    expect(ctx.metadata.executionMeasurement).toBeUndefined();
+    expect(ctx.metadata.regressionReferenceCount).toBeUndefined();
+    expect(ctx.metadata).not.toHaveProperty('regressionCount');
+  });
+
+  it('leaves the story count undefined when there is no story, so the criterion fails closed', () => {
+    const ctx = buildStageContext({ stage: 4, cwd: projectDir, outputs: { test: testVerifier() } });
+
+    expect(ctx.metadata.storyAcceptanceCriteriaCount).toBeUndefined();
+  });
+
+  it('judges security through the tri-state evaluation, against the brief\'s declared surface', () => {
+    const naAuth = validator({
+      security: { authImplemented: 'not_applicable' },
+      notApplicableReasons: { authImplemented: 'No request boundary.' }
+    });
+
+    const declaredAbsent = buildStageContext({
+      stage: 4,
+      cwd: projectDir,
+      outputs: { spec: spec({ securitySurface: { ...ALL_SURFACES_PRESENT, auth: 'ABSENT' } }), validator: naAuth }
+    });
+    expect(declaredAbsent.metadata.securityIssuesCount).toBe(0);
+    expect(declaredAbsent.metadata.securityBlockers).toEqual([]);
+
+    const declaredPresent = buildStageContext({
+      stage: 4,
+      cwd: projectDir,
+      outputs: { spec: spec(), validator: naAuth }
+    });
+    expect(declaredPresent.metadata.securityIssuesCount).toBe(1);
+    expect(declaredPresent.metadata.securityBlockers[0]).toMatch(/authImplemented/);
+  });
+
+  it('readArtifactContents also reads top-level files in the run directory, without overriding claimed artifacts', () => {
+    writeFile('.factory/run-1/TEST_REPORT.md', '# Rendered by the harness');
+    writeFile('.factory/run-1/USER_STORY.md', '# From the run dir');
+    writeFile('.factory/run-1/nested/IGNORED.md', 'not top level');
+    writeFile('claimed/USER_STORY.md', '# Claimed by the agent');
+
+    const claimed = story();
+    claimed.details.artifacts = [{ name: 'USER_STORY.md', path: 'claimed/USER_STORY.md', description: 'Story' }];
+
+    const contents = readArtifactContents({ story: claimed }, projectDir, '.factory/run-1');
+
+    expect(contents['TEST_REPORT.md']).toBe('# Rendered by the harness');
+    expect(contents['USER_STORY.md']).toBe('# Claimed by the agent');
+    expect(contents['IGNORED.md']).toBeUndefined();
+    expect(contents['nested']).toBeUndefined();
+  });
+
+  it('readArtifactContents without a run directory reads only the claimed artifacts', () => {
+    writeFile('.factory/run-1/TEST_REPORT.md', '# Rendered by the harness');
+
+    expect(readArtifactContents({}, projectDir)).toEqual({});
+  });
+
+  it('buildStageContext passes its run directory through, so the harness-rendered report reaches the gate', () => {
+    writeFile('.factory/run-1/TEST_REPORT.md', '# Rendered by the harness');
+
+    const ctx = buildStageContext({ stage: 4, cwd: projectDir, outputs: {}, artifactDir: '.factory/run-1' });
+
+    expect(ctx.artifacts['TEST_REPORT.md']).toBe('# Rendered by the harness');
+  });
+});
+
+describe('shared path helpers (D-7, D-9)', () => {
+  it('normalisePath strips a leading ./ or / and makes an absolute path under cwd relative', () => {
+    expect(normalisePath('./src/a.ts')).toBe('src/a.ts');
+    expect(normalisePath('/src/a.ts')).toBe('src/a.ts');
+    expect(normalisePath('src/a.ts')).toBe('src/a.ts');
+    expect(normalisePath(join(projectDir, 'src/a.ts'), projectDir)).toBe('src/a.ts');
+    // Without cwd an absolute path is only stripped of its leading slash, as before.
+    expect(normalisePath('/abs/src/a.ts')).toBe('abs/src/a.ts');
+  });
+
+  it('claimedFilesFromBuilders lists both builders\' filesModified, labelled by builder, and nothing else', () => {
+    const claimed = claimedFilesFromBuilders(
+      backend({ files: ['src/a.ts'] }),
+      frontend({ files: ['src/components/TwoFactorForm.tsx'] })
+    );
+
+    expect(claimed).toEqual([
+      { name: 'a.ts', path: 'src/a.ts', description: 'Backend Builder: Backend Builder wrote src/a.ts' },
+      {
+        name: 'TwoFactorForm.tsx',
+        path: 'src/components/TwoFactorForm.tsx',
+        description: 'Frontend Builder: Frontend Builder wrote src/components/TwoFactorForm.tsx'
+      }
+    ]);
+    expect(claimedFilesFromBuilders(undefined, undefined)).toEqual([]);
+    expect(claimedFilesFromBuilders(backend({ files: ['src/a.ts'] })).map(f => f.path)).toEqual(['src/a.ts']);
+  });
+
+  it('claimsInsideFactoryDir names every claimed path that resolves inside <cwd>/.factory/, and nothing else', () => {
+    const claims = claimedFilesFromBuilders(
+      backend({
+        files: [
+          'src/a.ts',
+          '.factory/run-1/BACKEND_SUMMARY.md',
+          join(projectDir, '.factory', 'baseline.json'),
+          'src/../.factory/x.md',
+          '.factory',
+          '.factory-notes/x.md',
+          'src/.factory/x.md'
+        ]
+      })
+    );
+
+    expect(claimsInsideFactoryDir(claims, projectDir)).toEqual([
+      '.factory/run-1/BACKEND_SUMMARY.md',
+      join(projectDir, '.factory', 'baseline.json'),
+      'src/../.factory/x.md',
+      '.factory'
+    ]);
+    expect(claimsInsideFactoryDir([], projectDir)).toEqual([]);
+  });
+
+  it('buildStageContext claims exactly what claimedFilesFromBuilders claims (one implementation)', () => {
+    const b = backend({ files: ['src/a.ts'] });
+    const f = frontend();
+
+    const ctx = buildStageContext({ stage: 3, cwd: projectDir, outputs: { backend: b, frontend: f } });
+
+    expect(ctx.metadata.claimedFiles).toEqual(claimedFilesFromBuilders(b, f));
+  });
+
+  it('a harness-rendered run-dir document wins over an agent-claimed artifact of the same name', () => {
+    writeFile('.factory/run-1/TEST_REPORT.md', '# Rendered by the harness');
+    writeFile('elsewhere/TEST_REPORT.md', '# Claimed by an agent');
+    writeFile('.factory/run-1/USER_STORY.md', '# From the run dir');
+    writeFile('claimed/USER_STORY.md', '# Claimed story');
+
+    const claimant = validator();
+    claimant.details.artifacts = [{ name: 'TEST_REPORT.md', path: 'elsewhere/TEST_REPORT.md', description: 'x' }];
+    const claimedStory = story();
+    claimedStory.details.artifacts = [{ name: 'USER_STORY.md', path: 'claimed/USER_STORY.md', description: 'Story' }];
+
+    const contents = readArtifactContents({ validator: claimant, story: claimedStory }, projectDir, '.factory/run-1');
+
+    expect(contents['TEST_REPORT.md']).toBe('# Rendered by the harness');
+    // Not harness-rendered: the agent's claimed document still wins, as before.
+    expect(contents['USER_STORY.md']).toBe('# Claimed story');
+  });
+});
+
+describe('persistArtifacts writes only inside the run directory (IMPORTANT-1, IMPORTANT-2)', () => {
+  const RUN_DIR = '.factory/run-1';
+  let elsewhere: string;
+
+  beforeEach(() => {
+    elsewhere = mkdtempSync(join(tmpdir(), 'ff-elsewhere-'));
+  });
+
+  afterEach(() => {
+    rmSync(elsewhere, { recursive: true, force: true });
+  });
+
+  function validatorWith(artifacts: Array<{ name: string; path: string; content?: string }>) {
+    const output = validator();
+    output.details.artifacts = artifacts.map(a => ({ description: 'x', content: '# Report', ...a }));
+    return output;
+  }
+
+  it('an absolute path the agent supplies is ignored: the document lands in the run dir and nowhere else', () => {
+    const supplied = join(elsewhere, 'VALIDATION_REPORT.md');
+    const output = validatorWith([{ name: 'VALIDATION_REPORT.md', path: supplied }]);
+
+    const written = persistArtifacts({ validator: output }, projectDir, RUN_DIR);
+
+    expect(existsSync(supplied)).toBe(false);
+    expect(readFileSync(join(projectDir, RUN_DIR, 'VALIDATION_REPORT.md'), 'utf-8')).toBe('# Report');
+    expect(written).toEqual([{ agent: '07-validator', path: join(RUN_DIR, 'VALIDATION_REPORT.md') }]);
+    expect(output.details.artifacts[0].path).toBe(join(RUN_DIR, 'VALIDATION_REPORT.md'));
+  });
+
+  it('a system path the agent supplies (/etc/...) is ignored: nothing is written there', () => {
+    const supplied = '/etc/ff-never-written/VALIDATION_REPORT.md';
+    const output = validatorWith([{ name: 'VALIDATION_REPORT.md', path: supplied }]);
+
+    expect(() => persistArtifacts({ validator: output }, projectDir, RUN_DIR)).not.toThrow();
+
+    expect(existsSync(supplied)).toBe(false);
+    expect(existsSync(join(projectDir, RUN_DIR, 'VALIDATION_REPORT.md'))).toBe(true);
+  });
+
+  it('a name/path mismatch is saved under the artifact NAME, and readArtifactContents finds it by name', () => {
+    const output = spec();
+    output.details.artifacts = [
+      { name: 'TECHNICAL_BRIEF.md', path: 'docs/brief.md', description: 'Brief', content: '# Brief' }
+    ];
+
+    persistArtifacts({ spec: output }, projectDir, RUN_DIR);
+
+    expect(readFileSync(join(projectDir, RUN_DIR, 'TECHNICAL_BRIEF.md'), 'utf-8')).toBe('# Brief');
+    expect(existsSync(join(projectDir, RUN_DIR, 'brief.md'))).toBe(false);
+    expect(existsSync(join(projectDir, 'docs/brief.md'))).toBe(false);
+    expect(readArtifactContents({ spec: output }, projectDir, RUN_DIR)['TECHNICAL_BRIEF.md']).toBe('# Brief');
+  });
+
+  it.each(['../evil.md', '../../evil.md', 'sub/evil.md', 'sub\\evil.md', '/tmp/evil.md', '..', '.', ''])(
+    'FAILS CLOSED on an artifact name that is not a plain filename (%p): throws, writes nothing',
+    name => {
+      const output = validatorWith([
+        { name: 'VALIDATION_REPORT.md', path: 'VALIDATION_REPORT.md' },
+        { name, path: 'whatever.md' }
+      ]);
+
+      expect(() => persistArtifacts({ validator: output }, projectDir, RUN_DIR)).toThrow(UnsafeArtifactPathError);
+
+      // Validated before anything is written: not even the safe sibling is on disk.
+      expect(existsSync(join(projectDir, RUN_DIR))).toBe(false);
+      expect(existsSync(join(projectDir, '.factory', 'evil.md'))).toBe(false);
+      expect(existsSync(join(projectDir, 'evil.md'))).toBe(false);
+    }
+  );
+
+  it('without a run dir (legacy), an absolute path is refused, not honoured', () => {
+    const supplied = join(elsewhere, 'RESEARCHER_REPORT.md');
+    const output = researcherOutput();
+    output.details.artifacts = [{ name: 'RESEARCHER_REPORT.md', path: supplied, description: 'R', content: '# R' }];
+
+    expect(() => persistArtifacts({ researcher: output }, projectDir)).toThrow(UnsafeArtifactPathError);
+    expect(existsSync(supplied)).toBe(false);
+  });
+
+  it('without a run dir (legacy), a relative path that escapes cwd is refused', () => {
+    const output = researcherOutput();
+    output.details.artifacts = [
+      { name: 'RESEARCHER_REPORT.md', path: '../ff-escaped-RESEARCHER_REPORT.md', description: 'R', content: '# R' }
+    ];
+
+    expect(() => persistArtifacts({ researcher: output }, projectDir)).toThrow(UnsafeArtifactPathError);
+    expect(existsSync(join(projectDir, '..', 'ff-escaped-RESEARCHER_REPORT.md'))).toBe(false);
+  });
+
+  it('without a run dir (legacy), a relative path inside cwd is still written where it says', () => {
+    const output = researcherOutput();
+    output.details.artifacts = [{ name: 'RESEARCHER_REPORT.md', path: 'docs/R.md', description: 'R', content: '# R' }];
+
+    persistArtifacts({ researcher: output }, projectDir);
+
+    expect(readFileSync(join(projectDir, 'docs/R.md'), 'utf-8')).toBe('# R');
   });
 });

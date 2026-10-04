@@ -14,119 +14,35 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
-import { mkdtempSync, rmSync, existsSync, mkdirSync, writeFileSync } from 'fs';
-import { tmpdir } from 'os';
+import { existsSync, mkdirSync, writeFileSync } from 'fs';
 import { join } from 'path';
 
 import { runFeatureFactory } from '../../feature/workflows/feature-factory-orchestrator';
 import { AgentInvocation } from '../../runner/invoke-agent';
+import { backend, placeholder, researcher, spec, story } from '../fixtures/agent-outputs';
+import { scriptedInvoker, tempProject, TempProject } from '../fixtures/harness-run';
 
+let project: TempProject;
 let projectDir: string;
 
 beforeEach(() => {
-  projectDir = mkdtempSync(join(tmpdir(), 'ff-checkpoint-'));
+  project = tempProject('ff-checkpoint-');
+  projectDir = project.dir;
 });
 
 afterEach(() => {
-  rmSync(projectDir, { recursive: true, force: true });
+  project.cleanup();
 });
 
-/** A researcher output good enough to clear the stage-1 gate, with its report on disk. */
-function researcher(): any {
-  return {
-    stage: 1,
-    agent: '01-researcher',
-    timestamp: new Date().toISOString(),
-    status: 'PASS',
-    details: {
-      summary: 'Mapped the codebase.',
-      artifacts: [
-        {
-          name: 'RESEARCHER_REPORT.md',
-          path: 'RESEARCHER_REPORT.md',
-          description: 'Report',
-          content: '# Researcher Report\n\nMapped the auth module.'
-        }
-      ],
-      architecture: { layers: ['routes', 'services'], description: 'Layered' },
-      filesIdentified: [
-        { path: 'src/a.ts', role: 'service', reason: 'core', priority: 'MUST_MODIFY' },
-        { path: 'src/b.ts', role: 'controller', reason: 'entry', priority: 'LIKELY' },
-        { path: 'src/c.ts', role: 'util', reason: 'helper', priority: 'OPTIONAL' }
-      ],
-      existingPatterns: [
-        { name: 'BaseService', description: 'base', locations: ['src/a.ts'], confidence: 0.9, recommendation: 'REUSE' }
-      ],
-      risks: [{ type: 'TECHNICAL', severity: 'IMPORTANT', description: 'Timezones' }],
-      timeEstimate: { discover: 2, plan: 3, execute: 8, verify: 5, deliver: 2, total: 20, confidence: 0.7 }
-    }
-  };
-}
-
-function story(): any {
-  return {
-    stage: 2,
-    agent: '02-story-writer',
-    timestamp: new Date().toISOString(),
-    status: 'PASS',
-    details: {
-      summary: 'User can enable 2FA.',
-      artifacts: [
-        {
-          name: 'USER_STORY.md',
-          path: 'USER_STORY.md',
-          description: 'Story',
-          content: [
-            '# User Story',
-            '## AC-1', 'Given logged in', 'When enabling 2FA', 'Then QR shown',
-            '## AC-2', 'Given QR shown', 'When valid code', 'Then enabled',
-            '## AC-3', 'Given enabled', 'When invalid code', 'Then rejected'
-          ].join('\n')
-        }
-      ],
-      userStory: { persona: 'user', goal: 'enable 2FA', benefit: 'security' },
-      acceptanceCriteria: [
-        { id: 'AC-1', given: 'a', when: 'b', then: 'c', priority: 'MUST', testable: true },
-        { id: 'AC-2', given: 'a', when: 'b', then: 'c', priority: 'MUST', testable: true },
-        { id: 'AC-3', given: 'a', when: 'b', then: 'c', priority: 'MUST', testable: true }
-      ],
-      edgeCases: [], assumptions: [], outOfScope: []
-    }
-  };
-}
-
-function spec(): any {
-  return {
-    stage: 2,
-    agent: '03-spec-writer',
-    timestamp: new Date().toISOString(),
-    status: 'PASS',
-    details: {
-      summary: 'Technical brief.',
-      artifacts: [
-        { name: 'TECHNICAL_BRIEF.md', path: 'TECHNICAL_BRIEF.md', description: 'Brief', content: '# Technical Brief\n\nTOTP via speakeasy.' },
-        { name: 'FILE_LIST.md', path: 'FILE_LIST.md', description: 'Files', content: '# Files\n\n- src/a.ts (CREATE)' }
-      ],
-      apiContract: { endpoints: [], errorHandling: 'RFC7807' },
-      fileList: [{ path: 'src/a.ts', type: 'CREATE', reason: 'core', complexity: 'SIMPLE' }],
-      testStrategy: { unitTests: [], integrationTests: [], e2eTests: [] },
-      dataModel: { tables: [] },
-      uiComponents: []
-    }
-  };
-}
-
-/** An invoker that plays back real-shaped outputs for the planning agents. */
+/**
+ * An invoker that plays back real-shaped outputs for the planning agents. Anything past the
+ * story gets a schema-invalid placeholder — irrelevant to these tests.
+ */
 function planningInvoker(seen: string[]) {
+  const invoker = scriptedInvoker({ '01-researcher': researcher(), '02-story-writer': story() });
   return async (call: AgentInvocation) => {
     seen.push(call.agent);
-    if (call.agent === '01-researcher') return researcher();
-    if (call.agent === '02-story-writer') return story();
-    // Anything past the story is irrelevant to these tests.
-    return {
-      stage: call.stage, agent: call.agent, timestamp: new Date().toISOString(),
-      status: 'PASS', details: { summary: 'x', artifacts: [] }
-    };
+    return invoker.invoke(call);
   };
 }
 
@@ -246,24 +162,19 @@ describe('the workspace the agents read', () => {
       featureDescription: 'add 2FA',
       cwd: projectDir,
       approveCheckpoint: async () => true,
-      invoke: async (call: AgentInvocation) => {
-        if (call.agent === '01-researcher') return researcher();
-        if (call.agent === '02-story-writer') return story();
-        if (call.agent === '03-spec-writer') return spec();
-
+      invoke: scriptedInvoker({
+        '01-researcher': researcher(),
+        '02-story-writer': story(),
+        '03-spec-writer': spec(),
         // The builder refuses.
-        return {
-          stage: 3, agent: call.agent, timestamp: new Date().toISOString(),
-          status: 'ESCALATE',
-          details: {
-            summary: 'No spec in this repo is approved — I found four and cannot tell which.',
-            artifacts: [], filesModified: [],
-            implementation: { services: [], routes: [], migrations: [] },
-            testing: { testsWritten: 0, testsPassed: 0, testsFailed: 0 },
-            patterns: { reused: [], created: [] }
-          }
-        };
-      }
+        '04-backend-builder': () => {
+          const refusal = backend({ files: [] });
+          refusal.status = 'ESCALATE';
+          refusal.details.summary = 'No spec in this repo is approved — I found four and cannot tell which.';
+          refusal.details.testing = { testsWritten: 0, testsPassed: 0, testsFailed: 0 };
+          return refusal;
+        }
+      }).invoke
     });
 
     expect(state.completionStatus).toBe('ESCALATED');
@@ -288,23 +199,18 @@ describe('artifact persistence and sequencing', () => {
       featureDescription: 'add 2FA',
       cwd: projectDir,
       approveCheckpoint: async () => true,
-      invoke: async (call: AgentInvocation) => {
-        if (call.agent === '01-researcher') return researcher();
-        if (call.agent === '02-story-writer') return story();
-
-        if (call.agent === '03-spec-writer') {
+      invoke: scriptedInvoker({
+        '01-researcher': researcher(),
+        '02-story-writer': story(),
+        '03-spec-writer': call => {
           // The Spec Writer is running RIGHT NOW. Is the story it must translate on disk?
           storyOnDiskWhenSpecWriterRan = call.prompt.includes('.factory/');
           const dir = call.prompt.match(/\.factory\/[a-f0-9-]+/)?.[0] ?? '';
           featureId = dir;
           storyOnDiskWhenSpecWriterRan = existsSync(join(projectDir, dir, 'USER_STORY.md'));
+          return placeholder(call.stage, call.agent);
         }
-
-        return {
-          stage: call.stage, agent: call.agent, timestamp: new Date().toISOString(),
-          status: 'PASS', details: { summary: 'x', artifacts: [] }
-        };
-      }
+      }).invoke
     });
 
     expect(storyOnDiskWhenSpecWriterRan).toBe(true);

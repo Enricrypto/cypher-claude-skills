@@ -15,104 +15,38 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, existsSync } from 'fs';
-import { tmpdir } from 'os';
+import { existsSync } from 'fs';
 import { join } from 'path';
 
-import {
-  acceptFeatureSpec,
-  buildOrder,
-  parallelBatches,
-  FeatureSpec
-} from '../../contracts/feature-spec';
+import { acceptFeatureSpec, buildOrder, parallelBatches } from '../../contracts/feature-spec';
 import { runFeatureFactory } from '../../feature/workflows/feature-factory-orchestrator';
 import { AgentInvocation } from '../../runner/invoke-agent';
+import { featureSpec, placeholder } from '../fixtures/agent-outputs';
+import { tempProject, TempProject } from '../fixtures/harness-run';
 
+let project: TempProject;
 let projectDir: string;
 
 beforeEach(() => {
-  projectDir = mkdtempSync(join(tmpdir(), 'ff-seam-'));
+  project = tempProject('ff-seam-');
+  projectDir = project.dir;
 });
 
 afterEach(() => {
-  rmSync(projectDir, { recursive: true, force: true });
+  project.cleanup();
 });
 
-/** A spec whose story is genuinely testable — Given/When/Then, three criteria, in the document. */
-function goodSpec(name = 'add-2fa'): FeatureSpec {
-  return {
-    featureName: name,
-    featureDescription: 'Let a user enable two-factor authentication',
-
-    story: {
-      stage: 2,
-      agent: '02-story-writer',
-      timestamp: new Date().toISOString(),
-      status: 'PASS',
-      details: {
-        summary: 'User can enable 2FA.',
-        artifacts: [
-          {
-            name: 'USER_STORY.md',
-            path: 'USER_STORY.md',
-            description: 'The story',
-            content: [
-              '# User Story',
-              'As a user I want to enable 2FA so that my account is secure.',
-              '',
-              '## AC-1',
-              'Given I am logged in',
-              'When I enable 2FA',
-              'Then a QR code is shown',
-              '',
-              '## AC-2',
-              'Given a QR code is shown',
-              'When I submit a valid TOTP code',
-              'Then 2FA is enabled',
-              '',
-              '## AC-3',
-              'Given 2FA is enabled',
-              'When I submit an invalid TOTP code',
-              'Then the login is rejected'
-            ].join('\n')
-          }
-        ],
-        userStory: { persona: 'user', goal: 'enable 2FA', benefit: 'security' },
-        acceptanceCriteria: [
-          { id: 'AC-1', given: 'logged in', when: 'enabling 2FA', then: 'QR shown', priority: 'MUST', testable: true },
-          { id: 'AC-2', given: 'QR shown', when: 'valid code', then: 'enabled', priority: 'MUST', testable: true },
-          { id: 'AC-3', given: 'enabled', when: 'invalid code', then: 'rejected', priority: 'MUST', testable: true }
-        ],
-        edgeCases: [],
-        assumptions: [],
-        outOfScope: []
-      }
-    } as any,
-
-    spec: {
-      stage: 2,
-      agent: '03-spec-writer',
-      timestamp: new Date().toISOString(),
-      status: 'PASS',
-      details: {
-        summary: 'Technical brief for 2FA.',
-        artifacts: [
-          { name: 'TECHNICAL_BRIEF.md', path: 'TECHNICAL_BRIEF.md', description: 'Brief', content: '# Technical Brief\n\nTOTP via speakeasy.' },
-          { name: 'FILE_LIST.md', path: 'FILE_LIST.md', description: 'Files', content: '# Files\n\n- src/auth/totp.ts (CREATE)' }
-        ],
-        dataModel: { tables: [] },
-        apiContract: { endpoints: [], errorHandling: 'RFC7807' },
-        uiComponents: [],
-        fileList: [{ path: 'src/auth/totp.ts', type: 'CREATE', reason: 'TOTP', complexity: 'MODERATE' }],
-        testStrategy: { unitTests: [], integrationTests: [], e2eTests: [] }
-      }
-    } as any
+/** Records which agents ran; every output is a schema-invalid placeholder. */
+function recordingInvoker(invoked: string[]) {
+  return async (call: AgentInvocation) => {
+    invoked.push(call.agent);
+    return placeholder(call.stage, call.agent);
   };
 }
 
 describe('acceptFeatureSpec — the gate IS the contract', () => {
   it('accepts a spec whose story is genuinely testable, and writes its documents to disk', async () => {
-    const acceptance = await acceptFeatureSpec(goodSpec(), projectDir);
+    const acceptance = await acceptFeatureSpec(featureSpec(), projectDir);
 
     expect(acceptance.accepted).toBe(true);
     expect(acceptance.satisfies.stage2).toBe(true);
@@ -120,6 +54,17 @@ describe('acceptFeatureSpec — the gate IS the contract', () => {
     // The harness persisted the upstream documents, so the gates had real evidence to read.
     expect(existsSync(join(projectDir, 'USER_STORY.md'))).toBe(true);
     expect(existsSync(join(projectDir, 'TECHNICAL_BRIEF.md'))).toBe(true);
+  });
+
+  it('I-11 with an artifactDir, persists the supplied documents into the run directory, not the project root', async () => {
+    const acceptance = await acceptFeatureSpec(featureSpec(), projectDir, '.factory/run-1');
+
+    expect(acceptance.accepted).toBe(true);
+    expect(existsSync(join(projectDir, '.factory/run-1', 'USER_STORY.md'))).toBe(true);
+    expect(existsSync(join(projectDir, '.factory/run-1', 'TECHNICAL_BRIEF.md'))).toBe(true);
+    expect(existsSync(join(projectDir, '.factory/run-1', 'FILE_LIST.md'))).toBe(true);
+    expect(existsSync(join(projectDir, 'USER_STORY.md'))).toBe(false);
+    expect(existsSync(join(projectDir, 'TECHNICAL_BRIEF.md'))).toBe(false);
   });
 
   /**
@@ -132,7 +77,7 @@ describe('acceptFeatureSpec — the gate IS the contract', () => {
    * is worthless.
    */
   it('REJECTS a spec that self-reports PASS but whose story is not testable', async () => {
-    const spec = goodSpec();
+    const spec = featureSpec();
     spec.story.details.artifacts[0].content = [
       '# User Story',
       'As a user I want 2FA so that I am secure.',
@@ -154,7 +99,7 @@ describe('acceptFeatureSpec — the gate IS the contract', () => {
   });
 
   it('rejects a spec whose story has fewer than 3 acceptance criteria', async () => {
-    const spec = goodSpec();
+    const spec = featureSpec();
     spec.story.details.acceptanceCriteria = [spec.story.details.acceptanceCriteria[0]];
 
     const acceptance = await acceptFeatureSpec(spec, projectDir);
@@ -164,7 +109,7 @@ describe('acceptFeatureSpec — the gate IS the contract', () => {
   });
 
   it('rejects a spec that never wrote its story document at all', async () => {
-    const spec = goodSpec();
+    const spec = featureSpec();
     delete spec.story.details.artifacts[0].content;
 
     const acceptance = await acceptFeatureSpec(spec, projectDir);
@@ -183,12 +128,9 @@ describe('runFeatureFactory — Tier 1 is optional', () => {
   it('runs its own Researcher and Story Writer when NO spec is supplied', async () => {
     const invoked: string[] = [];
 
-    const invoke = async (call: AgentInvocation) => {
-      invoked.push(call.agent);
-      // Return something the schema gate will reject, so the run stops early — we are asserting
-      // WHICH agents were called, not that the whole pipeline completes.
-      return { stage: call.stage, agent: call.agent, timestamp: new Date().toISOString(), status: 'PASS', details: { summary: 'x', artifacts: [] } };
-    };
+    // Return something the schema gate will reject, so the run stops early — we are asserting
+    // WHICH agents were called, not that the whole pipeline completes.
+    const invoke = recordingInvoker(invoked);
 
     await runFeatureFactory({
       featureName: 'standalone',
@@ -203,17 +145,14 @@ describe('runFeatureFactory — Tier 1 is optional', () => {
   it('SKIPS its own planning agents when a valid spec IS supplied', async () => {
     const invoked: string[] = [];
 
-    const invoke = async (call: AgentInvocation) => {
-      invoked.push(call.agent);
-      return { stage: call.stage, agent: call.agent, timestamp: new Date().toISOString(), status: 'PASS', details: { summary: 'x', artifacts: [] } };
-    };
+    const invoke = recordingInvoker(invoked);
 
     await runFeatureFactory({
       featureName: 'add-2fa',
       featureDescription: 'Let a user enable 2FA',
       cwd: projectDir,
       invoke,
-      preSuppliedSpec: goodSpec()
+      preSuppliedSpec: featureSpec()
     });
 
     // No planning agent ran — the upstream spec satisfied those stages.
@@ -225,18 +164,38 @@ describe('runFeatureFactory — Tier 1 is optional', () => {
     expect(invoked[0]).toBe('04-backend-builder');
   });
 
+  it('I-11 a pre-supplied spec lands in the run directory, and the builder prompt points at it', async () => {
+    const prompts: string[] = [];
+
+    const state = await runFeatureFactory({
+      featureName: 'add-2fa',
+      featureDescription: 'Let a user enable 2FA',
+      cwd: projectDir,
+      logger: () => {},
+      invoke: async (call: AgentInvocation) => {
+        prompts.push(call.prompt);
+        return placeholder(call.stage, call.agent);
+      },
+      preSuppliedSpec: featureSpec()
+    });
+
+    const brief = join(projectDir, '.factory', state.featureId, 'TECHNICAL_BRIEF.md');
+    expect(existsSync(brief)).toBe(true);
+    expect(existsSync(join(projectDir, 'TECHNICAL_BRIEF.md'))).toBe(false);
+    expect(prompts[0]).toContain(`THE APPROVED BRIEF IS: ${brief}`);
+    // No researcher was supplied, so the prompt does not point at a report that does not exist.
+    expect(prompts[0]).not.toContain('RESEARCHER_REPORT.md');
+  });
+
   /**
    * A rejected spec ESCALATES. It must NOT silently fall back to running stages 1-2, because a
    * broken Decomposer would then look like it worked while Tier 2 quietly re-did the planning.
    */
   it('ESCALATES on a bad spec rather than quietly re-planning around it', async () => {
     const invoked: string[] = [];
-    const invoke = async (call: AgentInvocation) => {
-      invoked.push(call.agent);
-      return { stage: call.stage, agent: call.agent, timestamp: new Date().toISOString(), status: 'PASS', details: { summary: 'x', artifacts: [] } };
-    };
+    const invoke = recordingInvoker(invoked);
 
-    const spec = goodSpec();
+    const spec = featureSpec();
     spec.story.details.artifacts[0].content = '# User Story\n\nIt should just work, really.';
 
     const state = await runFeatureFactory({
@@ -257,18 +216,12 @@ describe('runFeatureFactory — Tier 1 is optional', () => {
 });
 
 describe('buildOrder — dependency-ordered work queue', () => {
-  const spec = (name: string, dependsOn?: string[]): FeatureSpec => ({
-    ...goodSpec(name),
-    featureName: name,
-    dependsOn
-  });
-
   it('builds dependencies before the features that need them', () => {
     const order = buildOrder([
-      spec('checkout', ['cart', 'payments']),
-      spec('cart', ['catalogue']),
-      spec('payments'),
-      spec('catalogue')
+      featureSpec({ name: 'checkout', dependsOn: ['cart', 'payments'] }),
+      featureSpec({ name: 'cart', dependsOn: ['catalogue'] }),
+      featureSpec({ name: 'payments' }),
+      featureSpec({ name: 'catalogue' })
     ]).map(f => f.featureName);
 
     expect(order.indexOf('catalogue')).toBeLessThan(order.indexOf('cart'));
@@ -278,10 +231,10 @@ describe('buildOrder — dependency-ordered work queue', () => {
 
   it('groups independent features into batches that can be built in parallel', () => {
     const batches = parallelBatches([
-      spec('checkout', ['cart', 'payments']),
-      spec('cart', ['catalogue']),
-      spec('payments'),
-      spec('catalogue')
+      featureSpec({ name: 'checkout', dependsOn: ['cart', 'payments'] }),
+      featureSpec({ name: 'cart', dependsOn: ['catalogue'] }),
+      featureSpec({ name: 'payments' }),
+      featureSpec({ name: 'catalogue' })
     ]).map(batch => batch.map(f => f.featureName).sort());
 
     // catalogue and payments depend on nothing — they go first, together.
@@ -290,10 +243,10 @@ describe('buildOrder — dependency-ordered work queue', () => {
   });
 
   it('throws on a dependency cycle rather than inventing an order', () => {
-    expect(() => buildOrder([spec('a', ['b']), spec('b', ['a'])])).toThrow(/cycle/i);
+    expect(() => buildOrder([featureSpec({ name: 'a', dependsOn: ['b'] }), featureSpec({ name: 'b', dependsOn: ['a'] })])).toThrow(/cycle/i);
   });
 
   it('throws when a feature depends on something that is not in the plan', () => {
-    expect(() => buildOrder([spec('a', ['ghost'])])).toThrow(/not in the plan/i);
+    expect(() => buildOrder([featureSpec({ name: 'a', dependsOn: ['ghost'] })])).toThrow(/not in the plan/i);
   });
 });

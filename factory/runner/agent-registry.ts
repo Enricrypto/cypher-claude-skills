@@ -116,7 +116,9 @@ export const REQUIRED_ARTIFACTS: Record<FeatureFactoryAgent, string[]> = {
   '04-backend-builder': [],
   '05-frontend-builder': [],
   '06-test-verifier': [],
-  '07-validator': [],
+  // Stage 4 requires it. The Validator is read-only, so it returns the text and the harness
+  // writes it into the run directory.
+  '07-validator': ['VALIDATION_REPORT.md'],
   '08-feature-consolidator': ['CONSOLIDATION_REPORT.md', 'PATTERNS.md']
 };
 

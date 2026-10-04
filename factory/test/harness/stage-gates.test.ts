@@ -13,8 +13,10 @@ import {
   stageContracts,
   canAdvanceStage,
   StageContext,
-  StageAdvancementDecision
+  StageContract,
+  Stage4Metadata
 } from '../../harness/stage-gates';
+import { createFeatureState, recordImportantFindings } from '../../harness/state-tracker';
 
 describe('Stage Gates', () => {
   let mockContext: StageContext;
@@ -208,33 +210,326 @@ describe('Stage Gates', () => {
   });
 
   describe('canAdvanceStage - Stage 4', () => {
+    /** Both Stage 4 documents present: TEST_REPORT.md (harness-rendered) and VALIDATION_REPORT.md. */
+    const stage4Artifacts = () => ({
+      'TEST_REPORT.md': '> **Harness-generated** from 06-test-verifier\'s structured output.',
+      'VALIDATION_REPORT.md': '# Validation Report'
+    });
+
+    /** Every Stage 4 input present and clean. Typed, so a misspelt key is a compile error. */
+    const cleanStage4 = (): Stage4Metadata => ({
+      acceptanceCriteriaTotalCount: 4,
+      acceptanceCriteriaTestedCount: 4,
+      acceptanceCriteriaNotCoverableCount: 0,
+      storyAcceptanceCriteriaCount: 4,
+      criticalIssuesCount: 0,
+      securityIssuesCount: 0,
+      securityBlockers: [],
+      executionMeasurement: { total: 10, passed: 10, failed: 0, passRate: 1 },
+      regressionReferenceCount: 10
+    });
+
+    /** Judge only "No Regressions" for the given harness measurement and reference. */
+    const noRegressions = async (md: Partial<Stage4Metadata>) => {
+      mockContext.artifacts = stage4Artifacts();
+      const metadata: Stage4Metadata = { ...cleanStage4(), ...md };
+      mockContext.metadata = metadata;
+      return canAdvanceStage(4, stageContracts[4], mockContext);
+    };
+
+    // The input is the harness's own Gate 2 count against its reference — never a number the
+    // Validator typed into its report.
     it('should FAIL if regressions detected', async () => {
+      const decision = await noRegressions({
+        executionMeasurement: { total: 8, passed: 8, failed: 0, passRate: 1 },
+        regressionReferenceCount: 10
+      });
+
+      expect(decision.canAdvance).toBe(false);
+      expect(decision.criteriaResults['No Regressions'].passed).toBe(false);
+      expect(decision.blockers.join('\n')).toMatch(/\[CRITICAL\] No Regressions: .*8.*10/);
+    });
+
+    it('AC-22 No Regressions fails when there is no Gate 2 measurement to judge', async () => {
+      const decision = await noRegressions({ executionMeasurement: undefined });
+
+      expect(decision.canAdvance).toBe(false);
+      expect(decision.criteriaResults['No Regressions'].passed).toBe(false);
+    });
+
+    it('AC-22 No Regressions fails below a 100% pass rate even at the reference count', async () => {
+      const decision = await noRegressions({
+        executionMeasurement: { total: 10, passed: 9, failed: 1, passRate: 0.9 },
+        regressionReferenceCount: 10
+      });
+
+      expect(decision.criteriaResults['No Regressions'].passed).toBe(false);
+    });
+
+    it('AC-22 No Regressions passes at or above the reference with 100%', async () => {
+      for (const total of [10, 11]) {
+        const decision = await noRegressions({
+          executionMeasurement: { total, passed: total, failed: 0, passRate: 1 },
+          regressionReferenceCount: 10
+        });
+        expect({ total, passed: decision.criteriaResults['No Regressions'].passed }).toEqual({ total, passed: true });
+      }
+    });
+
+    // IMPORTANT-5 (operator decision): only tests that RAN (passed + failed) count; skipped and
+    // todo tests do not, so a round cannot .skip its way past the reference.
+    it('IMPORTANT-5 No Regressions FAILS when 10 are reported but only 8 ran (2 skipped), against a reference of 10', async () => {
+      const decision = await noRegressions({
+        executionMeasurement: { total: 10, passed: 8, failed: 0, passRate: 1 },
+        regressionReferenceCount: 10
+      });
+
+      expect(decision.criteriaResults['No Regressions'].passed).toBe(false);
+      expect(decision.blockers.join('\n')).toMatch(/\[CRITICAL\] No Regressions: .*8 tests ran.*10/);
+    });
+
+    it('IMPORTANT-5 No Regressions passes when 10 ran against a reference of 10, whatever else was skipped', async () => {
+      const decision = await noRegressions({
+        executionMeasurement: { total: 13, passed: 10, failed: 0, passRate: 1 },
+        regressionReferenceCount: 10
+      });
+
+      expect(decision.criteriaResults['No Regressions'].passed).toBe(true);
+    });
+
+    it('AC-66 with no reference only the 100% rule applies', async () => {
+      const passes = await noRegressions({
+        executionMeasurement: { total: 1, passed: 1, failed: 0, passRate: 1 },
+        regressionReferenceCount: undefined
+      });
+      expect(passes.criteriaResults['No Regressions'].passed).toBe(true);
+
+      const fails = await noRegressions({
+        executionMeasurement: { total: 4, passed: 3, failed: 1, passRate: 0.75 },
+        regressionReferenceCount: undefined
+      });
+      expect(fails.criteriaResults['No Regressions'].passed).toBe(false);
+    });
+
+    it('AC-62 Stage 4 passes on real metadata keys', async () => {
       const stage4 = stageContracts[4];
-      mockContext.metadata = {
-        testsPassed: 145,
-        testsBefore: 140,
-        regressionCount: 5  // Previously passing tests now fail
-      };
+      mockContext.artifacts = stage4Artifacts();
+      const metadata: Stage4Metadata = cleanStage4();
+      mockContext.metadata = metadata;
+
+      const decision = await canAdvanceStage(4, stage4, mockContext);
+
+      expect(decision.blockers).toEqual([]);
+      expect(decision.canAdvance).toBe(true);
+    });
+
+    it('AC-62 Stage 4 with empty metadata fails (no vacuous pass)', async () => {
+      const stage4 = stageContracts[4];
+      mockContext.artifacts = stage4Artifacts();
+      const metadata: Stage4Metadata = {};
+      mockContext.metadata = metadata;
 
       const decision = await canAdvanceStage(4, stage4, mockContext);
 
       expect(decision.canAdvance).toBe(false);
-      expect(decision.blockers.some(b => b.includes('regressions'))).toBe(true);
+      // No evidence is not clean evidence: each judged input fails on its own.
+      expect(decision.criteriaResults['Acceptance Tests Complete'].passed).toBe(false);
+      expect(decision.criteriaResults['Validation Passed'].passed).toBe(false);
+      expect(decision.criteriaResults['Security Audit Passed'].passed).toBe(false);
+      expect(decision.criteriaResults['No Regressions'].passed).toBe(false);
     });
 
-    it('should PASS if no regressions and AC tested', async () => {
-      const stage4 = stageContracts[4];
+    it('AC-18 totalAC 0 fails', async () => {
+      mockContext.artifacts = stage4Artifacts();
+      const metadata: Stage4Metadata = {
+        ...cleanStage4(),
+        acceptanceCriteriaTotalCount: 0,
+        acceptanceCriteriaTestedCount: 0,
+        storyAcceptanceCriteriaCount: 0
+      };
+      mockContext.metadata = metadata;
+
+      const decision = await canAdvanceStage(4, stageContracts[4], mockContext);
+
+      expect(decision.canAdvance).toBe(false);
+      expect(decision.criteriaResults['Acceptance Tests Complete'].passed).toBe(false);
+    });
+
+    it('AC-18 tested+notCoverable ≥ totalAC equal to the story count passes', async () => {
+      mockContext.artifacts = stage4Artifacts();
+      const metadata: Stage4Metadata = {
+        ...cleanStage4(),
+        acceptanceCriteriaTotalCount: 5,
+        acceptanceCriteriaTestedCount: 3,
+        acceptanceCriteriaNotCoverableCount: 2,
+        storyAcceptanceCriteriaCount: 5
+      };
+      mockContext.metadata = metadata;
+
+      const decision = await canAdvanceStage(4, stageContracts[4], mockContext);
+
+      expect(decision.criteriaResults['Acceptance Tests Complete'].passed).toBe(true);
+      expect(decision.canAdvance).toBe(true);
+    });
+
+    it('AC-18 tested+notCoverable below totalAC fails', async () => {
+      mockContext.artifacts = stage4Artifacts();
+      const metadata: Stage4Metadata = {
+        ...cleanStage4(),
+        acceptanceCriteriaTotalCount: 5,
+        acceptanceCriteriaTestedCount: 3,
+        acceptanceCriteriaNotCoverableCount: 1,
+        storyAcceptanceCriteriaCount: 5
+      };
+      mockContext.metadata = metadata;
+
+      const decision = await canAdvanceStage(4, stageContracts[4], mockContext);
+
+      expect(decision.canAdvance).toBe(false);
+      expect(decision.criteriaResults['Acceptance Tests Complete'].details).toMatch(/4\/5/);
+    });
+
+    it('AC-18 totalAC different from the story count fails', async () => {
+      mockContext.artifacts = stage4Artifacts();
+      const metadata: Stage4Metadata = {
+        ...cleanStage4(),
+        acceptanceCriteriaTotalCount: 3,
+        acceptanceCriteriaTestedCount: 3,
+        storyAcceptanceCriteriaCount: 5
+      };
+      mockContext.metadata = metadata;
+
+      const decision = await canAdvanceStage(4, stageContracts[4], mockContext);
+
+      expect(decision.canAdvance).toBe(false);
+      expect(decision.criteriaResults['Acceptance Tests Complete'].details).toMatch(/story has 5/);
+    });
+
+    it('AC-18 an unknown story count fails rather than trusting the Test Verifier\'s total', async () => {
+      mockContext.artifacts = stage4Artifacts();
+      const metadata: Stage4Metadata = { ...cleanStage4(), storyAcceptanceCriteriaCount: undefined };
+      mockContext.metadata = metadata;
+
+      const decision = await canAdvanceStage(4, stageContracts[4], mockContext);
+
+      expect(decision.criteriaResults['Acceptance Tests Complete'].passed).toBe(false);
+    });
+
+    it('AC-21 a missing required Stage 4 artifact fails canAdvanceStage', async () => {
+      mockContext.artifacts = { 'VALIDATION_REPORT.md': '# Validation Report' };
+      mockContext.metadata = cleanStage4();
+
+      const decision = await canAdvanceStage(4, stageContracts[4], mockContext);
+
+      // Every criterion passes; the missing document alone blocks.
+      expect(Object.values(decision.criteriaResults).every(r => r.passed)).toBe(true);
+      expect(decision.canAdvance).toBe(false);
+      expect(decision.missingArtifacts).toEqual(['TEST_REPORT.md']);
+      expect(decision.blockers.join('\n')).toContain('TEST_REPORT.md');
+      expect(decision.recommendation).not.toBe('ADVANCE');
+    });
+
+    it('a security blocker is carried into the gate blockers', async () => {
+      mockContext.artifacts = stage4Artifacts();
+      const metadata: Stage4Metadata = {
+        ...cleanStage4(),
+        securityIssuesCount: 1,
+        securityBlockers: ['authImplemented is false']
+      };
+      mockContext.metadata = metadata;
+
+      const decision = await canAdvanceStage(4, stageContracts[4], mockContext);
+
+      expect(decision.canAdvance).toBe(false);
+      expect(decision.blockers.join('\n')).toContain('authImplemented is false');
+    });
+  });
+
+  describe('IMPORTANT findings (AC-17)', () => {
+    it('AC-17 an IMPORTANT failure with all CRITICAL passing advances and is returned as an important finding', async () => {
+      mockContext.artifacts = { 'RESEARCHER_REPORT.md': '# Researcher Report' };
       mockContext.metadata = {
-        acTestedCount: 4,
-        acTotalCount: 4,
-        validationCriticalCount: 0,
-        securityIssuesCount: 0,
-        regressionCount: 0
+        filesIdentified: 5,
+        patternsFound: 0, // IMPORTANT: "Patterns Found" fails
+        risksIdentified: ['timezones']
       };
 
-      const decision = await canAdvanceStage(4, stage4, mockContext);
+      const decision = await canAdvanceStage(1, stageContracts[1], mockContext);
 
       expect(decision.canAdvance).toBe(true);
+      expect(decision.recommendation).toBe('ADVANCE');
+      expect(decision.blockers).toEqual([]);
+      expect(decision.importantFindings).toEqual([
+        '[Stage 1] Patterns Found: No existing patterns documented'
+      ]);
+    });
+
+    it('AC-17 recordImportantFindings appends the finding to the run\'s list', () => {
+      let state = createFeatureState('findings');
+      state = recordImportantFindings(state, 1, 'stage-gate', ['[Stage 1] Patterns Found: none']);
+      state = recordImportantFindings(state, 4, 'gate-2', ['2 skipped tests']);
+      state = recordImportantFindings(state, 4, 'gate-2', []);
+
+      expect(state.importantFindings!.map(({ stage, source, message }) => ({ stage, source, message }))).toEqual([
+        { stage: 1, source: 'stage-gate', message: '[Stage 1] Patterns Found: none' },
+        { stage: 4, source: 'gate-2', message: '2 skipped tests' }
+      ]);
+      for (const finding of state.importantFindings!) {
+        expect(Number.isNaN(Date.parse(finding.recordedAt))).toBe(false);
+      }
+    });
+
+    it('recordImportantFindings tolerates a state file written before the field existed', () => {
+      const legacy = createFeatureState('legacy');
+      delete legacy.importantFindings;
+
+      const state = recordImportantFindings(legacy, 3, 'stage-gate', ['finding']);
+
+      expect(state.importantFindings!.map(f => f.message)).toEqual(['finding']);
+    });
+
+    it('a criterion whose validator throws blocks whatever its severity', async () => {
+      const contract: StageContract = {
+        stage: 5,
+        name: 'TEST',
+        description: 'one IMPORTANT criterion that throws',
+        acceptance: {
+          criteria: [
+            {
+              name: 'Explodes',
+              description: 'throws',
+              severity: 'IMPORTANT',
+              validator: async () => {
+                throw new Error('boom');
+              }
+            }
+          ]
+        },
+        artifacts: { required: [] }
+      };
+
+      const decision = await canAdvanceStage(5, contract, mockContext);
+
+      expect(decision.canAdvance).toBe(false);
+      expect(decision.blockers.join('\n')).toContain('Explodes');
+      expect(decision.importantFindings).toEqual([]);
+    });
+
+    it('no contract carries a requireAll switch any more', () => {
+      for (const contract of Object.values(stageContracts)) {
+        expect(Object.keys(contract.acceptance)).toEqual(['criteria']);
+      }
+    });
+
+    it('Stage 3 requires no documents; its harness-rendered summaries are optional', () => {
+      expect(stageContracts[3].artifacts.required).toEqual([]);
+      expect(stageContracts[3].artifacts.optional).toEqual([
+        'BACKEND_SUMMARY.md',
+        'API_CONTRACT.md',
+        'FRONTEND_SUMMARY.md',
+        'LOOP_LOG.json'
+      ]);
+      expect(stageContracts[4].artifacts.required).toEqual(['TEST_REPORT.md', 'VALIDATION_REPORT.md']);
     });
   });
 

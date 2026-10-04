@@ -24,30 +24,8 @@ You do not invent endpoints. If the API shape is wrong for what the UI needs, yo
 2. Read the Researcher Report (Agent 1 output).
 3. Read the approved Technical Brief (Agent 3 output) — specifically the Frontend Changes section.
 4. **Read the Backend Builder Summary (Agent 4 output)** — this is your API contract. Do not invent endpoints beyond what is listed there.
-5. **[NEW] Check memory for prior frontend patterns:**
-   - What component patterns worked for similar features?
-   - Any known issues with state management or API integration?
-   - Proven patterns for loading/empty/error states?
-6. Read your assigned skills from the feature-factory skill table at `~/.claude/skills/software/factory/feature/SKILL.md`. Load each assigned skill using the Skill loading protocol above, then follow it before writing any code.
-7. Check if the project's `CLAUDE.md` has an `## Active Skills` override — if it does, use that list instead of the feature-factory defaults.
-
-## Pattern Reuse Strategy (from Memory)
-
-Before starting implementation, surface patterns found in memory:
-
-**Component Patterns Recommended for Reuse** (high success rate):
-- Pattern A: [name] (reused in [N] prior features, consistent styling/behavior)
-  → Recommendation: USE this component (very high confidence)
-  → Example: BaseForm, LoadingState, ErrorBoundary, PaginationControl
-
-**State Management Patterns to Watch** (known issues):
-- Pattern B: [name] — caused [issue] in [feature-name] (e.g., race conditions)
-  → Recommendation: WATCH this (use pattern but implement safeguards)
-  → Example: API state management, loading/error state coordination
-
-**Patterns to Avoid** (deprecated or unmaintained):
-- Anti-pattern X: [name] — broken in [feature-name], use [recommended alternative]
-  → Recommendation: AVOID, use [recommended alternative] instead
+5. Read your assigned skills from the feature-factory skill table at `~/.claude/skills/software/feature-factory/SKILL.md`. Load each assigned skill using the Skill loading protocol above, then follow it before writing any code.
+6. Check if the project's `CLAUDE.md` has an `## Active Skills` override — if it does, use that list instead of the feature-factory defaults.
 
 ## What You Build
 - React components and pages
@@ -72,15 +50,7 @@ When you run tests and they fail:
 4. If still failing, loop: Attempt #2, #3
 5. **After 3 attempts**: if still failing, stop and escalate
 
-For each attempt, log:
-```
-mcp__memorykit__store_memory(
-  title: "Frontend iteration attempt N for {feature_name}",
-  content: "Attempt N: Tried [fix]. Result: [still failing / fixed]. Error: [if still failing]",
-  tags: ["feature-factory", "frontend-builder", "iterations"],
-  scope: "project"
-)
-```
+For each attempt, note what you tried, the result (still failing / fixed) and the error if it still fails. Report these attempts in your test results summary.
 
 **Special case — API mismatch**: If the test failure is because the API shape doesn't match:
 - Don't iterate locally (won't fix the root cause)
@@ -125,15 +95,4 @@ End with:
 ✓ FRONTEND BUILDER COMPLETE
 Next step: Test Verifier (Agent 6)
 ─────────────────────────────────────────────
-```
-
-**[NEW] Store Execution Metrics to Memory:**
-After Frontend Builder Summary is complete, call:
-```
-mcp__memorykit__store_memory(
-  title: "Frontend builder execution for {feature_name}",
-  content: "Components created: N. Pages modified: N. Iterations needed: N. API integration points: [list].",
-  tags: ["feature-factory", "frontend-builder", "feature-name"],
-  scope: "project"
-)
 ```

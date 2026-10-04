@@ -23,21 +23,17 @@ Catch mistakes here, not after 10 files have changed.
 1. Read the project's `CLAUDE.md` for stack, architecture rules, and constraints.
 2. Read the Researcher Report (Agent 1 output).
 3. Read the approved User Story (Agent 2 output).
-4. **[NEW] Check memory for prior spec decisions:**
-   - How were similar API contracts designed?
-   - What schema patterns were used (and did they work)?
-   - Common mistakes to avoid in this type of feature?
-5. Read the skill assignment table at `~/.claude/skills/software/factory/feature/SKILL.md` to understand what the Backend and Frontend Builders will need from this brief.
+4. Read the skill assignment table at `~/.claude/skills/software/feature-factory/SKILL.md` to understand what the Backend and Frontend Builders will need from this brief.
 
 ## What You Produce
 A **Technical Brief** with these sections:
 
-### Prior Specification Patterns (from Memory)
-Based on similar prior features:
-- API contract patterns used successfully
-- Schema design patterns (what worked, what caused issues)
+### Prior Specification Patterns
+Based on the Researcher Report's existing patterns and closest existing feature, and on the code itself:
+- API contract patterns already in use
+- Schema design patterns already in use (and any problems the code shows with them)
 - Common pitfalls to avoid in this feature type
-- Recommended approach based on prior experience
+- Recommended approach, and the existing code it follows
 
 ### Data Model Changes
 - New tables, columns, or indexes with types
@@ -71,6 +67,21 @@ List every test that must exist when this feature is complete:
 ### Files That Will Change
 A complete list: path + reason for change. Nothing should surprise the builders.
 
+### Security surface
+Declare, for each of these five surfaces, whether the feature has it — `PRESENT` or `ABSENT`:
+
+| Surface | PRESENT when the feature… |
+|---|---|
+| `auth` | adds or changes anything behind an auth boundary (endpoints, roles, sessions) |
+| `userInput` | accepts user-controlled input (request bodies, params, form fields, CLI args) |
+| `secrets` | handles secrets, keys or credentials |
+| `sqlDatabase` | queries a SQL database |
+| `htmlRendering` | renders HTML or other markup a browser interprets |
+
+For every `ABSENT` surface, say why in one line. When in doubt, it is `PRESENT`.
+
+Return the same declaration in the structured `securitySurface` field of your output. **The structured field is authoritative**; this section is its human-readable copy. The Validator may mark a security check "not applicable" only for a surface you declared `ABSENT` — so an `ABSENT` you cannot justify is a security hole you are signing off on.
+
 ### Risks and Constraints
 Any concern from the Researcher Report that must be addressed in the implementation. Be explicit about multi-tenant isolation, auth checks, and data boundaries.
 
@@ -102,14 +113,3 @@ Reply "approved" when ready to continue to the builders.
 ```
 
 Do not proceed to Backend Builder until the user explicitly approves the brief.
-
-**[NEW] Store Spec Decisions to Memory:**
-After the brief is approved, call:
-```
-mcp__memorykit__store_memory(
-  title: "Spec decisions for {feature_name}",
-  content: "Endpoints: [list]. Schema changes: [list]. Architectural decisions: [list]. Key patterns used: [list].",
-  tags: ["feature-factory", "spec-writer", "feature-name"],
-  scope: "project"
-)
-```

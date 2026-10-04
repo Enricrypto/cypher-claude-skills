@@ -58,7 +58,7 @@ npm test              # 152 tests, no network, no tokens
 npm run factory -- --feature "add an endpoint to update a user's email" --cwd /path/to/project
 ```
 
-Exits `0` only if all five stages pass their gates. Any escalation exits `1`.
+Exits `0` only on SUCCESS — the Stage 4 gate passed and the consolidator ran. Any escalation exits `1`.
 
 ### Authentication
 
@@ -76,9 +76,9 @@ Two caveats worth knowing:
 Stage 1  DISCOVER   01-researcher                        → Researcher Report
 Stage 2  PLAN       02-story-writer → 03-spec-writer     → User Story + Technical Brief
                     ⏸ CHECKPOINT 1 (story)  ⏸ CHECKPOINT 2 (brief)
-Stage 3  EXECUTE    04-backend-builder → 05-frontend-builder   (max 3 loop-backs each)
+Stage 3  EXECUTE    04-backend-builder → 05-frontend-builder   (max 3 attempts each)
 Stage 4  VERIFY     06-test-verifier → 07-validator      → regression + security check
-                    ⏸ CHECKPOINT 3 (PR)
+                    (PR review: a human step outside the program)
 Stage 5  DELIVER    08-feature-consolidator              → reusable patterns
 ```
 
@@ -912,7 +912,7 @@ Structured commit message discipline. Enforces conventional commits format with 
 
 | Skill | Type | Used in Feature Factory | Standalone | Trigger phrase |
 |---|---|---|---|---|
-| `feature-factory` | Chain (7 agents) | — | ✅ | `Read .claude/skills/factory/feature/SKILL.md` |
+| `feature-factory` | Chain (8 agents) | — | ✅ | `Read ~/.claude/skills/software/feature-factory/SKILL.md` |
 | `e2e-pipeline` | Orchestration (8 agents) | Test Verifier | ✅ | `Read .claude/skills/software/e2e-pipeline/E2E_PIPELINE_ORCHESTRATION.md` |
 | `architecture-patterns` | Workflow | Researcher · Spec Writer | ✅ | "Design this architecture" |
 | `api-design-principles` | Workflow | Spec Writer · Backend Builder | ✅ | "Review this API design" |

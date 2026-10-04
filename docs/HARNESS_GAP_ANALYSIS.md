@@ -79,11 +79,9 @@ agent behaves identically on any machine. This is right, and it is the reason fo
 
 ### GAP-1 — Every builder's skill assignment is a dead link
 
-Six agent contracts instruct the agent to read:
-
-```
-~/.claude/skills/software/factory/feature/SKILL.md
-```
+Six agent contracts instruct the agent to read the feature-factory skill table under
+`~/.claude/skills/software/`, but with the two path segments swapped: `factory` then `feature`
+as separate directories, instead of the single `feature-factory` directory.
 
 That path does not exist. The global skill lives at
 `~/.claude/skills/software/feature-factory/SKILL.md`.

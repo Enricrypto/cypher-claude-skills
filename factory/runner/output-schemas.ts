@@ -18,6 +18,7 @@
  */
 
 import { isReadOnly, FeatureFactoryAgent, AGENT_STAGE, REQUIRED_ARTIFACTS } from './agent-registry';
+import { SECURITY_CHECKS, SECURITY_CHECK_SURFACE, SECURITY_SURFACES, SecurityCheckName } from '../harness/agent-output-schema';
 
 type Schema = Record<string, unknown>;
 
@@ -45,6 +46,31 @@ const object = (properties: Record<string, Schema>, required: string[]): Schema 
  * them written for them, or the materialization gate would be checking the harness's work
  * instead of the builder's.
  */
+/**
+ * A Validator security check: true, false, or "not_applicable" (AC-67).
+ *
+ * `anyOf` is unverified against the Agent SDK's outputFormat (I-13); if a live run rejects it,
+ * the fallback is { type: ['boolean','string'], enum: [true, false, 'not_applicable'] }.
+ */
+const securityCheck = (check: SecurityCheckName, description: string): Schema => ({
+  anyOf: [{ type: 'boolean' }, { type: 'string', enum: ['not_applicable'] }],
+  description:
+    `${description} true = checked and protected; false = a finding (blocks the stage); ` +
+    `"not_applicable" = the feature has no ${SECURITY_CHECK_SURFACE[check]} surface. "not_applicable" is ` +
+    `accepted only with a reason in notApplicableReasons.${check} AND the approved brief's securitySurface ` +
+    `declaring ${SECURITY_CHECK_SURFACE[check]} ABSENT; otherwise it blocks.`
+});
+
+const SECURITY_CHECK_DESCRIPTIONS: Record<SecurityCheckName, string> = {
+  authImplemented: 'Auth checks present where needed.',
+  inputValidated: 'All user-controlled input validated.',
+  noHardcodedSecrets: 'No secrets in code or logs.',
+  sqlInjectionProtected: 'Database access is parameterised.',
+  xssProtected: 'Rendered output is escaped.'
+};
+
+const surfaceDeclaration = (description: string): Schema => ({ type: 'string', enum: ['PRESENT', 'ABSENT'], description });
+
 function artifactSchema(agent: FeatureFactoryAgent, readOnly: boolean): Schema {
   const requiredNames = REQUIRED_ARTIFACTS[agent];
 
@@ -203,9 +229,20 @@ const DETAILS_BY_AGENT: Record<FeatureFactoryAgent, { properties: Record<string,
       testStrategy: object(
         { unitTests: arrayOf(str('Test'), 'Unit'), integrationTests: arrayOf(str('Test'), 'Integration'), e2eTests: arrayOf(str('Test'), 'E2E') },
         ['unitTests', 'integrationTests', 'e2eTests']
+      ),
+      securitySurface: object(
+        {
+          auth: surfaceDeclaration('Does the feature add or change anything behind an auth boundary (endpoints, roles, sessions)?'),
+          userInput: surfaceDeclaration('Does it accept user-controlled input (request bodies, params, form fields, CLI args)?'),
+          secrets: surfaceDeclaration('Does it handle secrets, keys or credentials?'),
+          sqlDatabase: surfaceDeclaration('Does it query a SQL database?'),
+          htmlRendering: surfaceDeclaration('Does it render HTML or other markup a browser interprets?'),
+          notes: str('Why each ABSENT surface is absent. Mirror this in the "Security surface" section of TECHNICAL_BRIEF.md.')
+        },
+        [...SECURITY_SURFACES]
       )
     },
-    required: ['dataModel', 'apiContract', 'uiComponents', 'fileList', 'testStrategy']
+    required: ['dataModel', 'apiContract', 'uiComponents', 'fileList', 'testStrategy', 'securitySurface']
   },
 
   '04-backend-builder': builderDetails(),
@@ -258,13 +295,18 @@ const DETAILS_BY_AGENT: Record<FeatureFactoryAgent, { properties: Record<string,
       ),
       security: object(
         {
-          authImplemented: bool('Auth checks present where needed'),
-          inputValidated: bool('All input validated'),
-          noHardcodedSecrets: bool('No secrets in code or logs'),
-          sqlInjectionProtected: bool(''),
-          xssProtected: bool('')
+          ...Object.fromEntries(
+            SECURITY_CHECKS.map(check => [check, securityCheck(check, SECURITY_CHECK_DESCRIPTIONS[check])])
+          ),
+          notApplicableReasons: {
+            type: 'object',
+            description: 'For every check you set to "not_applicable": why this feature has no such surface.',
+            properties: Object.fromEntries(SECURITY_CHECKS.map(check => [check, str(`Why ${check} does not apply`)])),
+            additionalProperties: false
+          },
+          issues: arrayOf(str('A security finding, with file:line'), 'Security findings. Each one blocks the stage.')
         },
-        ['authImplemented', 'inputValidated', 'noHardcodedSecrets', 'sqlInjectionProtected', 'xssProtected']
+        [...SECURITY_CHECKS]
       ),
       issues: arrayOf(
         object(
@@ -278,7 +320,7 @@ const DETAILS_BY_AGENT: Record<FeatureFactoryAgent, { properties: Record<string,
           },
           ['severity', 'message', 'suggestion', 'canFix']
         ),
-        'Every issue found. An empty array is a valid finding — it means the code is clean. A false security boolean above IS an issue and blocks the stage.'
+        'Every issue found. An empty array is a valid finding — it means the code is clean. A false security check above IS an issue and blocks the stage.'
       )
     },
     required: ['storyCompliance', 'briefCompliance', 'codeQuality', 'security', 'issues']

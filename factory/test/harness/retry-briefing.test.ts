@@ -20,131 +20,38 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
-import { mkdtempSync, rmSync } from 'fs';
-import { tmpdir } from 'os';
-import { join } from 'path';
 
-import { runFeatureFactory } from '../../feature/workflows/feature-factory-orchestrator';
-import { AgentInvocation } from '../../runner/invoke-agent';
+import { backend, researcher, spec, story } from '../fixtures/agent-outputs';
+import { runToEnd, scriptedInvoker, tempProject, TempProject } from '../fixtures/harness-run';
 
+let project: TempProject;
 let projectDir: string;
 
 beforeEach(() => {
-  projectDir = mkdtempSync(join(tmpdir(), 'ff-retry-'));
+  project = tempProject('ff-retry-');
+  projectDir = project.dir;
 });
 
 afterEach(() => {
-  rmSync(projectDir, { recursive: true, force: true });
+  project.cleanup();
 });
-
-function researcher(): any {
-  return {
-    stage: 1, agent: '01-researcher', timestamp: new Date().toISOString(), status: 'PASS',
-    details: {
-      summary: 'Mapped the codebase.',
-      artifacts: [{ name: 'RESEARCHER_REPORT.md', path: 'RESEARCHER_REPORT.md', description: 'r', content: '# Researcher Report\n\nMapped auth.' }],
-      architecture: { layers: ['routes', 'services'], description: 'Layered' },
-      filesIdentified: [
-        { path: 'src/a.ts', role: 'service', reason: 'core', priority: 'MUST_MODIFY' },
-        { path: 'src/b.ts', role: 'controller', reason: 'entry', priority: 'LIKELY' },
-        { path: 'src/c.ts', role: 'util', reason: 'helper', priority: 'OPTIONAL' }
-      ],
-      existingPatterns: [{ name: 'BaseService', description: 'b', locations: ['src/a.ts'], confidence: 0.9, recommendation: 'REUSE' }],
-      risks: [{ type: 'TECHNICAL', severity: 'IMPORTANT', description: 'Timezones' }],
-      timeEstimate: { discover: 2, plan: 3, execute: 8, verify: 5, deliver: 2, total: 20, confidence: 0.7 }
-    }
-  };
-}
-
-function story(): any {
-  return {
-    stage: 2, agent: '02-story-writer', timestamp: new Date().toISOString(), status: 'PASS',
-    details: {
-      summary: 'User can enable 2FA.',
-      artifacts: [{
-        name: 'USER_STORY.md', path: 'USER_STORY.md', description: 's',
-        content: ['# User Story', '## AC-1', 'Given a', 'When b', 'Then c',
-                  '## AC-2', 'Given a', 'When b', 'Then c',
-                  '## AC-3', 'Given a', 'When b', 'Then c'].join('\n')
-      }],
-      userStory: { persona: 'user', goal: 'enable 2FA', benefit: 'security' },
-      acceptanceCriteria: [
-        { id: 'AC-1', given: 'a', when: 'b', then: 'c', priority: 'MUST', testable: true },
-        { id: 'AC-2', given: 'a', when: 'b', then: 'c', priority: 'MUST', testable: true },
-        { id: 'AC-3', given: 'a', when: 'b', then: 'c', priority: 'MUST', testable: true }
-      ],
-      edgeCases: [], assumptions: [], outOfScope: []
-    }
-  };
-}
-
-/** A backend-only spec, so the Frontend Builder is skipped and the test stays focused. */
-function spec(): any {
-  return {
-    stage: 2, agent: '03-spec-writer', timestamp: new Date().toISOString(), status: 'PASS',
-    details: {
-      summary: 'Technical brief.',
-      artifacts: [
-        { name: 'TECHNICAL_BRIEF.md', path: 'TECHNICAL_BRIEF.md', description: 'b', content: '# Technical Brief\n\nTOTP.' },
-        { name: 'FILE_LIST.md', path: 'FILE_LIST.md', description: 'f', content: '# Files\n\n- src/a.ts (CREATE)' }
-      ],
-      apiContract: { endpoints: [], errorHandling: 'RFC7807' },
-      fileList: [{ path: 'src/a.ts', type: 'CREATE', reason: 'core', complexity: 'SIMPLE' }],
-      testStrategy: { unitTests: [], integrationTests: [], e2eTests: [] },
-      dataModel: { tables: [] },
-      uiComponents: []
-    }
-  };
-}
-
-/** A backend build whose tests failed, carrying a specific, classifiable error. */
-function failingBackend(error: string): any {
-  return {
-    stage: 3, agent: '04-backend-builder', timestamp: new Date().toISOString(), status: 'PASS',
-    details: {
-      summary: 'Implemented, tests failing.',
-      artifacts: [],
-      filesModified: ['src/a.ts'],
-      apiContract: { endpoints: [], errorHandling: 'RFC7807' },
-      testing: {
-        testsWritten: 1, testsPassed: 0, testsFailed: 1,
-        failingTests: [{ name: 'enables 2FA', error }]
-      }
-    }
-  };
-}
 
 /**
  * Drives the chain to Stage 3 and captures every prompt the backend builder receives.
- * The builder always fails, so the loop runs its full three attempts.
+ * The builder always fails, so the loop runs its full three attempts. The spec is
+ * backend-only (the fixture default), so the Frontend Builder is skipped.
  */
 async function capturePromptsWithFailure(error: string): Promise<string[]> {
-  const prompts: string[] = [];
-
-  const invoke = async (call: AgentInvocation) => {
-    if (call.agent === '01-researcher') return researcher();
-    if (call.agent === '02-story-writer') return story();
-    if (call.agent === '03-spec-writer') return spec();
-    if (call.agent === '04-backend-builder') {
-      prompts.push(call.prompt);
-      return failingBackend(error);
-    }
-    return {
-      stage: call.stage, agent: call.agent, timestamp: new Date().toISOString(),
-      status: 'PASS', details: { summary: 'x', artifacts: [] }
-    };
-  };
-
-  await runFeatureFactory({
-    featureName: 'retry-briefing',
-    featureDescription: 'add 2FA',
-    cwd: projectDir,
-    invoke,
-    approveCheckpoint: async () => true,
-    logger: () => {}
+  const invoker = scriptedInvoker({
+    '01-researcher': researcher(),
+    '02-story-writer': story(),
+    '03-spec-writer': spec(),
+    '04-backend-builder': backend({ testsFailed: 1, failingError: error })
   });
 
-  return prompts;
+  await runToEnd({ featureName: 'retry-briefing', cwd: projectDir, invoke: invoker.invoke });
+
+  return invoker.promptsFor('04-backend-builder');
 }
 
 describe('the retry prompt carries the diagnosis', () => {
@@ -197,32 +104,17 @@ describe('the retry prompt carries the diagnosis', () => {
   });
 
   it('does not invent a diagnosis when the builder named no failing test', async () => {
-    const prompts: string[] = [];
-
-    const invoke = async (call: AgentInvocation) => {
-      if (call.agent === '01-researcher') return researcher();
-      if (call.agent === '02-story-writer') return story();
-      if (call.agent === '03-spec-writer') return spec();
-      if (call.agent === '04-backend-builder') {
-        prompts.push(call.prompt);
-        const out = failingBackend('irrelevant');
-        out.details.testing.failingTests = []; // failed, but named nothing
-        return out;
-      }
-      return {
-        stage: call.stage, agent: call.agent, timestamp: new Date().toISOString(),
-        status: 'PASS', details: { summary: 'x', artifacts: [] }
-      };
-    };
-
-    await runFeatureFactory({
-      featureName: 'no-named-failure',
-      featureDescription: 'add 2FA',
-      cwd: projectDir,
-      invoke,
-      approveCheckpoint: async () => true,
-      logger: () => {}
+    const invoker = scriptedInvoker({
+      '01-researcher': researcher(),
+      '02-story-writer': story(),
+      '03-spec-writer': spec(),
+      // Failed, but named nothing: no failingError, so failingTests is empty.
+      '04-backend-builder': backend({ testsFailed: 1 })
     });
+
+    await runToEnd({ featureName: 'no-named-failure', cwd: projectDir, invoke: invoker.invoke });
+
+    const prompts = invoker.promptsFor('04-backend-builder');
 
     expect(prompts[1]).toMatch(/could not classify why/i);
     expect(prompts[1]).not.toMatch(/\*\*Fix Class:\*\*/);

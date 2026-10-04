@@ -9,6 +9,7 @@
  */
 
 import { ArtifactRef, verifyArtifactMaterialization } from './agent-output-schema';
+import { testsRan } from './regression-baseline';
 
 export interface StageCriterion {
   name: string;
@@ -28,8 +29,12 @@ export interface StageContract {
   stage: 1 | 2 | 3 | 4 | 5;
   name: string;
   description: string;
+  /**
+   * Only CRITICAL criteria block (AC-17). An IMPORTANT failure is returned as a finding and the
+   * stage still advances. (There used to be a `requireAll` switch, set true everywhere, which
+   * made IMPORTANT block exactly like CRITICAL and the severity label meaningless.)
+   */
   acceptance: {
-    requireAll: boolean;
     criteria: StageCriterion[];
   };
   artifacts: {
@@ -53,9 +58,51 @@ export interface StageAdvancementDecision {
   canAdvance: boolean;
   passRate: number;
   criteriaResults: Record<string, CriterionResult>;
+  /** Why the stage cannot advance: failed CRITICAL criteria, missing documents, thrown validators. */
   blockers: string[];
+  /** Failed IMPORTANT criteria, as "[Stage N] <criterion>: <details>". Never blocking. */
+  importantFindings: string[];
+  /** Names in `contract.artifacts.required` that are absent from the context's artifacts. */
+  missingArtifacts: string[];
   recommendation: 'ADVANCE' | 'WAIT' | 'ESCALATE' | 'RETRY';
   reason: string;
+}
+
+/** A Gate 2 measurement, as the harness's execution audit counted it (D-5). */
+export interface ExecutionMeasurement {
+  total: number;
+  passed: number;
+  failed: number;
+  /** 0-1, over the tests that ran. */
+  passRate: number;
+}
+
+/**
+ * The Stage 4 metadata keys, named once (AC-62).
+ *
+ * The old Stage 4 test passed `acTestedCount` / `acTotalCount`, keys the gate never read, and
+ * passed anyway because every criterion defaulted its missing input to a pass. Typing the
+ * metadata turns a wrong key into a compile error; the criteria below fail closed on a missing
+ * input, so an empty context can no longer pass.
+ *
+ * Built by stage-context.ts from the Test Verifier, the story, the Validator and the brief.
+ */
+export interface Stage4Metadata {
+  acceptanceCriteriaTotalCount?: number;
+  acceptanceCriteriaTestedCount?: number;
+  acceptanceCriteriaNotCoverableCount?: number;
+  /** From the approved story itself, so the Test Verifier cannot shrink the denominator. */
+  storyAcceptanceCriteriaCount?: number;
+  criticalIssuesCount?: number;
+  securityIssuesCount?: number;
+  securityBlockers?: string[];
+  /** The latest Gate 2 measurement. Harness-side: passed by the orchestrator, never by an agent. */
+  executionMeasurement?: ExecutionMeasurement;
+  /**
+   * The count of tests that RAN (`passed + failed`, see testsRan) that the measurement's own
+   * ran-count must not fall below. Not `total`: skipped/todo tests do not count. Undefined: no reference.
+   */
+  regressionReferenceCount?: number;
 }
 
 /**
@@ -67,7 +114,6 @@ export const stageContracts: Record<number, StageContract> = {
     name: 'DISCOVER',
     description: 'Map codebase, identify patterns, assess risks',
     acceptance: {
-      requireAll: true,
       criteria: [
         {
           name: 'Researcher Report Complete',
@@ -107,7 +153,6 @@ export const stageContracts: Record<number, StageContract> = {
     name: 'PLAN',
     description: 'Design user story and technical specification',
     acceptance: {
-      requireAll: true,
       criteria: [
         {
           name: 'User Story Complete',
@@ -147,7 +192,6 @@ export const stageContracts: Record<number, StageContract> = {
     name: 'EXECUTE',
     description: 'Implement backend and frontend',
     acceptance: {
-      requireAll: true,
       criteria: [
         {
           name: 'All Files Modified',
@@ -187,9 +231,12 @@ export const stageContracts: Record<number, StageContract> = {
         }
       ]
     },
+    // Nothing required (I-4): the builders' summaries are rendered by the harness from their
+    // structured output, and a gate that checked documents the harness itself wrote would prove
+    // nothing. The real Stage 3 evidence is the materialization audit and the criteria above.
     artifacts: {
-      required: ['BACKEND_BUILDER_SUMMARY.md', 'FRONTEND_BUILDER_SUMMARY.md'],
-      optional: ['LOOP_LOG.json']
+      required: [],
+      optional: ['BACKEND_SUMMARY.md', 'API_CONTRACT.md', 'FRONTEND_SUMMARY.md', 'LOOP_LOG.json']
     },
     nextStage: 4,
     loopBackStage: 3
@@ -200,7 +247,6 @@ export const stageContracts: Record<number, StageContract> = {
     name: 'VERIFY',
     description: 'Test and validate implementation',
     acceptance: {
-      requireAll: true,
       criteria: [
         {
           name: 'Acceptance Tests Complete',
@@ -241,7 +287,6 @@ export const stageContracts: Record<number, StageContract> = {
     name: 'DELIVER',
     description: 'Consolidate learnings after merge',
     acceptance: {
-      requireAll: true,
       criteria: [
         {
           name: 'Consolidation Complete',
@@ -280,7 +325,9 @@ export async function canAdvanceStage(
 ): Promise<StageAdvancementDecision> {
   const results: Record<string, CriterionResult> = {};
   const blockers: string[] = [];
+  const importantFindings: string[] = [];
   let passCount = 0;
+  let anyValidatorThrew = false;
 
   for (const criterion of contract.acceptance.criteria) {
     try {
@@ -289,52 +336,59 @@ export async function canAdvanceStage(
 
       if (result.passed) {
         passCount++;
-      } else {
-        if (criterion.severity === 'CRITICAL') {
-          blockers.push(`[CRITICAL] ${criterion.name}: ${result.details}`);
-          if (result.blockers) {
-            blockers.push(...result.blockers.map(b => `  → ${b}`));
-          }
-        } else if (criterion.severity === 'IMPORTANT') {
-          blockers.push(`[IMPORTANT] ${criterion.name}: ${result.details}`);
+      } else if (criterion.severity === 'CRITICAL') {
+        blockers.push(`[CRITICAL] ${criterion.name}: ${result.details}`);
+        if (result.blockers) {
+          blockers.push(...result.blockers.map(b => `  → ${b}`));
         }
+      } else if (criterion.severity === 'IMPORTANT') {
+        importantFindings.push(`[Stage ${stage}] ${criterion.name}: ${result.details}`);
       }
     } catch (error) {
+      // A criterion that could not be evaluated has verified nothing. Fail closed, whatever its
+      // severity: an IMPORTANT check that crashes must not quietly become "advance".
+      anyValidatorThrew = true;
       results[criterion.name] = {
         passed: false,
         score: 0,
         details: `Validation error: ${error instanceof Error ? error.message : String(error)}`,
         blockers: ['Contact human — validation harness error']
       };
-      blockers.push(`[ERROR] ${criterion.name} validation failed`);
+      blockers.push(`[ERROR] ${criterion.name} validation failed: ${results[criterion.name].details}`);
     }
   }
 
-  const passRate = (passCount / contract.acceptance.criteria.length) * 100;
+  // Required documents are enforced, not just listed (AC-21).
+  const missingArtifacts = contract.artifacts.required.filter(name => context.artifacts[name] === undefined);
+  for (const name of missingArtifacts) {
+    blockers.push(`[ARTIFACT] Required document ${name} is missing`);
+  }
+
+  const criteriaCount = contract.acceptance.criteria.length;
+  const passRate = criteriaCount === 0 ? 100 : (passCount / criteriaCount) * 100;
   const allCriticalPass = contract.acceptance.criteria
     .filter(c => c.severity === 'CRITICAL')
     .every(c => results[c.name]?.passed);
 
-  const canAdvance = contract.acceptance.requireAll
-    ? allCriticalPass && passCount === contract.acceptance.criteria.length
-    : allCriticalPass;
+  const canAdvance = allCriticalPass && missingArtifacts.length === 0 && !anyValidatorThrew;
 
   const recommendation: StageAdvancementDecision['recommendation'] = canAdvance
     ? 'ADVANCE'
-    : passRate === 100
-      ? 'ADVANCE'
-      : passRate >= 80
-        ? 'WAIT'
-        : 'ESCALATE';
+    : passRate >= 80
+      ? 'WAIT'
+      : 'ESCALATE';
 
   return {
     canAdvance,
     passRate,
     criteriaResults: results,
     blockers,
+    importantFindings,
+    missingArtifacts,
     recommendation,
     reason: canAdvance
-      ? `All criteria met. Ready to advance to Stage ${contract.nextStage || 'terminal'}.`
+      ? `All CRITICAL criteria met. Ready to advance to Stage ${contract.nextStage || 'terminal'}.` +
+        (importantFindings.length > 0 ? ` ${importantFindings.length} IMPORTANT finding(s) recorded.` : '')
       : blockers.length > 0
         ? blockers.join('\n')
         : 'Unknown failure — check logs'
@@ -575,21 +629,62 @@ async function validateLoopLimits(ctx: StageContext): Promise<CriterionResult> {
 }
 
 async function validateAcceptanceTestsComplete(ctx: StageContext): Promise<CriterionResult> {
-  const testedCount = ctx.metadata.acceptanceCriteriaTestedCount || 0;
-  const totalCount = ctx.metadata.acceptanceCriteriaTotalCount || 0;
-  if (testedCount < totalCount) {
+  const md = ctx.metadata as Stage4Metadata;
+  const total = md.acceptanceCriteriaTotalCount;
+  const tested = md.acceptanceCriteriaTestedCount ?? 0;
+  const notCoverable = md.acceptanceCriteriaNotCoverableCount ?? 0;
+  const storyCount = md.storyAcceptanceCriteriaCount;
+
+  // Zero criteria is not "all criteria tested". It is no evidence at all.
+  if (typeof total !== 'number' || total <= 0) {
     return {
       passed: false,
-      score: (testedCount / totalCount) * 100,
-      details: `${testedCount}/${totalCount} acceptance criteria tested`,
+      score: 0,
+      details: `No acceptance criteria reported by the Test Verifier (total ${total ?? 'missing'})`,
+      blockers: ['The Test Verifier must report every acceptance criterion in the story']
+    };
+  }
+
+  // The denominator comes from the approved story, not from the agent being graded.
+  if (typeof storyCount !== 'number' || total !== storyCount) {
+    return {
+      passed: false,
+      score: 0,
+      details:
+        typeof storyCount === 'number'
+          ? `Test Verifier reported ${total} acceptance criteria, but the story has ${storyCount}`
+          : `Test Verifier reported ${total} acceptance criteria, but the story's count is unknown`,
+      blockers: ['Every acceptance criterion in the approved story must be tested or marked not coverable']
+    };
+  }
+
+  const covered = tested + notCoverable;
+  if (covered < total) {
+    return {
+      passed: false,
+      score: (covered / total) * 100,
+      details: `${covered}/${total} acceptance criteria tested or marked not coverable`,
       blockers: ['Complete testing of all acceptance criteria']
     };
   }
-  return { passed: true, score: 100, details: `All ${totalCount} acceptance criteria tested` };
+
+  return {
+    passed: true,
+    score: 100,
+    details: `All ${total} acceptance criteria accounted for (${tested} tested, ${notCoverable} not coverable)`
+  };
 }
 
 async function validateValidationPassed(ctx: StageContext): Promise<CriterionResult> {
-  const criticalIssues = ctx.metadata.criticalIssuesCount || 0;
+  const criticalIssues = (ctx.metadata as Stage4Metadata).criticalIssuesCount;
+  if (typeof criticalIssues !== 'number') {
+    return {
+      passed: false,
+      score: 0,
+      details: 'No Validator result to judge',
+      blockers: ['Run 07-Validator; an absent validation is not a clean one']
+    };
+  }
   if (criticalIssues > 0) {
     return {
       passed: false,
@@ -602,29 +697,81 @@ async function validateValidationPassed(ctx: StageContext): Promise<CriterionRes
 }
 
 async function validateSecurityPassed(ctx: StageContext): Promise<CriterionResult> {
-  const securityIssues = ctx.metadata.securityIssuesCount || 0;
-  if (securityIssues > 0) {
+  const md = ctx.metadata as Stage4Metadata;
+  if (typeof md.securityIssuesCount !== 'number') {
     return {
       passed: false,
       score: 0,
-      details: `${securityIssues} security vulnerabilities found`,
-      blockers: ['Fix security vulnerabilities before advancing']
+      details: 'No security evaluation to judge',
+      blockers: ['Run 07-Validator; an absent security assessment is not a clean one']
     };
   }
-  return { passed: true, score: 100, details: 'Security audit passed - no vulnerabilities' };
+  if (md.securityIssuesCount > 0) {
+    return {
+      passed: false,
+      score: 0,
+      details: `${md.securityIssuesCount} security check(s) blocking`,
+      blockers: md.securityBlockers && md.securityBlockers.length > 0
+        ? md.securityBlockers
+        : ['Fix security vulnerabilities before advancing']
+    };
+  }
+  return { passed: true, score: 100, details: 'Security audit passed - no blocking checks' };
 }
 
+/**
+ * "No Regressions" judges the harness's own Gate 2 count (D-5, AC-22, AC-66). It used to read a
+ * count the Validator reported about itself, defaulting a missing one to a pass.
+ *
+ * Fails when there is no measurement, when anything that ran failed, or when a reference exists
+ * and fewer tests ran than it. With no reference, only the 100% rule applies.
+ *
+ * "Ran" means `passed + failed` (testsRan), compared against a reference in the same unit
+ * (IMPORTANT-5): skipped and todo tests are reported but never count toward the reference.
+ */
 async function validateNoRegressions(ctx: StageContext): Promise<CriterionResult> {
-  const regressions = ctx.metadata.regressionCount || 0;
-  if (regressions > 0) {
+  const md = ctx.metadata as Stage4Metadata;
+  const measured = md.executionMeasurement;
+  const reference = md.regressionReferenceCount;
+
+  if (!measured || typeof measured.total !== 'number' || typeof measured.passRate !== 'number') {
     return {
       passed: false,
       score: 0,
-      details: `${regressions} regressions detected (previously passing tests now failing)`,
-      blockers: ['Fix regressions before advancing']
+      details: 'No Gate 2 measurement to judge',
+      blockers: ['Gate 2 must run and count the tests; an absent measurement is not a clean one']
     };
   }
-  return { passed: true, score: 100, details: 'No regressions - all previously passing tests still pass' };
+
+  if (!(measured.passRate >= 1)) {
+    return {
+      passed: false,
+      score: measured.passRate * 100,
+      details: `Gate 2 pass rate ${(measured.passRate * 100).toFixed(1)}% (${measured.failed} failing of ${measured.passed + measured.failed}); 100% required`,
+      blockers: ['Fix the failing tests before advancing']
+    };
+  }
+
+  const ran = testsRan(measured);
+  const notRun = measured.total > ran ? ` (${measured.total - ran} reported but not run: skipped/todo do not count)` : '';
+
+  if (typeof reference === 'number' && ran < reference) {
+    return {
+      passed: false,
+      score: reference > 0 ? (ran / reference) * 100 : 0,
+      details: `Gate 2: ${ran} tests ran${notRun}, below the regression reference of ${reference}`,
+      blockers: ['Tests were lost or skipped: restore the missing tests (or explain the removal) before advancing']
+    };
+  }
+
+  return {
+    passed: true,
+    score: 100,
+    details:
+      typeof reference === 'number'
+        ? `All ${ran} tests that ran pass${notRun}, at or above the regression reference of ${reference}`
+        : `All ${ran} tests that ran pass${notRun}; no regression reference, so only the 100% rule applies`
+  };
 }
 
 async function validateConsolidationComplete(ctx: StageContext): Promise<CriterionResult> {

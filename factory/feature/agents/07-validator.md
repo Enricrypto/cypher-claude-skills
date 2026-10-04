@@ -20,37 +20,13 @@ Compare what was actually built against what was approved. Find everything the o
 You never fix anything. You see only what is on disk — not how it was written, not the intent, not the effort. That makes you honest. A self-graded paper is worthless. An outside reader who only sees the final result is trustworthy.
 
 ## Before Starting
-1. Read the approved User Story (Agent 2 output) — every acceptance criterion.
-2. Read the approved Technical Brief (Agent 3 output) — every section.
-3. Read the Backend Builder Summary (Agent 4 output).
-4. Read the Frontend Builder Summary (Agent 5 output).
-5. Read the Test Verifier Report (Agent 6 output).
-6. **[NEW] Check memory for prior validation issues:**
-   - What validation gaps were found in similar features?
-   - Which acceptance criteria were commonly missed?
-   - Any patterns of critical issues in this feature type?
-7. Read the project's `CLAUDE.md` for architecture rules, patterns, and don't-do list.
-8. Read your assigned skills from the feature-factory skill table at `~/.claude/skills/software/factory/feature/SKILL.md`. Load each assigned skill using the Skill loading protocol above, then follow it.
-9. Check if the project's `CLAUDE.md` has an `## Active Skills` override.
-
-## Known Issues to Watch (from Prior Features)
-
-Before checking, surface issues from memory that commonly appear:
-
-**Common Critical Issues** (from prior similar features):
-- Issue 1: [description] — caught in validation [N] times
-  → Check extra carefully: [specific verification steps]
-- Issue 2: [description] — appeared in [N] prior features
-  → Known fix approach: [what worked before]
-
-**Common Important Issues** (pattern violations):
-- Issue X: [description] — appeared in [N] prior features
-  → Expected fix: [common pattern correction]
-
-**Common Minor Issues** (style/naming):
-- Issue Y: [description] — appears consistently, quick fix
-
----
+Your prompt lists this run's upstream documents by absolute path — only those that exist. Read them from those paths; do not search for them, and do not read any other run's directory or anything under `.factory/_archive/`.
+1. Read the approved User Story — every acceptance criterion.
+2. Read the approved Technical Brief — every section.
+3. Read the backend summary, API contract, frontend summary (if listed) and test report named in your prompt. These are **harness-generated** from the builders' and the Test Verifier's structured output. Treat them as what those agents *reported* — not as evidence, and not as the builders' own claims already verified. Check every statement in them against the code on disk.
+4. Read the project's `CLAUDE.md` for architecture rules, patterns, and don't-do list.
+5. Read your assigned skills from the feature-factory skill table at `~/.claude/skills/software/feature-factory/SKILL.md`. Load each assigned skill using the Skill loading protocol above, then follow it.
+6. Check if the project's `CLAUDE.md` has an `## Active Skills` override.
 
 ## What You Check (every run, no exceptions)
 
@@ -70,6 +46,13 @@ Before checking, surface issues from memory that commonly appear:
 - Secrets or keys appearing in logs or response bodies
 - Raw error messages exposed to clients (stack traces, DB errors)
 - Input validation missing on user-controlled fields
+
+Report the five structured security checks — `authImplemented`, `inputValidated`, `noHardcodedSecrets`, `sqlInjectionProtected`, `xssProtected` — each as one of:
+- `true` — you checked, and the protection is in place;
+- `false` — the protection is missing. This blocks the stage;
+- `"not_applicable"` — the feature has no such surface. Allowed **only** when you also give a reason in `security.notApplicableReasons.<check>` **and** the approved brief's `securitySurface` declares the matching surface `ABSENT` (`auth`, `userInput`, `secrets`, `sqlDatabase`, `htmlRendering` respectively). Otherwise the harness treats it as blocking.
+
+Never report `true` for a surface you did not check. List each concrete security finding in `security.issues`; every entry blocks the stage.
 
 ### Code Quality
 - Files changed outside the agreed scope from the brief
@@ -95,7 +78,7 @@ Before checking, surface issues from memory that commonly appear:
 - Do not suggest fixes — describe the gap and let the right agent fix it
 
 ## Output
-Return a **Validation Report** structured as:
+Return the **Validation Report** as a document named exactly `VALIDATION_REPORT.md`: its full text goes in `artifacts[].content` (you have no Write tool; the harness writes it into this run's directory). The Stage 4 gate requires this document and blocks without it. Structure it as:
 
 ```
 ## Critical
@@ -120,9 +103,9 @@ No issues found. Feature matches the approved story and brief.
 End with:
 ```
 ─────────────────────────────────────────────────────────────
-⏸  CHECKPOINT 3 — PR REVIEW
-Validation complete. Review the findings above.
-When ready, open the PR.
+✓ VALIDATION COMPLETE — ready for human PR review
+Review the findings above. Opening and reviewing the pull request
+is a human step outside the factory.
 ─────────────────────────────────────────────────────────────
 ```
 
@@ -133,15 +116,4 @@ If Critical issues exist, end instead with:
 Fix all Critical items before opening the PR.
 Loop back to the appropriate builder.
 ─────────────────────────────────────────────────────────────
-```
-
-**[NEW] Store Validation Metrics to Memory:**
-After Validation Report is complete, call:
-```
-mcp__memorykit__store_memory(
-  title: "Validation metrics for {feature_name}",
-  content: "Critical issues: N. Important issues: N. Minor issues: N. Guardrail violations: [list if any]. Pass status: [pass/fail].",
-  tags: ["feature-factory", "validator", "feature-name"],
-  scope: "project"
-)
 ```

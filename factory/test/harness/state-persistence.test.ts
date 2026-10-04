@@ -13,99 +13,31 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'fs';
-import { tmpdir } from 'os';
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
 import { join } from 'path';
 
 import { runFeatureFactory } from '../../feature/workflows/feature-factory-orchestrator';
 import { AgentInvocation } from '../../runner/invoke-agent';
 import { loadState, saveState, stateFilePath, StatePersistenceError } from '../../harness/state-store';
 import { createFeatureState, deserializeState, recordAgentStep, FeatureState } from '../../harness/state-tracker';
+import { placeholder, researcher, story } from '../fixtures/agent-outputs';
+import { scriptedInvoker, tempProject, TempProject } from '../fixtures/harness-run';
 
+let project: TempProject;
 let projectDir: string;
 
 beforeEach(() => {
-  projectDir = mkdtempSync(join(tmpdir(), 'ff-state-'));
+  project = tempProject('ff-state-');
+  projectDir = project.dir;
 });
 
 afterEach(() => {
-  rmSync(projectDir, { recursive: true, force: true });
+  project.cleanup();
 });
 
-/** A researcher output good enough to clear the stage-1 gate, with its report on disk. */
-function researcher(): any {
-  return {
-    stage: 1,
-    agent: '01-researcher',
-    timestamp: new Date().toISOString(),
-    status: 'PASS',
-    details: {
-      summary: 'Mapped the codebase.',
-      artifacts: [
-        {
-          name: 'RESEARCHER_REPORT.md',
-          path: 'RESEARCHER_REPORT.md',
-          description: 'Report',
-          content: '# Researcher Report\n\nMapped the auth module.'
-        }
-      ],
-      architecture: { layers: ['routes', 'services'], description: 'Layered' },
-      filesIdentified: [
-        { path: 'src/a.ts', role: 'service', reason: 'core', priority: 'MUST_MODIFY' },
-        { path: 'src/b.ts', role: 'controller', reason: 'entry', priority: 'LIKELY' },
-        { path: 'src/c.ts', role: 'util', reason: 'helper', priority: 'OPTIONAL' }
-      ],
-      existingPatterns: [
-        { name: 'BaseService', description: 'base', locations: ['src/a.ts'], confidence: 0.9, recommendation: 'REUSE' }
-      ],
-      risks: [{ type: 'TECHNICAL', severity: 'IMPORTANT', description: 'Timezones' }],
-      timeEstimate: { discover: 2, plan: 3, execute: 8, verify: 5, deliver: 2, total: 20, confidence: 0.7 }
-    }
-  };
-}
-
-function story(): any {
-  return {
-    stage: 2,
-    agent: '02-story-writer',
-    timestamp: new Date().toISOString(),
-    status: 'PASS',
-    details: {
-      summary: 'User can enable 2FA.',
-      artifacts: [
-        {
-          name: 'USER_STORY.md',
-          path: 'USER_STORY.md',
-          description: 'Story',
-          content: [
-            '# User Story',
-            '## AC-1', 'Given logged in', 'When enabling 2FA', 'Then QR shown',
-            '## AC-2', 'Given QR shown', 'When valid code', 'Then enabled',
-            '## AC-3', 'Given enabled', 'When invalid code', 'Then rejected'
-          ].join('\n')
-        }
-      ],
-      userStory: { persona: 'user', goal: 'enable 2FA', benefit: 'security' },
-      acceptanceCriteria: [
-        { id: 'AC-1', given: 'a', when: 'b', then: 'c', priority: 'MUST', testable: true },
-        { id: 'AC-2', given: 'a', when: 'b', then: 'c', priority: 'MUST', testable: true },
-        { id: 'AC-3', given: 'a', when: 'b', then: 'c', priority: 'MUST', testable: true }
-      ],
-      edgeCases: [], assumptions: [], outOfScope: []
-    }
-  };
-}
-
-function planningInvoker(seen: string[] = []) {
-  return async (call: AgentInvocation) => {
-    seen.push(call.agent);
-    if (call.agent === '01-researcher') return researcher();
-    if (call.agent === '02-story-writer') return story();
-    return {
-      stage: call.stage, agent: call.agent, timestamp: new Date().toISOString(),
-      status: 'PASS', details: { summary: 'x', artifacts: [] }
-    };
-  };
+/** Researcher and Story Writer pass; every later agent gets a schema-invalid placeholder. */
+function planningInvoker() {
+  return scriptedInvoker({ '01-researcher': researcher(), '02-story-writer': story() }).invoke;
 }
 
 // ============================================================================
@@ -271,7 +203,7 @@ describe('the state store', () => {
       1,
       '01-researcher',
       'PASS',
-      { stage: 1, agent: '01-researcher', status: 'PASS', timestamp: '', details: { summary: 's', artifacts: [] } } as any
+      placeholder(1, '01-researcher')
     );
 
     saveState(projectDir, before);
@@ -336,7 +268,7 @@ describe('the state store', () => {
       1,
       '01-researcher',
       'PASS',
-      { stage: 1, agent: '01-researcher', status: 'PASS', timestamp: '', details: { summary: 's', artifacts: [] } } as any
+      placeholder(1, '01-researcher')
     );
 
     const path = saveState(projectDir, state);
