@@ -36,7 +36,7 @@ import {
 } from '../harness/agent-output-schema';
 
 import { canAdvanceStage, stageContracts } from '../harness/stage-gates';
-import { buildStageContext, persistArtifacts, StageOutputs } from '../harness/stage-context';
+import { buildStageContext, persistArtifacts, StageOutputs, UnsafeArtifactPathError } from '../harness/stage-context';
 
 /**
  * One feature, planned upstream and ready for Tier 2 to build.
@@ -111,6 +111,12 @@ export async function acceptFeatureSpec(
     }
   }
 
+  // 1b. Every document the Stage 2 gate requires must be SUPPLIED, with its content (I-14). That is
+  //     now part of each read-only agent's schema (MINOR-8, validateOutputSchema above): a document
+  //     without content is not persisted into the run directory, so the gate would read whatever
+  //     its claimed path happens to name — a stale file in the project root would pass, and a
+  //     checkpoint would present something nobody supplied.
+
   if (blockers.length > 0) {
     return { accepted: false, satisfies: { stage1: false, stage2: false }, blockers, passRate: 0 };
   }
@@ -123,7 +129,16 @@ export async function acceptFeatureSpec(
     story: featureSpec.story,
     spec: featureSpec.spec
   };
-  persistArtifacts(outputs, cwd, artifactDir);
+  //    A document name that is not a plain filename, or that the harness reserves, is a defect in
+  //    the supplied spec like any other: rejected with blockers (NEW-MINOR-3), so the run escalates
+  //    as a rejected spec rather than as an orchestration crash. persistArtifacts checks every name
+  //    before it writes anything, so a refusal leaves nothing behind. Any other error still throws.
+  try {
+    persistArtifacts(outputs, cwd, artifactDir);
+  } catch (error) {
+    if (!(error instanceof UnsafeArtifactPathError)) throw error;
+    return { accepted: false, satisfies: { stage1: false, stage2: false }, blockers: [error.message], passRate: 0 };
+  }
 
   // 3. Run the real gates — the same ones the orchestrator runs on its own agents.
   const stage1Ok = featureSpec.researcher

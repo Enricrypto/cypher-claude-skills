@@ -254,8 +254,7 @@ describe('validator loop-back (orchestrator)', () => {
       '04-backend-builder',
       'gate-1.5',
       'gate-2',
-      '07-validator',
-      '08-feature-consolidator'
+      '07-validator'
     ]);
 
     const prompts = invoker.promptsFor('04-backend-builder');
@@ -299,8 +298,7 @@ describe('validator loop-back (orchestrator)', () => {
       '04-backend-builder',
       'gate-1.5',
       'gate-2',
-      '07-validator',
-      '08-feature-consolidator'
+      '07-validator'
     ]);
   });
 
@@ -560,5 +558,94 @@ describe('validator loop-back (orchestrator)', () => {
 
     expect(state.completionStatus).toBe('SUCCESS');
     expect(state.executionGateHistory?.map(r => r.referenceCount)).toEqual([8, 10]);
+  });
+
+  // ------------------------------------------------------------------------------------------
+  // D-A (operator decision): the bar can never drop — not in a validator round either
+  // ------------------------------------------------------------------------------------------
+
+  it('D-A a validator round is judged against the round-0 reference when it is higher than the first passing count', async () => {
+    writeBaseline(baseline(10));
+    const invoker = scriptedInvoker(
+      { ...passingScript(), '07-validator': validatorFailingFirst(1, [issue()]) },
+      { cwd: project.dir }
+    );
+    const recorded = recordingGates({
+      auditExecution: n => executionAudit({ total: n === 1 ? 9 : 10 })
+    });
+
+    const state = await runToEnd({ cwd: project.dir, invoke: invoker.invoke, gates: recorded.gates });
+
+    // Round 0 ran 9 against the baseline's 10; round 1 is judged against 10, not against 9.
+    expect(state.executionGateHistory?.map(r => [r.round, r.total, r.referenceCount])).toEqual([
+      [0, 9, 10],
+      [1, 10, 10]
+    ]);
+    expect(state.completionStatus).toBe('SUCCESS');
+  });
+
+  it('D-A a validator round that runs 8 tests against a round-0 reference of 10 fails the Stage 4 gate', async () => {
+    writeBaseline(baseline(10));
+    const invoker = scriptedInvoker(
+      { ...passingScript(), '07-validator': validatorFailingFirst(1, [issue()]) },
+      { cwd: project.dir }
+    );
+    const recorded = recordingGates({ auditExecution: executionAudit({ total: 8 }) });
+
+    const state = await runToEnd({ cwd: project.dir, invoke: invoker.invoke, gates: recorded.gates });
+
+    expect(state.executionGateHistory?.map(r => [r.round, r.total, r.referenceCount])).toEqual([
+      [0, 8, 10],
+      [1, 8, 10]
+    ]);
+    expect(state.completionStatus).toBe('ESCALATED');
+    expect(escalations(state)).toEqual([[4, 'harness', 'CRITICAL_ISSUE']]);
+    expect(state.escalations[0].context.blockers?.join('\n')).toMatch(/No Regressions: .*8.*10/);
+  });
+});
+
+describe('MINOR-5 merging claims made with absolute and relative paths', () => {
+  it('MINOR-5 mergeBuilderOutput unions an absolute and a relative path to the same file into one entry', () => {
+    const cwd = '/project';
+    const previous = backend({ files: ['/project/src/a.ts', 'src/b.ts'] });
+    const next = backend({ files: ['src/a.ts'] });
+    next.details.filesModified[0].description = 'round 1 rewrite';
+
+    const merged = mergeBuilderOutput(previous, next, cwd);
+
+    expect(merged.details.filesModified.map(f => [f.path, f.description])).toEqual([
+      ['src/a.ts', 'round 1 rewrite'],
+      ['src/b.ts', 'Backend Builder wrote src/b.ts']
+    ]);
+  });
+
+  it('MINOR-5 a path outside the project is never folded into a project-relative one', () => {
+    const merged = mergeBuilderOutput(backend({ files: ['/elsewhere/src/a.ts'] }), backend({ files: ['src/a.ts'] }), '/project');
+    expect(merged.details.filesModified.map(f => f.path)).toEqual(['/elsewhere/src/a.ts', 'src/a.ts']);
+  });
+});
+
+describe('MINOR-9 Validator IMPORTANT findings', () => {
+  const important = (message: string): ValidatorIssue => issue({ severity: 'IMPORTANT', message, file: 'src/a.ts', line: 2 });
+
+  it('MINOR-9 Validator IMPORTANT issues from every round are recorded as findings, each once', async () => {
+    const script = {
+      ...passingScript(),
+      '07-validator': (_call: AgentInvocation, n: number) =>
+        n === 1
+          ? validator({ status: 'FAIL', issues: [issue(), important('Add rate limiting'), important('Log failed attempts')] })
+          : validator({ issues: [important('Log failed attempts'), important('Cache the lookup')] })
+    };
+    const invoker = scriptedInvoker(script, { cwd: project.dir });
+
+    const state = await runToEnd({ cwd: project.dir, invoke: invoker.invoke });
+
+    expect(state.completionStatus).toBe('SUCCESS');
+    expect((state.importantFindings ?? []).filter(f => f.source === '07-validator').map(f => [f.stage, f.message])).toEqual([
+      // Round 0 failed, and its IMPORTANT issues are kept; the one round 1 repeats is not recorded twice.
+      [4, '[src/a.ts:2] Add rate limiting'],
+      [4, '[src/a.ts:2] Log failed attempts'],
+      [4, '[src/a.ts:2] Cache the lookup']
+    ]);
   });
 });

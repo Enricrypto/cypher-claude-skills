@@ -72,25 +72,42 @@ export const ARCHIVE_RULE =
   'Do not read anything under .factory/_archive/ — it holds finished runs and is not part of this run.';
 
 /**
- * Options for runDirectoryRules. Unused in A-1: A-2's `--consolidate` (AC-47) will pass the
- * archived run the Consolidator is allowed to read, as the one exception to ARCHIVE_RULE.
+ * Options for runDirectoryRules. `readableRunDir` is the single exception to ARCHIVE_RULE (AC-28,
+ * AC-47): under `--consolidate <id>` the Consolidator reads a finished run that may sit in
+ * `.factory/_archive/<id>/`. It must be THIS run's directory — an agent may read only its own run.
  */
 export interface RunDirectoryRuleOptions {
   readableRunDir?: string;
 }
 
-/** The archive rule plus this run's absolute directory, and the instruction to ignore every other one. */
-export function runDirectoryRules(
-  cwd: string,
-  artifactDir: string,
-  // Reserved for A-2 (see RunDirectoryRuleOptions); deliberately not read in A-1.
-  _options: RunDirectoryRuleOptions = {}
-): string {
+/**
+ * The archive rule plus this run's absolute directory, and the instruction to ignore every other one.
+ *
+ * With `readableRunDir` (consolidate only) the blanket archive rule is NOT emitted — the run being
+ * read may itself be archived — and is replaced by a narrower one: that directory is the only one
+ * under `.factory/` the agent may read; no other run, archived or live. A `readableRunDir` that is
+ * not this run's directory throws: no prompt ever grants another run.
+ */
+export function runDirectoryRules(cwd: string, artifactDir: string, options: RunDirectoryRuleOptions = {}): string {
   const runDir = resolve(cwd, artifactDir);
-  return [
-    ARCHIVE_RULE,
-    `This run's directory is ${runDir}.`,
+  const otherRuns = [
     `Any other directory under .factory/ belongs to an unrelated run — ignore it completely: do not`,
     `read it, do not reconcile it, do not treat it as a revision.`
+  ];
+
+  if (options.readableRunDir === undefined) {
+    return [ARCHIVE_RULE, `This run's directory is ${runDir}.`, ...otherRuns].join('\n');
+  }
+
+  if (resolve(cwd, options.readableRunDir) !== runDir) {
+    throw new RangeError(
+      `readableRunDir ${options.readableRunDir} is not this run's directory (${runDir}): an agent may read only its own run.`
+    );
+  }
+  const factoryDir = resolve(cwd, '.factory');
+  return [
+    `This run's directory is ${runDir}. It is the only directory under ${factoryDir} you may read.`,
+    `Read nothing else under ${factoryDir}: no other run, live or in ${factoryDir}/_archive/, and no other archived run.`,
+    ...otherRuns
   ].join('\n');
 }

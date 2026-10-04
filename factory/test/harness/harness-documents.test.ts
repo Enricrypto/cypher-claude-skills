@@ -8,6 +8,8 @@
 import { describe, it, expect, afterEach } from '@jest/globals';
 import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'fs';
+import { tmpdir } from 'os';
 
 import {
   HARNESS_RENDERED_ARTIFACTS,
@@ -132,5 +134,41 @@ describe('harness-documents', () => {
 
     expect(() => renderBackendSummary(output)).not.toThrow();
     expect(renderApiContract(output)).toMatch(/No routes were reported/);
+  });
+});
+
+describe('writeHarnessDocument never writes through a symlink (NEW-MINOR-1)', () => {
+  it('NEW-MINOR-1 writeHarnessDocument refuses a symlinked target', () => {
+    project = tempProject('ff-docs-');
+    const elsewhere = mkdtempSync(join(tmpdir(), 'ff-docs-elsewhere-'));
+    try {
+      const victim = join(elsewhere, 'victim.txt');
+      writeFileSync(victim, 'untouched');
+      mkdirSync(join(project.dir, '.factory', 'run-1'), { recursive: true });
+      symlinkSync(victim, join(project.dir, '.factory', 'run-1', 'TEST_REPORT.md'));
+
+      expect(() => writeHarnessDocument(project!.dir, '.factory/run-1', 'TEST_REPORT.md', '# pwned')).toThrow(
+        /symlink/
+      );
+      expect(readFileSync(victim, 'utf-8')).toBe('untouched');
+    } finally {
+      rmSync(elsewhere, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a run directory that resolves outside the project', () => {
+    project = tempProject('ff-docs-');
+    const elsewhere = mkdtempSync(join(tmpdir(), 'ff-docs-elsewhere-'));
+    try {
+      mkdirSync(join(project.dir, '.factory'), { recursive: true });
+      symlinkSync(elsewhere, join(project.dir, '.factory', 'run-1'));
+
+      expect(() => writeHarnessDocument(project!.dir, '.factory/run-1', 'TEST_REPORT.md', '# pwned')).toThrow(
+        /outside/
+      );
+      expect(existsSync(join(elsewhere, 'TEST_REPORT.md'))).toBe(false);
+    } finally {
+      rmSync(elsewhere, { recursive: true, force: true });
+    }
   });
 });

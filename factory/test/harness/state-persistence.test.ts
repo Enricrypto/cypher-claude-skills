@@ -22,6 +22,7 @@ import { loadState, saveState, stateFilePath, StatePersistenceError } from '../.
 import { createFeatureState, deserializeState, recordAgentStep, FeatureState } from '../../harness/state-tracker';
 import { placeholder, researcher, story } from '../fixtures/agent-outputs';
 import { scriptedInvoker, tempProject, TempProject } from '../fixtures/harness-run';
+import { fakeChangeTracker } from '../fixtures/changes';
 
 let project: TempProject;
 let projectDir: string;
@@ -50,6 +51,7 @@ describe('a finished run leaves a record', () => {
       featureName: 'escalating-run',
       featureDescription: 'add 2FA',
       cwd: projectDir,
+      changes: fakeChangeTracker(),
       invoke: planningInvoker()
       // No approver → fails closed at Checkpoint 1.
     });
@@ -65,6 +67,7 @@ describe('a finished run leaves a record', () => {
       featureName: 'why-it-stopped',
       featureDescription: 'add 2FA',
       cwd: projectDir,
+      changes: fakeChangeTracker(),
       invoke: planningInvoker()
     });
 
@@ -80,6 +83,7 @@ describe('a finished run leaves a record', () => {
       featureName: 'history',
       featureDescription: 'add 2FA',
       cwd: projectDir,
+      changes: fakeChangeTracker(),
       invoke: planningInvoker(),
       approveCheckpoint: async () => true
     });
@@ -101,6 +105,7 @@ describe('a finished run leaves a record', () => {
       featureName: 'colocated',
       featureDescription: 'add 2FA',
       cwd: projectDir,
+      changes: fakeChangeTracker(),
       invoke: planningInvoker(),
       approveCheckpoint: async () => true
     });
@@ -131,6 +136,7 @@ describe('a finished run leaves a record', () => {
       featureName: 'mid-run',
       featureDescription: 'add 2FA',
       cwd: projectDir,
+      changes: fakeChangeTracker(),
       invoke,
       approveCheckpoint: async () => true
     });

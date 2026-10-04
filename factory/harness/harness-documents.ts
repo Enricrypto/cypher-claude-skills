@@ -16,10 +16,10 @@
  * document to read without the harness ever claiming a builder wrote it (AC-25).
  */
 
-import { mkdirSync, writeFileSync } from 'fs';
-import { dirname, resolve } from 'path';
+import { resolve } from 'path';
 
 import { BackendBuilderOutput, FrontendBuilderOutput, TestVerifierOutput } from './agent-output-schema';
+import { writeFileNoFollow } from './safe-write';
 
 export const HARNESS_RENDERED_ARTIFACTS = [
   'BACKEND_SUMMARY.md',
@@ -264,8 +264,6 @@ export function writeHarnessDocument(
     );
   }
 
-  const absolutePath = resolve(cwd, artifactDir, name);
-  mkdirSync(dirname(absolutePath), { recursive: true });
-  writeFileSync(absolutePath, content, 'utf-8');
-  return absolutePath;
+  // NEW-MINOR-1: never through a symlink, never into a directory resolving outside the project.
+  return writeFileNoFollow(cwd, resolve(cwd, artifactDir, name), content);
 }

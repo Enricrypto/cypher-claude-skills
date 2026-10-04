@@ -10,6 +10,7 @@
 
 import { ArtifactRef, verifyArtifactMaterialization } from './agent-output-schema';
 import { testsRan } from './regression-baseline';
+import { MAX_BUILDER_ATTEMPTS } from './loop-rules';
 
 export interface StageCriterion {
   name: string;
@@ -106,6 +107,65 @@ export interface Stage4Metadata {
 }
 
 /**
+ * The Stage 2 gate, split in two (A-2, C-9). The story is judged on its own BEFORE CHECKPOINT 1,
+ * so a human is never asked to approve a story the gate would reject (AC-56); the brief is judged
+ * on its own before CHECKPOINT 2 (AC-78). Either part failing escalates with its blockers (AC-57).
+ */
+export const STAGE2_STORY_CONTRACT: StageContract = {
+  stage: 2,
+  name: 'PLAN (story)',
+  description: 'Design the user story',
+  acceptance: {
+    criteria: [
+      {
+        name: 'User Story Complete',
+        description: 'USER_STORY.md with 3+ acceptance criteria (Given/When/Then)',
+        validator: async (ctx) => validateUserStory(ctx),
+        severity: 'CRITICAL'
+      },
+      {
+        name: 'AC Testable',
+        description: 'All acceptance criteria are in testable format',
+        validator: async (ctx) => validateACTestable(ctx),
+        severity: 'CRITICAL'
+      }
+    ]
+  },
+  artifacts: {
+    required: ['USER_STORY.md']
+  },
+  loopBackStage: 1
+};
+
+/** The brief half of the Stage 2 gate (C-9), judged after the Spec Writer and before CHECKPOINT 2. */
+export const STAGE2_SPEC_CONTRACT: StageContract = {
+  stage: 2,
+  name: 'PLAN (technical brief)',
+  description: 'Design the technical specification',
+  acceptance: {
+    criteria: [
+      {
+        name: 'Technical Brief Complete',
+        description: 'TECHNICAL_BRIEF.md with data model, API, UI, tests',
+        validator: async (ctx) => validateTechnicalBrief(ctx),
+        severity: 'CRITICAL'
+      },
+      {
+        name: 'File List Documented',
+        description: 'Every file to be changed listed with reason',
+        validator: async (ctx) => validateFileListDocumented(ctx),
+        severity: 'IMPORTANT'
+      }
+    ]
+  },
+  artifacts: {
+    required: ['TECHNICAL_BRIEF.md', 'FILE_LIST.md']
+  },
+  nextStage: 3,
+  loopBackStage: 1
+};
+
+/**
  * Stage Contracts: Define acceptance criteria for each stage
  */
 export const stageContracts: Record<number, StageContract> = {
@@ -148,40 +208,17 @@ export const stageContracts: Record<number, StageContract> = {
     nextStage: 2
   },
 
+  // The union of the story and spec parts below (C-9): one contract, still used whole by
+  // acceptFeatureSpec, so a pre-supplied spec is judged by every Stage 2 criterion at once.
   2: {
     stage: 2,
     name: 'PLAN',
     description: 'Design user story and technical specification',
     acceptance: {
-      criteria: [
-        {
-          name: 'User Story Complete',
-          description: 'USER_STORY.md with 3+ acceptance criteria (Given/When/Then)',
-          validator: async (ctx) => validateUserStory(ctx),
-          severity: 'CRITICAL'
-        },
-        {
-          name: 'Technical Brief Complete',
-          description: 'TECHNICAL_BRIEF.md with data model, API, UI, tests',
-          validator: async (ctx) => validateTechnicalBrief(ctx),
-          severity: 'CRITICAL'
-        },
-        {
-          name: 'File List Documented',
-          description: 'Every file to be changed listed with reason',
-          validator: async (ctx) => validateFileListDocumented(ctx),
-          severity: 'IMPORTANT'
-        },
-        {
-          name: 'AC Testable',
-          description: 'All acceptance criteria are in testable format',
-          validator: async (ctx) => validateACTestable(ctx),
-          severity: 'CRITICAL'
-        }
-      ]
+      criteria: [...STAGE2_STORY_CONTRACT.acceptance.criteria, ...STAGE2_SPEC_CONTRACT.acceptance.criteria]
     },
     artifacts: {
-      required: ['USER_STORY.md', 'TECHNICAL_BRIEF.md', 'FILE_LIST.md']
+      required: [...STAGE2_STORY_CONTRACT.artifacts.required, ...STAGE2_SPEC_CONTRACT.artifacts.required]
     },
     nextStage: 3,
     loopBackStage: 1
@@ -285,32 +322,29 @@ export const stageContracts: Record<number, StageContract> = {
   5: {
     stage: 5,
     name: 'DELIVER',
-    description: 'Consolidate learnings after merge',
+    description: 'Consolidate learnings from a finished SUCCESS run (--consolidate)',
     acceptance: {
+      // Judged only on the two documents the Consolidator must write (AC-48). There is no
+      // "Knowledge Stored" criterion: memory is the operator's session's job, outside the
+      // factory, and the orchestrator used to feed that criterion a hard-coded `true`.
       criteria: [
         {
           name: 'Consolidation Complete',
           description: 'CONSOLIDATION_REPORT.md documents execution metrics',
           validator: async (ctx) => validateConsolidationComplete(ctx),
-          severity: 'IMPORTANT'
+          severity: 'CRITICAL'
         },
         {
           name: 'Patterns Extracted',
           description: 'Reusable patterns documented in PATTERNS.md',
           validator: async (ctx) => validatePatternsExtracted(ctx),
-          severity: 'IMPORTANT'
-        },
-        {
-          name: 'Knowledge Stored',
-          description: 'Patterns saved to memory for future features',
-          validator: async (ctx) => validateKnowledgeStored(ctx),
-          severity: 'IMPORTANT'
+          severity: 'CRITICAL'
         }
       ]
     },
     artifacts: {
-      required: ['CONSOLIDATION_REPORT.md'],
-      optional: ['PATTERNS.md', 'TIME_ESTIMATES.json']
+      required: ['CONSOLIDATION_REPORT.md', 'PATTERNS.md'],
+      optional: ['TIME_ESTIMATES.json']
     }
   }
 };
@@ -614,14 +648,22 @@ async function validateNoAbandonedTODOs(ctx: StageContext): Promise<CriterionRes
   return { passed: true, score: 100, details: 'No abandoned TODOs' };
 }
 
+/**
+ * Each builder's attempts in its latest loop against the attempts it was ALLOWED there: the
+ * default MAX_BUILDER_ATTEMPTS plus any operator grant (AC-72). Without the allowed count a
+ * granted 4th attempt that passed would fail this gate.
+ */
 async function validateLoopLimits(ctx: StageContext): Promise<CriterionResult> {
   const backendLoops = ctx.metadata.backendLoops || 0;
   const frontendLoops = ctx.metadata.frontendLoops || 0;
-  if (backendLoops > 3 || frontendLoops > 3) {
+  const maxBackend = ctx.metadata.maxBackendLoops ?? MAX_BUILDER_ATTEMPTS;
+  const maxFrontend = ctx.metadata.maxFrontendLoops ?? MAX_BUILDER_ATTEMPTS;
+  if (backendLoops > maxBackend || frontendLoops > maxFrontend) {
+    const max = maxBackend === maxFrontend ? `max ${maxBackend} each` : `max ${maxBackend} backend, ${maxFrontend} frontend`;
     return {
       passed: false,
       score: 0,
-      details: `Backend loops: ${backendLoops}, Frontend loops: ${frontendLoops} (max 3 each)`,
+      details: `Backend loops: ${backendLoops}, Frontend loops: ${frontendLoops} (${max})`,
       blockers: ['Escalate: builders exceeded loop limits']
     };
   }
@@ -781,7 +823,7 @@ async function validateConsolidationComplete(ctx: StageContext): Promise<Criteri
       passed: false,
       score: 0,
       details: 'CONSOLIDATION_REPORT.md not found',
-      blockers: ['Run 08-Feature Consolidator agent (after PR merge)']
+      blockers: ['CONSOLIDATION_REPORT.md is missing: the Feature Consolidator must write it (--consolidate <id>)']
     };
   }
   return { passed: true, score: 100, details: 'Consolidation report created' };
@@ -792,25 +834,12 @@ async function validatePatternsExtracted(ctx: StageContext): Promise<CriterionRe
   if (!patterns) {
     return {
       passed: false,
-      score: 50,
-      details: 'PATTERNS.md not found (optional but recommended)',
-      blockers: []
+      score: 0,
+      details: 'PATTERNS.md not found',
+      blockers: ['PATTERNS.md is missing: the Feature Consolidator must write it (--consolidate <id>)']
     };
   }
   return { passed: true, score: 100, details: 'Reusable patterns documented' };
-}
-
-async function validateKnowledgeStored(ctx: StageContext): Promise<CriterionResult> {
-  const stored = ctx.metadata.knowledgeStored || false;
-  if (!stored) {
-    return {
-      passed: false,
-      score: 50,
-      details: 'Patterns not yet stored to memory (optional but recommended)',
-      blockers: []
-    };
-  }
-  return { passed: true, score: 100, details: 'Patterns stored to memory for future features' };
 }
 
 /**

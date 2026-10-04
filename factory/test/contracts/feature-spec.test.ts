@@ -15,7 +15,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
-import { existsSync } from 'fs';
+import { existsSync, writeFileSync } from 'fs';
 import { join } from 'path';
 
 import { acceptFeatureSpec, buildOrder, parallelBatches } from '../../contracts/feature-spec';
@@ -23,6 +23,7 @@ import { runFeatureFactory } from '../../feature/workflows/feature-factory-orche
 import { AgentInvocation } from '../../runner/invoke-agent';
 import { featureSpec, placeholder } from '../fixtures/agent-outputs';
 import { tempProject, TempProject } from '../fixtures/harness-run';
+import { fakeChangeTracker } from '../fixtures/changes';
 
 let project: TempProject;
 let projectDir: string;
@@ -119,6 +120,51 @@ describe('acceptFeatureSpec — the gate IS the contract', () => {
   });
 });
 
+describe('I-14 a pre-supplied spec must carry its documents', () => {
+  /**
+   * A document with no content is not persisted into the run directory, so the gate would read
+   * whatever its claimed path names — a stale file in the project root would satisfy it, and the
+   * checkpoint would present something nobody supplied. Refused at acceptance instead.
+   */
+  it.each<['story' | 'spec', string, number]>([
+    ['story', 'USER_STORY.md', 0],
+    ['spec', 'TECHNICAL_BRIEF.md', 0],
+    ['spec', 'FILE_LIST.md', 1]
+  ])('I-14 a pre-supplied %s whose %s carries no content is rejected with blockers, even with a stale copy in the project root', async (part, name, index) => {
+    const spec = featureSpec();
+    const artifact = spec[part].details.artifacts[index];
+    expect(artifact.name).toBe(name);
+    const content = artifact.content!;
+    delete artifact.content;
+    writeFileSync(join(projectDir, name), content);
+
+    const acceptance = await acceptFeatureSpec(spec, projectDir, '.factory/run-1');
+
+    expect(acceptance.accepted).toBe(false);
+    expect(acceptance.blockers.join('\n')).toMatch(new RegExp(`${name.replace('.', '\\.')}.*content`));
+    expect(existsSync(join(projectDir, '.factory/run-1', name))).toBe(false);
+  });
+});
+
+describe('NEW-MINOR-3 an unsafe document name in a pre-supplied spec', () => {
+  it.each<[string, RegExp]>([
+    ['../evil.md', /not a plain filename/],
+    ['STATE.JSON', /reserved/]
+  ])('NEW-MINOR-3 an unsafe artifact name in a pre-supplied spec is rejected with blockers (%s)', async (name, reason) => {
+    const spec = featureSpec();
+    spec.story.details.artifacts.push({ name, path: name, description: 'Planted', content: '# planted' });
+
+    const acceptance = await acceptFeatureSpec(spec, projectDir, '.factory/run-1');
+
+    expect(acceptance.accepted).toBe(false);
+    expect(acceptance.satisfies).toEqual({ stage1: false, stage2: false });
+    expect(acceptance.blockers.join('\n')).toMatch(reason);
+    // Refused before anything is written: not even the safe documents are on disk.
+    expect(existsSync(join(projectDir, '.factory/run-1'))).toBe(false);
+    expect(existsSync(join(projectDir, '.factory', 'evil.md'))).toBe(false);
+  });
+});
+
 describe('runFeatureFactory — Tier 1 is optional', () => {
   /**
    * THE INVARIANT. With no spec supplied, the orchestrator must run its own planning agents.
@@ -136,6 +182,7 @@ describe('runFeatureFactory — Tier 1 is optional', () => {
       featureName: 'standalone',
       featureDescription: 'add a health check endpoint',
       cwd: projectDir,
+      changes: fakeChangeTracker(),
       invoke
     });
 
@@ -151,7 +198,9 @@ describe('runFeatureFactory — Tier 1 is optional', () => {
       featureName: 'add-2fa',
       featureDescription: 'Let a user enable 2FA',
       cwd: projectDir,
+      changes: fakeChangeTracker(),
       invoke,
+      approveCheckpoint: async () => true,
       preSuppliedSpec: featureSpec()
     });
 
@@ -171,7 +220,9 @@ describe('runFeatureFactory — Tier 1 is optional', () => {
       featureName: 'add-2fa',
       featureDescription: 'Let a user enable 2FA',
       cwd: projectDir,
+      changes: fakeChangeTracker(),
       logger: () => {},
+      approveCheckpoint: async () => true,
       invoke: async (call: AgentInvocation) => {
         prompts.push(call.prompt);
         return placeholder(call.stage, call.agent);
@@ -202,6 +253,7 @@ describe('runFeatureFactory — Tier 1 is optional', () => {
       featureName: 'add-2fa',
       featureDescription: 'Let a user enable 2FA',
       cwd: projectDir,
+      changes: fakeChangeTracker(),
       invoke,
       preSuppliedSpec: spec
     });

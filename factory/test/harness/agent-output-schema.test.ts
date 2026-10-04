@@ -9,10 +9,15 @@
  */
 
 import { describe, it, expect } from '@jest/globals';
+import { mkdirSync, writeFileSync } from 'fs';
+import { join } from 'path';
 import {
   validateOutputSchema,
-  getValidationErrorMessage
+  getValidationErrorMessage,
+  verifyArtifactMaterialization
 } from '../../harness/agent-output-schema';
+import { tempProject } from '../fixtures/harness-run';
+import { backend, consolidator, researcher, spec, story, testVerifier, validator } from '../fixtures/agent-outputs';
 
 describe('Agent Output Schema', () => {
   describe('validateOutputSchema - Base Requirements', () => {
@@ -178,7 +183,8 @@ describe('Agent Output Schema', () => {
         status: 'PASS',
         details: {
           summary: 'Analyzed codebase',
-          artifacts: [{ name: 'Report', path: 'path/to/report.md', description: 'Audit report' }],
+          // MINOR-8: a read-only agent returns its required document, by name, with its content.
+          artifacts: [{ name: 'RESEARCHER_REPORT.md', path: 'path/to/report.md', description: 'Audit report', content: '# Researcher Report' }],
           architecture: { layers: ['Controllers', 'Services', 'Models'] },
           // The rule is 3+ — the message always said so, but the check only tested non-empty.
           filesIdentified: [
@@ -253,7 +259,8 @@ describe('Agent Output Schema', () => {
         status: 'PASS',
         details: {
           summary: 'User story created',
-          artifacts: [{ name: 'Story', path: 'path/to/story.md', description: 'User story' }],
+          // MINOR-8: a read-only agent returns its required document, by name, with its content.
+          artifacts: [{ name: 'USER_STORY.md', path: 'path/to/story.md', description: 'User story', content: '# User Story' }],
           userStory: {
             persona: 'user',
             goal: 'enable 2FA',
@@ -377,6 +384,69 @@ describe('Agent Output Schema', () => {
       const message = getValidationErrorMessage(1, '01-researcher', errors);
 
       expect(message).toContain('agent-output-schema.ts');
+    });
+  });
+
+  describe('MINOR-8 read-only agents must return their documents with content', () => {
+    type Case = [string, number, string, () => any, string];
+    const cases: Case[] = [
+      ['01-researcher', 1, '01-researcher', researcher, 'RESEARCHER_REPORT.md'],
+      ['02-story-writer', 2, '02-story-writer', story, 'USER_STORY.md'],
+      ['03-spec-writer (brief)', 2, '03-spec-writer', spec, 'TECHNICAL_BRIEF.md'],
+      ['03-spec-writer (file list)', 2, '03-spec-writer', spec, 'FILE_LIST.md'],
+      ['07-validator', 4, '07-validator', validator, 'VALIDATION_REPORT.md'],
+      ['08-feature-consolidator', 5, '08-feature-consolidator', consolidator, 'PATTERNS.md']
+    ];
+
+    it.each(cases)("MINOR-8 a %s output missing a required document's content fails its schema", (_label, stage, agent, make, name) => {
+      const complete = make();
+      expect(validateOutputSchema(stage, agent, complete)).toEqual({ valid: true, errors: [] });
+
+      const withoutContent = make();
+      delete withoutContent.details.artifacts.find((a: { name: string }) => a.name === name).content;
+      const blank = make();
+      blank.details.artifacts.find((a: { name: string }) => a.name === name).content = '  \n ';
+      const absent = make();
+      absent.details.artifacts = absent.details.artifacts.filter((a: { name: string }) => a.name !== name);
+
+      for (const output of [withoutContent, blank, absent]) {
+        const result = validateOutputSchema(stage, agent, output);
+        expect(result.valid).toBe(false);
+        expect(result.errors).toContainEqual(expect.stringMatching(new RegExp(`${name.replace('.', '\\.')}.*content`)));
+      }
+    });
+
+    it('MINOR-8 a document under another name does not stand in for the required one', () => {
+      const output = validator();
+      output.details.artifacts[0].name = 'VALIDATION.md';
+      expect(validateOutputSchema(4, '07-validator', output).valid).toBe(false);
+    });
+
+    it('MINOR-8 builders and the Test Verifier write their own files and are not held to the document rule', () => {
+      expect(validateOutputSchema(3, '04-backend-builder', backend()).valid).toBe(true);
+      expect(validateOutputSchema(4, '06-test-verifier', testVerifier()).valid).toBe(true);
+    });
+  });
+
+  describe('verifyArtifactMaterialization counts only regular files (MINOR-7)', () => {
+    it('MINOR-7 a claimed path that is a directory is not materialised', async () => {
+      const project = tempProject('ff-aos-');
+      try {
+        mkdirSync(join(project.dir, 'src', 'lib'), { recursive: true });
+        writeFileSync(join(project.dir, 'src', 'a.ts'), 'export const a = 1;\n');
+        const claims = [
+          { name: 'lib', path: 'src/lib', description: 'Backend Builder: a directory' },
+          { name: 'a.ts', path: 'src/a.ts', description: 'Backend Builder: a file' }
+        ];
+
+        const audit = await verifyArtifactMaterialization(3, 'builders', claims, project.dir);
+
+        expect(audit.allMaterialized).toBe(false);
+        expect(audit.missingArtifacts.map(a => a.path)).toEqual(['src/lib']);
+        expect(audit.verifications.find(v => v.artifact.path === 'src/lib')?.error).toMatch(/not a regular file/);
+      } finally {
+        project.cleanup();
+      }
     });
   });
 });

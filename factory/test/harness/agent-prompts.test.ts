@@ -9,6 +9,8 @@ import { join } from 'path';
 
 import {
   builderPrompt,
+  CheckpointRework,
+  checkpointReworkBriefing,
   consolidatorPrompt,
   PromptContext,
   researcherPrompt,
@@ -161,6 +163,25 @@ describe('retryBriefing', () => {
   it('says plainly when the failure could not be classified', () => {
     expect(retryBriefing(2)).toMatch(/could not classify why/);
   });
+
+  it('AC-72 counts against the allowed attempts: a granted 4th attempt is "attempt 4 of 4"', () => {
+    expect(retryBriefing(2)).toMatch(/attempt 2 of 3\./);
+    expect(retryBriefing(4, { kind: 'test', error: 'boom' }, 4)).toMatch(/attempt 4 of 4\./);
+  });
+
+  it('MINOR-6 a status failure is briefed as an unfinished attempt, with the builder\'s own words, not as a test diagnosis', () => {
+    const briefing = retryBriefing(2, { kind: 'status', error: 'Builder returned status FAIL: could not wire the route' });
+    expect(briefing).toMatch(/attempt 2 of 3\./);
+    expect(briefing).toContain('Builder returned status FAIL: could not wire the route');
+    expect(briefing).toMatch(/did not report the work as done/);
+    expect(briefing).not.toMatch(/MALFORMED/);
+    expect(briefing).not.toMatch(/failing test/);
+  });
+
+  it('AC-72 builderPrompt passes the allowed attempts through to the retry briefing', () => {
+    expect(builderPrompt(ctx, 'backend', 4, { kind: 'schema', error: 'bad' }, undefined, { attemptsAllowed: 5 })).toMatch(/attempt 4 of 5\./);
+    expect(builderPrompt(ctx, 'backend', 2, { kind: 'schema', error: 'bad' })).toMatch(/attempt 2 of 3\./);
+  });
 });
 
 describe('validator-round briefing (D-9)', () => {
@@ -204,5 +225,53 @@ describe('validator-round briefing (D-9)', () => {
 
   it('a Stage 3 prompt mentions no validator round', () => {
     expect(builderPrompt(ctx, 'backend', 2, { kind: 'test', error: 'boom' })).not.toMatch(/Validator round/);
+  });
+});
+
+describe('checkpoint rework briefing (D-5, AC-75)', () => {
+  const superseded = (name: string) => join(project.dir, '.factory/run-1/_superseded/1', name);
+  const rework = (overrides: Partial<CheckpointRework> = {}): CheckpointRework => ({
+    checkpointName: 'CHECKPOINT 1: Approve the story',
+    notes: 'Cover account recovery.\nAnd lockout.',
+    rejectedPaths: [superseded('USER_STORY.md')],
+    ...overrides
+  });
+
+  it('AC-75 names what was rejected, quotes every line of the notes and gives the rejected version\'s absolute path', () => {
+    const briefing = checkpointReworkBriefing(rework());
+
+    expect(briefing).toContain('CHECKPOINT 1: Approve the story');
+    expect(briefing).toContain('  > Cover account recovery.');
+    expect(briefing).toContain('  > And lockout.');
+    expect(briefing).toContain(superseded('USER_STORY.md'));
+  });
+
+  it('AC-75 says plainly when the reviewer gave no notes (a TTY rejection may have none)', () => {
+    expect(checkpointReworkBriefing(rework({ notes: '  ' }))).toMatch(/no notes were given/);
+  });
+
+  it('AC-75 the story prompt for a rework carries the briefing; a normal story prompt does not', () => {
+    expect(storyPrompt(ctx, rework())).toContain(checkpointReworkBriefing(rework()));
+    expect(storyPrompt(ctx)).not.toMatch(/REWORK/);
+  });
+
+  it('AC-75 the spec prompt for a rework carries the briefing; a normal spec prompt does not', () => {
+    const brief = rework({ checkpointName: 'CHECKPOINT 2: Approve the technical brief', rejectedPaths: [superseded('TECHNICAL_BRIEF.md'), superseded('FILE_LIST.md')] });
+    expect(specPrompt(ctx, brief)).toContain(checkpointReworkBriefing(brief));
+    expect(specPrompt(ctx)).not.toMatch(/REWORK/);
+  });
+
+  it('AC-75 a builder in a CP3 rework is briefed from attempt 1, and later attempts add the usual retry briefing', () => {
+    const change = rework({ checkpointName: 'CHECKPOINT 3: Approve the validated change', rejectedPaths: [superseded('VALIDATION_REPORT.md')] });
+
+    const first = builderPrompt(ctx, 'backend', 1, undefined, undefined, { rework: change });
+    expect(first).toContain(checkpointReworkBriefing(change));
+    expect(first).not.toMatch(/attempt \d of/);
+
+    const second = builderPrompt(ctx, 'backend', 2, { kind: 'test', error: 'boom' }, undefined, { rework: change, attemptsAllowed: 3 });
+    expect(second).toContain(checkpointReworkBriefing(change));
+    expect(second).toMatch(/attempt 2 of 3\./);
+
+    expect(builderPrompt(ctx, 'backend', 1)).not.toMatch(/REWORK/);
   });
 });

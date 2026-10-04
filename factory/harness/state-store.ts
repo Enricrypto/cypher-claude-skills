@@ -9,27 +9,19 @@
  *
  * What that cost: a forty-minute run that escalated at Stage 4 left the builders' files behind
  * and no record of WHY it stopped — which gate failed, how many times a builder looped, what a
- * human approved on the way, what it cost. OrchestrationOptions.resumeFromState was designed,
- * documented, and unreachable, because nothing could produce a FeatureState to hand it.
+ * human approved on the way, what it cost. OrchestrationOptions.resumeFromState was designed and
+ * documented, but unreachable, because nothing could produce a FeatureState to hand it. Resume now
+ * reads that record back (run-progress.ts) and continues from it.
  *
  * This module is the missing write. It is deliberately the ONLY thing here that touches the
  * filesystem for state — state-tracker.ts stays pure so it can be tested without a temp dir,
  * and everything that decides WHEN to save lives in the orchestrator.
  */
 
-import {
-  closeSync,
-  existsSync,
-  fsyncSync,
-  mkdirSync,
-  openSync,
-  readFileSync,
-  renameSync,
-  unlinkSync,
-  writeSync
-} from 'fs';
+import { existsSync, mkdirSync, readFileSync } from 'fs';
 import { dirname, join, resolve } from 'path';
 
+import { writeFileAtomic } from './safe-write';
 import { FeatureState, deserializeState, serializeState } from './state-tracker';
 
 /** The run's state lives beside the run's documents. One run, one directory. */
@@ -45,9 +37,10 @@ export const STATE_FILENAME = 'state.json';
  *
  * It was wrong because of what the run becomes afterwards. Every guarantee this harness makes is
  * a guarantee about EVIDENCE: the files exist because a gate stat'd them, the tests passed
- * because the harness ran them, a human approved because an approver returned true. A run whose
- * record cannot be written produces none of that — it still burns tokens, still writes code into
- * the project, still reports an outcome, and has nothing to back any of it up. Continuing means
+ * because the harness ran them, a human approved because an approval bound to the hash of the
+ * exact text they were shown was recorded. A run whose record cannot be written produces none of
+ * that — it still burns tokens, still writes code into the project, still reports an outcome, and
+ * has nothing to back any of it up. Continuing means
  * spending more money to reach a conclusion no one can audit, which is the precise failure mode
  * the gates exist to prevent. Stopping costs the work in flight. Continuing costs the work in
  * flight AND the money still to be spent AND the ability to tell what happened.
@@ -73,87 +66,50 @@ export class StatePersistenceError extends Error {
  * The same directory persistArtifacts() writes RESEARCHER_REPORT.md and TECHNICAL_BRIEF.md
  * into, so a run's record and a run's documents cannot drift apart or be half-deleted.
  *
- * NOTE: clearStaleArtifacts() removes every directory except the current run's, so state files
- * are reaped along with the artifacts they describe. That is intended — a state file whose
- * briefs have been deleted cannot be resumed anyway, and keeping it would invite exactly the
- * "four contradictory approved specs" problem that cleanup exists to prevent.
+ * A run directory is never deleted. When a new run starts, finished runs (SUCCESS, MANUAL_STOP)
+ * are moved, state file and documents together, into `.factory/_archive/<featureId>/`
+ * (run-directory.ts); unfinished runs stay where they are and block the new run until they are
+ * resumed or closed. The `...In` / `...From` variants below take the run directory itself, so an
+ * archived run's record can be read and updated in place.
  */
 export function stateFilePath(cwd: string, featureId: string): string {
-  return resolve(cwd, '.factory', featureId, STATE_FILENAME);
+  return stateFilePathIn(resolve(cwd, '.factory', featureId));
+}
+
+/** The state file inside a given run directory (live or archived). */
+export function stateFilePathIn(runDirAbs: string): string {
+  return join(resolve(runDirAbs), STATE_FILENAME);
 }
 
 /**
- * Write the state durably.
- *
- * Three steps, and each one is load-bearing:
- *
- *   1. write to a temp file in the SAME directory as the target. Same directory, not
- *      os.tmpdir(), because rename is only atomic within one filesystem and /tmp is frequently
- *      a different mount — a cross-device rename fails outright with EXDEV.
- *   2. fsync the temp file, so its bytes are actually on the device.
- *   3. rename over the target, then fsync the DIRECTORY, so the rename itself is durable.
- *
- * Step 2 and 3 are the difference between "atomic" and "durable", and skipping them is the
- * usual way this pattern is written wrong. rename(2) guarantees a reader sees either the old
- * complete file or the new complete file — never a torn one. It guarantees nothing about the
- * bytes having reached the disk. Without the fsyncs, a power loss or a hard kill at the wrong
- * moment can leave a rename that survived and contents that did not: a ZERO-LENGTH state.json
- * that every reader agrees is the current one.
- *
- * That failure mode matters more here than in most places, because saveState now fails the run
- * closed. Hard-failing on a bad write while leaving a silently empty file behind would be the
- * worst of both: loud when the disk is broken, silent when the data is gone.
- *
- * Being killed mid-save is not exotic in this harness — Ctrl-C at a checkpoint is a NORMAL way
- * to end a run, because a checkpoint is exactly where a human sits and decides not to continue.
+ * Write the state durably into `<cwd>/.factory/<featureId>/`. See saveStateIn.
  */
 export function saveState(cwd: string, state: FeatureState): string {
-  const target = stateFilePath(cwd, state.featureId);
-  const directory = dirname(target);
-  const temp = join(directory, `.${STATE_FILENAME}.${process.pid}.tmp`);
+  return saveStateIn(resolve(cwd, '.factory', state.featureId), state);
+}
+
+/**
+ * Write the state durably into a given run directory, creating it if needed. Returns the path.
+ *
+ * The write is writeFileAtomic (safe-write.ts): a temp file in the same directory, fsync, rename,
+ * fsync the directory. Atomic means a reader sees the old complete file or the new complete file,
+ * never a torn one; the fsyncs make it durable, so a power loss or hard kill cannot leave a
+ * rename that survived and contents that did not — a ZERO-LENGTH state.json every reader agrees
+ * is current. The rename also replaces a symlink at state.json rather than writing through it.
+ *
+ * That matters more here than in most places, because saving fails the run closed. Being killed
+ * mid-save is not exotic either: Ctrl-C at a checkpoint is a normal way to end a run.
+ */
+export function saveStateIn(runDirAbs: string, state: FeatureState): string {
+  const target = stateFilePathIn(runDirAbs);
 
   try {
     // Inside the try: creating the directory fails for the same reasons writing does (no space,
     // no permission, .factory occupied by a file), and every one of them means the same thing —
     // there is no record. One failure mode, one error type.
-    mkdirSync(directory, { recursive: true });
-
-    // Write and fsync the temp file. openSync/writeSync/fsyncSync rather than writeFileSync,
-    // because we need the descriptor to sync it before it is renamed into place.
-    const fd = openSync(temp, 'w');
-    try {
-      writeSync(fd, serializeState(state), null, 'utf-8');
-      fsyncSync(fd);
-    } finally {
-      closeSync(fd);
-    }
-
-    renameSync(temp, target);
-
-    // fsync the directory so the rename survives too. A directory fd cannot be opened for
-    // writing; 'r' is correct and is what fsync needs.
-    //
-    // Not universally supported — some filesystems and platforms reject fsync on a directory
-    // handle (Windows most notably). A failure here means the rename may not be durable yet; it
-    // does NOT mean the save failed, and treating it as fatal would break saving entirely on
-    // those systems for a guarantee they cannot offer anyway.
-    try {
-      const dirFd = openSync(directory, 'r');
-      try {
-        fsyncSync(dirFd);
-      } finally {
-        closeSync(dirFd);
-      }
-    } catch {
-      /* best effort — the file itself is already synced and in place */
-    }
+    mkdirSync(dirname(target), { recursive: true });
+    writeFileAtomic(target, serializeState(state));
   } catch (error) {
-    // Never leave the scratch file behind to be mistaken for a real one.
-    try {
-      if (existsSync(temp)) unlinkSync(temp);
-    } catch {
-      /* the original error is the one worth reporting */
-    }
     throw new StatePersistenceError(target, error);
   }
 
@@ -161,14 +117,22 @@ export function saveState(cwd: string, state: FeatureState): string {
 }
 
 /**
- * Load a run's state, or undefined if there is none.
+ * Load a run's state from `<cwd>/.factory/<featureId>/`, or undefined if there is none.
+ * See loadStateFrom.
+ */
+export function loadState(cwd: string, featureId: string): FeatureState | undefined {
+  return loadStateFrom(resolve(cwd, '.factory', featureId), featureId);
+}
+
+/**
+ * Load the state in a given run directory (live or archived), or undefined if there is none.
  *
  * Returns undefined ONLY for "no such run". A file that exists but does not parse THROWS,
  * because that is corruption and resuming from a guess would silently restart work the operator
  * believes is already done — the sort of quiet wrongness this harness exists to make impossible.
  */
-export function loadState(cwd: string, featureId: string): FeatureState | undefined {
-  const path = stateFilePath(cwd, featureId);
+export function loadStateFrom(runDirAbs: string, expectedId: string): FeatureState | undefined {
+  const path = stateFilePathIn(runDirAbs);
   if (!existsSync(path)) return undefined;
 
   let raw: string;
@@ -176,7 +140,7 @@ export function loadState(cwd: string, featureId: string): FeatureState | undefi
     raw = readFileSync(path, 'utf-8');
   } catch (error) {
     throw new Error(
-      `State file for run ${featureId} exists at ${path} but could not be read: ` +
+      `State file for run ${expectedId} exists at ${path} but could not be read: ` +
         `${error instanceof Error ? error.message : String(error)}`
     );
   }
@@ -192,11 +156,15 @@ export function loadState(cwd: string, featureId: string): FeatureState | undefi
     );
   }
 
+  if (state === null || typeof state !== 'object' || Array.isArray(state)) {
+    throw new Error(`State file at ${path} does not hold a run record. It is corrupt and not resumable.`);
+  }
+
   // A state file for a DIFFERENT run, sitting under this run's id, means something wrote to the
   // wrong path. Resuming it would run one feature under another's identity.
-  if (state.featureId !== featureId) {
+  if (state.featureId !== expectedId) {
     throw new Error(
-      `State file at ${path} belongs to run ${state.featureId}, not ${featureId}. ` +
+      `State file at ${path} belongs to run ${state.featureId}, not ${expectedId}. ` +
         `Refusing to resume a run under the wrong identity.`
     );
   }
