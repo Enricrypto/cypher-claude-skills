@@ -118,13 +118,68 @@ describe('repo hygiene', () => {
     }
   });
 
-  it('AC-4 tsconfig excludes run-cpf-factory.ts, run-frontend-only.ts, probe-cwd.ts, probe-cwd.mjs', () => {
+  it('AC-4 AC-61 the four root scripts are gone and tsconfig no longer excludes them', () => {
+    // AC-4 kept these untracked scratch scripts out of the typecheck; AC-61 replaced what they did
+    // (pause/approve/resume) and deleted them, so the exclusions would only hide a new file that
+    // happened to reuse a name (I-3).
     const tsconfig = parseJsonc(readFileSync(join(repoRoot, 'tsconfig.json'), 'utf-8'));
     const exclude: string[] = tsconfig.exclude ?? [];
+    const scripts = ['run-cpf-factory.ts', 'run-frontend-only.ts', 'probe-cwd.ts', 'probe-cwd.mjs'];
 
-    for (const file of ['run-cpf-factory.ts', 'run-frontend-only.ts', 'probe-cwd.ts', 'probe-cwd.mjs']) {
-      expect(exclude).toContain(file);
-    }
+    expect(scripts.filter(file => existsSync(join(repoRoot, file)))).toEqual([]);
+    expect(scripts.filter(file => exclude.includes(file))).toEqual([]);
+  });
+
+  it('carry-over 05-frontend-builder.md claims no loop-back to the Backend Builder', () => {
+    // The orchestrator never routes the Frontend Builder back to the Backend Builder: a builder
+    // that cannot proceed returns ESCALATE, and the run stops for a human (carry-over 1).
+    const contract = readFileSync(join(factoryRoot, 'feature', 'agents', '05-frontend-builder.md'), 'utf-8');
+
+    expect(contract).not.toMatch(/loops?\s+back\s+to\s+(the\s+)?(Backend Builder|Agent 4)/i);
+    expect(contract).not.toMatch(/routes?\s+back\s+to\s+(the\s+)?(Backend Builder|Agent 4)/i);
+    // What it does instead, and where the API it consumes is written down.
+    expect(contract).toMatch(/`ESCALATE`/);
+    expect(contract).toMatch(/BACKEND_SUMMARY\.md/);
+    expect(contract).toMatch(/API_CONTRACT\.md/);
+  });
+
+  it('S-1 smoke-validator.ts is operator-only: no test or module imports it, and it invokes only 07-validator through the SDK invoker', () => {
+    const script = join(factoryRoot, 'runner', 'smoke-validator.ts');
+    expect(existsSync(script)).toBe(true);
+
+    // `npm test` stays offline: nothing under test/ (fixtures included) and no other module
+    // imports or requires the script. The name is built by concatenation so this file does not
+    // match itself.
+    const needle = 'smoke-' + 'validator';
+    const allTs = (dir: string): string[] =>
+      readdirSync(dir, { withFileTypes: true }).flatMap(entry => {
+        const full = join(dir, entry.name);
+        if (entry.isDirectory()) return full === join(factoryRoot, 'e2e') ? [] : allTs(full);
+        return entry.name.endsWith('.ts') ? [full] : [];
+      });
+    const importers = allTs(factoryRoot)
+      .filter(file => file !== thisFile && file !== script)
+      .filter(file => readFileSync(file, 'utf-8').includes(needle));
+    expect(importers.map(file => relative(repoRoot, file))).toEqual([]);
+
+    const source = code(readFileSync(script, 'utf-8'));
+
+    // One agent, the Validator, through the production invoker, with the production prompt; judged
+    // by the harness's own schema check and security evaluation.
+    const agents = [...source.matchAll(/\bagent\s*:\s*['"]([^'"]+)['"]/g)].map(m => m[1]);
+    expect(agents.length).toBeGreaterThan(0);
+    expect(new Set(agents)).toEqual(new Set(['07-validator']));
+    expect(source).toMatch(/\bcreateSdkInvoker\(/);
+    expect(source).toMatch(/\bvalidatorPrompt\(/);
+    expect(source).toMatch(/\bvalidateOutputSchema\(\s*4\s*,\s*'07-validator'/);
+    expect(source).toMatch(/\bevaluateSecurityChecks\(/);
+
+    // It refuses a non-empty --cwd, and its exit codes are exactly PASS 0, FAIL 1, INCONCLUSIVE 2.
+    expect(source).toMatch(/readdirSync\(/);
+    expect(source).toMatch(/const EXIT = \{ PASS: 0, FAIL: 1, INCONCLUSIVE: 2 \} as const;/);
+    const literalExits = [...source.matchAll(/process\.exit(?:Code\s*=|\()\s*(\d+)/g)].map(m => m[1]);
+    expect(literalExits).toEqual([]);
+    expect(source).toMatch(/require\.main === module/);
   });
 
   it('AC-13 execution-gates.ts invokes no shell timeout command', () => {
@@ -238,6 +293,66 @@ describe('repo hygiene', () => {
     // getFixCodeTemplate is dead in the orchestrator, not dead everywhere: it stays exported.
     const errorCategories = readFileSync(join(factoryRoot, 'harness', 'error-categories.ts'), 'utf-8');
     expect(errorCategories).toMatch(/export function getFixCodeTemplate\b/);
+  });
+
+  it('AC-45 no orchestrator, CLI, workflow or harness code creates a PR, commits or pushes, and change-diff.ts uses only rev-parse, diff and ls-files', () => {
+    const scanned = ['feature/workflows', 'runner', 'harness'].flatMap(dir =>
+      readdirSync(join(factoryRoot, dir))
+        .filter(name => name.endsWith('.ts'))
+        .map(name => join(factoryRoot, dir, name))
+    );
+    expect(scanned).toContain(join(factoryRoot, 'harness', 'change-diff.ts'));
+
+    // Every string literal in the code: an argv entry, a command line, a URL path.
+    const literal = /'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*"|`(?:[^`\\]|\\.)*`/g;
+    const forbidden = [
+      /^['"`](commit|push)['"`]$/,
+      /\bgit\s+(commit|push)\b/,
+      /\bgh\s+pr\b/,
+      /\bpr\s+create\b/i,
+      /\/pulls\b/
+    ];
+    const offenders = scanned.flatMap(file => {
+      const literals = code(readFileSync(file, 'utf-8')).match(literal) ?? [];
+      return literals
+        .filter(text => forbidden.some(pattern => pattern.test(text)))
+        .map(text => `${relative(repoRoot, file)}: ${text}`);
+    });
+    expect(offenders).toEqual([]);
+
+    // Git is spawned in exactly one place, and only with the three read-only subcommands.
+    const spawnsGit = scanned.filter(file => /\b(spawn|spawnSync|exec|execSync|execFile|execFileSync)\(\s*['"`]git\b/.test(code(readFileSync(file, 'utf-8'))));
+    expect(spawnsGit.map(file => relative(repoRoot, file))).toEqual([join('factory', 'harness', 'change-diff.ts')]);
+
+    const changeDiff = code(readFileSync(join(factoryRoot, 'harness', 'change-diff.ts'), 'utf-8'));
+    expect(changeDiff.match(/spawnSync\(/g)).toHaveLength(1);
+    expect(changeDiff).toMatch(/type GitSubcommand = 'rev-parse' \| 'diff' \| 'ls-files';/);
+    const subcommands = [...changeDiff.matchAll(/\bgit(?:OrThrow)?\(\s*\w+\s*,\s*'([^']+)'/g)].map(m => m[1]);
+    expect(subcommands.length).toBeGreaterThan(0);
+    expect(new Set(subcommands)).toEqual(new Set(['rev-parse', 'diff', 'ls-files']));
+    // The subcommand passed to spawnSync is the typed parameter, never a literal.
+    expect(changeDiff).toMatch(/spawnSync\('git', \[\.\.\.SAFE_GIT_CONFIG, subcommand, \.\.\.args\]/);
+  });
+
+  it('AC-48 no knowledgeStored field or Knowledge Stored criterion exists in the Stage 5 contract, the stage context or the orchestrator', () => {
+    const sources = [
+      join(factoryRoot, 'harness', 'stage-gates.ts'),
+      join(factoryRoot, 'harness', 'stage-context.ts'),
+      join(factoryRoot, 'feature', 'workflows', 'feature-factory-orchestrator.ts')
+    ];
+
+    const offenders = sources.filter(file => /knowledgeStored|Knowledge Stored|validateKnowledgeStored/.test(code(readFileSync(file, 'utf-8'))));
+    expect(offenders.map(file => relative(repoRoot, file))).toEqual([]);
+  });
+
+  it('AC-77 the --yes approver returns APPROVE unconditionally', () => {
+    const cli = code(readFileSync(join(factoryRoot, 'runner', 'cli.ts'), 'utf-8'));
+
+    // --yes is decided before the TTY check and the human approver, and returns one constant decision.
+    expect(cli).toMatch(/if\s*\(\s*yes\s*\)\s*return\s+approveAll\s*;/);
+    const approveAll = /const approveAll = async \(\): Promise<CheckpointDecision> => (\(\{[^}]*\}\));/.exec(cli);
+    expect(approveAll).not.toBeNull();
+    expect(approveAll![1]).toBe(`({ decision: 'APPROVE', approvedBy: '--yes' })`);
   });
 
   it('AC-69 the frontend-file regexes exist only in frontend-files.ts', () => {

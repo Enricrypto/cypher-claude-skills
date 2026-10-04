@@ -14,6 +14,7 @@
 import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'fs';
 import { tmpdir } from 'os';
+import { symlinkSync } from 'fs';
 import { join } from 'path';
 
 import {
@@ -263,6 +264,19 @@ describe('Stage 3 gate — test pass rate is measured, not asserted', () => {
 
     const context = buildStageContext({ stage: 3, cwd: projectDir, outputs: { backend } });
     expect(context.metadata.testPassRate).toBe(0);
+  });
+
+  it('AC-72 carries the attempts each builder used and the attempts it was allowed into the loop criterion', () => {
+    const withMax = buildStageContext({
+      stage: 3,
+      cwd: projectDir,
+      outputs: { backend: backend() },
+      loops: { backend: 4, frontend: 1, max: { backend: 4 } }
+    });
+    expect(withMax.metadata).toMatchObject({ backendLoops: 4, frontendLoops: 1, maxBackendLoops: 4, maxFrontendLoops: 3 });
+
+    const defaults = buildStageContext({ stage: 3, cwd: projectDir, outputs: { backend: backend() } });
+    expect(defaults.metadata).toMatchObject({ backendLoops: 0, frontendLoops: 0, maxBackendLoops: 3, maxFrontendLoops: 3 });
   });
 });
 
@@ -638,6 +652,28 @@ describe('shared path helpers (D-7, D-9)', () => {
     expect(claimsInsideFactoryDir([], projectDir)).toEqual([]);
   });
 
+  it('MINOR-4 a claim under .Factory/ in any letter case is rejected as harness-owned', () => {
+    const claims = claimedFilesFromBuilders(
+      backend({
+        files: [
+          '.Factory/run-1/BACKEND_SUMMARY.md',
+          '.FACTORY/baseline.json',
+          join(projectDir, '.FaCtOrY', 'state.json'),
+          'src/../.Factory/x.md',
+          '.Factory-notes/x.md',
+          'src/.FACTORY/x.md'
+        ]
+      })
+    );
+
+    expect(claimsInsideFactoryDir(claims, projectDir)).toEqual([
+      '.Factory/run-1/BACKEND_SUMMARY.md',
+      '.FACTORY/baseline.json',
+      join(projectDir, '.FaCtOrY', 'state.json'),
+      'src/../.Factory/x.md'
+    ]);
+  });
+
   it('buildStageContext claims exactly what claimedFilesFromBuilders claims (one implementation)', () => {
     const b = backend({ files: ['src/a.ts'] });
     const f = frontend();
@@ -737,6 +773,45 @@ describe('persistArtifacts writes only inside the run directory (IMPORTANT-1, IM
     }
   );
 
+  it.each([
+    'state.json',
+    'STATE.JSON',
+    'baseline.json',
+    'Baseline.Json',
+    'BACKEND_SUMMARY.md',
+    'backend_summary.md',
+    'API_CONTRACT.MD',
+    'Frontend_Summary.md',
+    'TEST_REPORT.md',
+    'test_report.md',
+    '_archive',
+    '_ARCHIVE',
+    '_superseded',
+    '_Superseded',
+    '.hidden.md',
+    '.DS_Store'
+  ])('NEW-MINOR-2 the reserved artifact name %s is refused in any letter case', name => {
+    const output = validatorWith([
+      { name: 'VALIDATION_REPORT.md', path: 'VALIDATION_REPORT.md' },
+      { name, path: name }
+    ]);
+
+    expect(() => persistArtifacts({ validator: output }, projectDir, RUN_DIR)).toThrow(UnsafeArtifactPathError);
+    expect(() => persistArtifacts({ validator: output }, projectDir, RUN_DIR)).toThrow(/reserved/);
+
+    // Refused before anything is written: not even the safe sibling is on disk.
+    expect(existsSync(join(projectDir, RUN_DIR))).toBe(false);
+  });
+
+  it('NEW-MINOR-2 a name that merely contains a reserved word is still an ordinary document', () => {
+    const output = validatorWith([{ name: 'MY_TEST_REPORT.md', path: 'x' }, { name: 'state.json.md', path: 'y' }]);
+
+    persistArtifacts({ validator: output }, projectDir, RUN_DIR);
+
+    expect(existsSync(join(projectDir, RUN_DIR, 'MY_TEST_REPORT.md'))).toBe(true);
+    expect(existsSync(join(projectDir, RUN_DIR, 'state.json.md'))).toBe(true);
+  });
+
   it('without a run dir (legacy), an absolute path is refused, not honoured', () => {
     const supplied = join(elsewhere, 'RESEARCHER_REPORT.md');
     const output = researcherOutput();
@@ -763,5 +838,51 @@ describe('persistArtifacts writes only inside the run directory (IMPORTANT-1, IM
     persistArtifacts({ researcher: output }, projectDir);
 
     expect(readFileSync(join(projectDir, 'docs/R.md'), 'utf-8')).toBe('# R');
+  });
+});
+
+describe('persistArtifacts never writes through a symlink (NEW-MINOR-1)', () => {
+  const RUN_DIR = '.factory/run-1';
+  let elsewhere: string;
+
+  beforeEach(() => {
+    elsewhere = mkdtempSync(join(tmpdir(), 'ff-elsewhere-'));
+  });
+
+  afterEach(() => {
+    rmSync(elsewhere, { recursive: true, force: true });
+  });
+
+  it('NEW-MINOR-1 persistArtifacts refuses to write through a symlink in the run directory', () => {
+    // A builder (Write/Bash) plants VALIDATION_REPORT.md -> a file outside the project.
+    const victim = join(elsewhere, 'victim.txt');
+    writeFileSync(victim, 'untouched');
+    mkdirSync(join(projectDir, RUN_DIR), { recursive: true });
+    symlinkSync(victim, join(projectDir, RUN_DIR, 'VALIDATION_REPORT.md'));
+
+    const output = validator();
+    output.details.artifacts = [
+      { name: 'TEST_NOTES.md', path: 'TEST_NOTES.md', description: 'x', content: '# Notes' },
+      { name: 'VALIDATION_REPORT.md', path: 'VALIDATION_REPORT.md', description: 'x', content: '# Report' }
+    ];
+
+    expect(() => persistArtifacts({ validator: output }, projectDir, RUN_DIR)).toThrow(UnsafeArtifactPathError);
+
+    expect(readFileSync(victim, 'utf-8')).toBe('untouched');
+    // Checked before anything is written: the safe sibling is not on disk either.
+    expect(existsSync(join(projectDir, RUN_DIR, 'TEST_NOTES.md'))).toBe(false);
+  });
+
+  it('refuses a run directory that is a symlink resolving outside the project', () => {
+    mkdirSync(join(projectDir, '.factory'), { recursive: true });
+    symlinkSync(elsewhere, join(projectDir, RUN_DIR));
+
+    const output = validator();
+    output.details.artifacts = [
+      { name: 'VALIDATION_REPORT.md', path: 'VALIDATION_REPORT.md', description: 'x', content: '# Report' }
+    ];
+
+    expect(() => persistArtifacts({ validator: output }, projectDir, RUN_DIR)).toThrow(UnsafeArtifactPathError);
+    expect(existsSync(join(elsewhere, 'VALIDATION_REPORT.md'))).toBe(false);
   });
 });

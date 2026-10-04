@@ -6,14 +6,28 @@
  * all five stages with no network and no child process.
  */
 
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { dirname, isAbsolute, join, resolve } from 'path';
 
-import { OrchestrationOptions, runFeatureFactory } from '../../feature/workflows/feature-factory-orchestrator';
+import {
+  CheckpointDecision,
+  CheckpointRequest,
+  OrchestrationOptions,
+  runFeatureFactory
+} from '../../feature/workflows/feature-factory-orchestrator';
 import { AgentInvocation, AgentInvoker } from '../../runner/invoke-agent';
 import { FeatureFactoryAgent } from '../../runner/agent-registry';
-import { FeatureState } from '../../harness/state-tracker';
+import {
+  completeFeature,
+  createFeatureState,
+  FeatureState,
+  recordEscalation,
+  recordPause
+} from '../../harness/state-tracker';
+import { RunClass } from '../../harness/run-lifecycle';
+import { loadState, saveState } from '../../harness/state-store';
+import { ARCHIVE_DIRNAME } from '../../harness/run-directory';
 import {
   backend,
   consolidator,
@@ -24,6 +38,7 @@ import {
   testVerifier,
   validator
 } from './agent-outputs';
+import { fakeChangeTracker } from './changes';
 import { recordingGates } from './gates';
 
 export interface TempProject {
@@ -122,7 +137,8 @@ export function passingScript(): InvokerScript {
 
 /**
  * Run the orchestrator with test defaults: silent logger, an approver that approves every
- * checkpoint, and passing recorded gates. Anything in `overrides` wins.
+ * checkpoint, passing recorded gates and a fake change tracker (so no test but change-diff's runs
+ * git). Anything in `overrides` wins.
  */
 export function runToEnd(
   overrides: Partial<OrchestrationOptions> & Pick<OrchestrationOptions, 'cwd' | 'invoke'>
@@ -133,6 +149,142 @@ export function runToEnd(
     logger: () => {},
     approveCheckpoint: async () => true,
     gates: recordingGates().gates,
+    changes: fakeChangeTracker(),
     ...overrides
   });
+}
+
+/** One scripted answer: a decision, a legacy boolean, any other value (tests I-18), or a function of the request. */
+export type ScriptedDecision = CheckpointDecision | boolean | unknown | ((request: CheckpointRequest) => unknown);
+
+export interface ScriptedApprover {
+  approve: (request: CheckpointRequest) => Promise<CheckpointDecision | boolean>;
+  /** Every request the approver was given, in order. */
+  requests: CheckpointRequest[];
+}
+
+/**
+ * A scripted approver (D-4): the n-th checkpoint asked gets the n-th entry. Past the end of the
+ * script every checkpoint is approved, so a test scripts only the decisions it is about; it
+ * asserts on `requests` to pin which checkpoints were actually asked.
+ */
+export function decisions(...script: ScriptedDecision[]): ScriptedApprover {
+  const requests: CheckpointRequest[] = [];
+  const approve = async (request: CheckpointRequest) => {
+    requests.push(request);
+    const entry = requests.length <= script.length ? script[requests.length - 1] : { decision: 'APPROVE' };
+    const value = typeof entry === 'function' ? (entry as (r: CheckpointRequest) => unknown)(request) : entry;
+    return value as CheckpointDecision | boolean;
+  };
+  return { approve, requests };
+}
+
+/** The document `seedRun` writes beside each seeded state.json. */
+export const SEEDED_DOCUMENT = 'USER_STORY.md';
+
+/**
+ * Write a valid run of the given class into `<cwd>/.factory/<id>/`: a state.json saved through the
+ * real store, and one document (`SEEDED_DOCUMENT`). For the run-directory lifecycle tests (RD).
+ * ACTIVE is a run killed mid-flight: IN_PROGRESS, nothing finished.
+ */
+export function seedRun(cwd: string, runClass: RunClass): FeatureState {
+  let state = createFeatureState(`seed-${runClass.toLowerCase()}`, undefined, 'seeded run');
+  const runDir = `.factory/${state.featureId}`;
+
+  switch (runClass) {
+    case 'ACTIVE':
+      break;
+    case 'PAUSED':
+      state = recordPause(state, {
+        checkpointId: 1,
+        name: 'CHECKPOINT 1: Approve the story',
+        stage: 2,
+        artifactPaths: [`${runDir}/${SEEDED_DOCUMENT}`],
+        sha256: 'a'.repeat(64)
+      });
+      break;
+    case 'ESCALATED':
+      state = completeFeature(
+        recordEscalation(state, 3, 'harness', 'CRITICAL_ISSUE', 'seeded escalation'),
+        'ESCALATED',
+        'seeded escalation'
+      );
+      break;
+    case 'SUCCESS':
+    case 'MANUAL_STOP':
+      state = completeFeature(state, runClass, `seeded ${runClass}`);
+      break;
+  }
+
+  saveState(cwd, state);
+  writeFileSync(join(cwd, runDir, SEEDED_DOCUMENT), `# Story of ${state.featureId}\n`);
+  return state;
+}
+
+/** What `killAt` throws: the process "dies" at that agent call. */
+export class SimulatedKill extends Error {
+  constructor(agent: string, callNumber: number) {
+    super(`simulated kill at ${agent} call ${callNumber}`);
+    this.name = 'SimulatedKill';
+  }
+}
+
+export interface KillSwitch {
+  invoke: AgentInvoker;
+  /** state.json as it was on disk when the kill happened: what a killed process leaves behind. */
+  snapshot: () => FeatureState;
+}
+
+/** The state.json of the only live run in `cwd`, read through the real store. */
+function onlyLiveRun(cwd: string): FeatureState {
+  const factoryDir = join(cwd, '.factory');
+  const runs = readdirSync(factoryDir).filter(
+    name => name !== ARCHIVE_DIRNAME && existsSync(join(factoryDir, name, 'state.json'))
+  );
+  if (runs.length !== 1) throw new Error(`killAt: expected one live run in ${factoryDir}, found ${runs.length}.`);
+  return loadState(cwd, runs[0])!;
+}
+
+/**
+ * Simulate a killed process (AC-34, AC-36). At the `callNumber`-th call of `agent` the wrapper
+ * captures state.json from disk — everything committed before the invocation, e.g. the attempt
+ * counted for it — and throws SimulatedKill instead of invoking. The orchestrator then records an
+ * escalation a real kill never would; `restoreSnapshot` puts the captured state back.
+ */
+export function killAt(invoke: AgentInvoker, agent: string, callNumber: number, cwd: string): KillSwitch {
+  let calls = 0;
+  let captured: FeatureState | undefined;
+
+  return {
+    invoke: async call => {
+      if (call.agent === agent && ++calls === callNumber) {
+        captured = onlyLiveRun(cwd);
+        throw new SimulatedKill(agent, callNumber);
+      }
+      return invoke(call);
+    },
+    snapshot: () => {
+      if (!captured) throw new Error(`killAt: ${agent} was never called ${callNumber} time(s).`);
+      return structuredClone(captured);
+    }
+  };
+}
+
+/** Write a captured state back to disk through the real store, as the killed process left it. */
+export function restoreSnapshot(cwd: string, state: FeatureState): FeatureState {
+  saveState(cwd, state);
+  return structuredClone(state);
+}
+
+/**
+ * A logger that deletes one document right after the harness persists it into the run directory,
+ * before any gate reads it: how a test makes a gate meet a missing document now that a read-only
+ * agent cannot return one without its content (MINOR-8). Silent otherwise.
+ */
+export function removeOnPersist(cwd: string, agent: string, name: string): (message: string) => void {
+  const persisted = new RegExp(`📄 ${agent.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} → (\\S*/${name.replace('.', '\\.')})$`);
+  return message => {
+    const match = persisted.exec(message);
+    if (match) rmSync(resolve(cwd, match[1]));
+  };
 }

@@ -23,6 +23,16 @@ import {
   recordExecutionGate,
   recordBuilderAttempt,
   recordValidatorRound,
+  recordPause,
+  clearPause,
+  recordCheckpointRejection,
+  recordAttemptGrant,
+  recordAgentInvocation,
+  recordChangeBase,
+  recordFeatureDescription,
+  invalidateAgentSteps,
+  reopenFeature,
+  recordReworkStart,
   FeatureState
 } from '../../harness/state-tracker';
 import { FeatureFactoryAgentOutput } from '../../harness/agent-output-schema';
@@ -404,6 +414,474 @@ describe('State Tracker', () => {
       expect('round' in state.stageHistory[1]).toBe(false);
       expect([state.loopBacks[0].phase, state.loopBacks[0].round]).toEqual(['validator-round', 2]);
       expect('phase' in state.loopBacks[1]).toBe(false);
+    });
+  });
+
+  describe('A-2 state model (step 1)', () => {
+    const HASH = 'b'.repeat(64);
+    const pending = {
+      checkpointId: 2 as const,
+      name: 'CHECKPOINT 2: Approve the technical brief',
+      stage: 2,
+      artifactPaths: ['.factory/x/TECHNICAL_BRIEF.md', '.factory/x/FILE_LIST.md'],
+      sha256: HASH
+    };
+
+    function escalatedRun(): FeatureState {
+      let state = createFeatureState('esc');
+      state = recordAgentStep(state, 1, '01-researcher', 'PASS');
+      state = recordEscalation(state, 4, '06-test-verifier', 'CRITICAL_ISSUE', 'boom');
+      return completeFeature(state, 'ESCALATED', 'boom');
+    }
+
+    describe('D-1 isResumable', () => {
+      it('D-1 a completed ESCALATED run is resumable', () => {
+        expect(isResumable(escalatedRun())).toBe(true);
+      });
+
+      it('D-1 a PAUSED run is resumable', () => {
+        expect(isResumable(recordPause(createFeatureState('p'), pending))).toBe(true);
+      });
+
+      it('D-1 a MANUAL_STOP run is not resumable', () => {
+        expect(isResumable(completeFeature(createFeatureState('m'), 'MANUAL_STOP'))).toBe(false);
+      });
+    });
+
+    describe('AC-37 createFeatureState', () => {
+      it('AC-37 stores the feature description when given', () => {
+        expect(createFeatureState('n', undefined, 'Add 2FA to login').featureDescription).toBe('Add 2FA to login');
+      });
+
+      it('AC-37 leaves the description absent when not given, rather than inventing one', () => {
+        expect('featureDescription' in createFeatureState('n')).toBe(false);
+      });
+
+      it('IMPORTANT-1 recordFeatureDescription saves the description of a run recorded without one', () => {
+        expect(recordFeatureDescription(createFeatureState('n'), 'Add 2FA to login').featureDescription).toBe('Add 2FA to login');
+      });
+
+      it('IMPORTANT-1 recordFeatureDescription refuses a blank description', () => {
+        expect(() => recordFeatureDescription(createFeatureState('n'), '  ')).toThrow();
+      });
+
+      it('IMPORTANT-1 recordFeatureDescription never replaces a saved description', () => {
+        const state = createFeatureState('n', undefined, 'Add 2FA to login');
+        expect(() => recordFeatureDescription(state, 'Add SMS login')).toThrow();
+        expect(state.featureDescription).toBe('Add 2FA to login');
+      });
+
+      it('D-1 starts every new list empty', () => {
+        const state = createFeatureState('n');
+        expect(state.checkpointRejections).toEqual([]);
+        expect(state.attemptGrants).toEqual([]);
+        expect(state.agentInvocations).toEqual([]);
+        expect(state.resumeHistory).toEqual([]);
+        expect(state.pendingCheckpoint).toBeUndefined();
+      });
+    });
+
+    describe('AC-49 recordPause / clearPause', () => {
+      it('AC-49 recordPause sets PAUSED and a pendingCheckpoint with name, stage, artifact paths, hash and pausedAt, without finishing', () => {
+        const state = recordPause(createFeatureState('p'), { ...pending, changedFiles: ['src/a.ts'] });
+
+        expect(state.status).toBe('PAUSED');
+        expect(state.pendingCheckpoint).toMatchObject({ ...pending, changedFiles: ['src/a.ts'] });
+        expect(Number.isNaN(Date.parse(state.pendingCheckpoint?.pausedAt ?? ''))).toBe(false);
+        expect(state.completedAt).toBeUndefined();
+        expect(state.completionStatus).toBeUndefined();
+      });
+
+      it.each([
+        ['a checkpoint id outside 1..3', { ...pending, checkpointId: 4 }],
+        ['a missing hash', { ...pending, sha256: '' }],
+        ['a hash that is not lowercase SHA-256 hex', { ...pending, sha256: 'B'.repeat(64) }],
+        ['a missing name', { ...pending, name: '' }],
+        ['no artifact paths', { ...pending, artifactPaths: [] }]
+      ])('AC-49 recordPause refuses %s (fails closed)', (_label, bad) => {
+        expect(() => recordPause(createFeatureState('p'), bad as typeof pending)).toThrow();
+      });
+
+      it('AC-51 clearPause removes the pending checkpoint and sets IN_PROGRESS', () => {
+        const state = clearPause(recordPause(createFeatureState('p'), pending));
+        expect(state.status).toBe('IN_PROGRESS');
+        expect(state.pendingCheckpoint).toBeUndefined();
+      });
+
+      it('AC-51 clearPause refuses a run that is not PAUSED', () => {
+        expect(() => clearPause(createFeatureState('p'))).toThrow(/not PAUSED/);
+      });
+    });
+
+    describe('AC-50 recordCheckpointApproval binding', () => {
+      it('AC-50 an approval records the checkpoint id and the hash it is bound to', () => {
+        const state = recordCheckpointApproval(createFeatureState('a'), 2, pending.name, 'resume --approve', undefined, {
+          checkpointId: 2,
+          sha256: HASH
+        });
+        expect(state.checkpointApprovals[0]).toMatchObject({ checkpointId: 2, sha256: HASH, approvedBy: 'resume --approve' });
+      });
+
+      it('AC-50 an approval without a binding keeps the pre-A-2 shape', () => {
+        const state = recordCheckpointApproval(createFeatureState('a'), 2, 'Story');
+        expect('checkpointId' in state.checkpointApprovals[0]).toBe(false);
+        expect('sha256' in state.checkpointApprovals[0]).toBe(false);
+      });
+
+      it('AC-50 a binding with a malformed hash is refused (fails closed)', () => {
+        expect(() =>
+          recordCheckpointApproval(createFeatureState('a'), 2, 'x', undefined, undefined, { checkpointId: 2, sha256: 'nope' })
+        ).toThrow();
+      });
+    });
+
+    describe('AC-74 recordCheckpointRejection', () => {
+      const rejection = {
+        checkpointId: 2 as const,
+        name: pending.name,
+        stage: 2,
+        notes: 'Missing the error states',
+        sha256: HASH,
+        artifactPaths: pending.artifactPaths,
+        reworkAgents: ['03-spec-writer'],
+        source: 'resume --reject' as const
+      };
+
+      it('AC-74 appends the rejection with notes, checkpoint and rejectedAt, and resolves the matching pause', () => {
+        const state = recordCheckpointRejection(recordPause(createFeatureState('r'), pending), rejection);
+
+        expect(state.checkpointRejections).toHaveLength(1);
+        expect(state.checkpointRejections?.[0]).toMatchObject(rejection);
+        expect(Number.isNaN(Date.parse(state.checkpointRejections?.[0].rejectedAt ?? ''))).toBe(false);
+        expect(state.pendingCheckpoint).toBeUndefined();
+        expect(state.status).toBe('IN_PROGRESS');
+      });
+
+      it('AC-46 a TTY rejection may carry empty notes', () => {
+        const state = recordCheckpointRejection(createFeatureState('r'), { ...rejection, notes: '', source: 'approver' });
+        expect(state.checkpointRejections?.[0].notes).toBe('');
+      });
+
+      it('AC-74 tolerates a state file written before the list existed', () => {
+        const old = createFeatureState('r');
+        delete old.checkpointRejections;
+        expect(recordCheckpointRejection(old, rejection).checkpointRejections).toHaveLength(1);
+      });
+
+      it.each([
+        ['no rework agents', { ...rejection, reworkAgents: [] }],
+        ['a checkpoint id outside 1..3', { ...rejection, checkpointId: 0 }],
+        ['a malformed hash', { ...rejection, sha256: '' }],
+        ['notes that are not a string', { ...rejection, notes: undefined }]
+      ])('AC-74 refuses a rejection with %s (fails closed)', (_label, bad) => {
+        expect(() => recordCheckpointRejection(createFeatureState('r'), bad as unknown as typeof rejection)).toThrow();
+      });
+    });
+
+    describe('D-5 recordReworkStart', () => {
+      const rejection = {
+        checkpointId: 3 as const,
+        name: 'CHECKPOINT 3: Approve the validated change',
+        stage: 4,
+        notes: 'Use the existing rate limiter',
+        sha256: HASH,
+        artifactPaths: ['.factory/run/VALIDATION_REPORT.md'],
+        reworkAgents: ['04-backend-builder'],
+        source: 'approver' as const
+      };
+
+      it('D-5 sets the rework start and the superseded directory on that cycle\'s rejection only', () => {
+        let state = recordCheckpointRejection(createFeatureState('w'), { ...rejection, checkpointId: 1 });
+        state = recordCheckpointRejection(state, rejection);
+
+        state = recordReworkStart(state, 2, { supersededDir: '.factory/run/_superseded/2' });
+
+        expect(state.checkpointRejections?.[0].rework).toBeUndefined();
+        expect(state.checkpointRejections?.[1].rework).toEqual({
+          startedAt: expect.any(String),
+          supersededDir: '.factory/run/_superseded/2'
+        });
+        expect(Number.isNaN(Date.parse(state.checkpointRejections![1].rework!.startedAt))).toBe(false);
+      });
+
+      it.each<[string, number, string]>([
+        ['an unknown cycle', 2, '.factory/run/_superseded/2'],
+        ['cycle 0', 0, '.factory/run/_superseded/0'],
+        ['a blank superseded directory', 1, ' ']
+      ])('D-5 refuses %s (fails closed)', (_label, cycle, dir) => {
+        const state = recordCheckpointRejection(createFeatureState('w'), rejection);
+        expect(() => recordReworkStart(state, cycle, { supersededDir: dir })).toThrow();
+      });
+
+      it('D-5 refuses to start the same rework twice', () => {
+        const state = recordReworkStart(recordCheckpointRejection(createFeatureState('w'), rejection), 1, { supersededDir: 'd' });
+        expect(() => recordReworkStart(state, 1, { supersededDir: 'd' })).toThrow(/already/);
+      });
+    });
+
+    describe('AC-72 recordAttemptGrant', () => {
+      it('AC-72 records builder, n, phase and a timestamp', () => {
+        const state = recordAttemptGrant(createFeatureState('g'), {
+          builder: '04-backend-builder',
+          attempts: 2,
+          at: { phase: 'validator-round', round: 1 }
+        });
+        expect(state.attemptGrants).toHaveLength(1);
+        expect(state.attemptGrants?.[0]).toMatchObject({
+          builder: '04-backend-builder',
+          attempts: 2,
+          at: { phase: 'validator-round', round: 1 }
+        });
+        expect(Number.isNaN(Date.parse(state.attemptGrants?.[0].grantedAt ?? ''))).toBe(false);
+      });
+
+      it.each([0, -1, 1.5, Number.NaN])('AC-72 refuses a grant of %p attempts (fails closed)', attempts => {
+        expect(() =>
+          recordAttemptGrant(createFeatureState('g'), { builder: '04-backend-builder', attempts, at: { phase: 'stage3' } })
+        ).toThrow();
+      });
+    });
+
+    describe('AC-36 recordBuilderAttempt rework budget', () => {
+      it('AC-36 counts rework attempts per cycle, separately from Stage 3 and validator rounds', () => {
+        let state = createFeatureState('t');
+        state = recordBuilderAttempt(state, '04-backend-builder', { phase: 'stage3' });
+        state = recordBuilderAttempt(state, '04-backend-builder', { phase: 'rework', round: 1 });
+        state = recordBuilderAttempt(state, '04-backend-builder', { phase: 'rework', round: 1 });
+        state = recordBuilderAttempt(state, '04-backend-builder', { phase: 'validator-round', round: 1 });
+        state = recordBuilderAttempt(state, '04-backend-builder', { phase: 'stage3' });
+
+        expect(state.builderAttempts?.['04-backend-builder']).toEqual({
+          stage3: 2,
+          validatorRounds: { 1: 1 },
+          rework: { 1: 2 }
+        });
+      });
+
+      it('AC-75 a step and a loop-back can carry the rework phase and a failure', () => {
+        let state = createFeatureState('t');
+        state = recordAgentStep(state, 3, '04-backend-builder', 'PASS', undefined, undefined, { phase: 'rework', round: 1 });
+        state = recordLoopBack(state, 3, '04-backend-builder', 'tests failed', 'FAIL', undefined, { phase: 'rework', round: 1 }, {
+          kind: 'status',
+          error: 'builder reported FAIL'
+        });
+        state = recordLoopBack(state, 3, '04-backend-builder', 'x', 'FAIL');
+
+        expect([state.stageHistory[0].phase, state.stageHistory[0].round]).toEqual(['rework', 1]);
+        expect(state.loopBacks[0].failure).toEqual({ kind: 'status', error: 'builder reported FAIL' });
+        expect('failure' in state.loopBacks[1]).toBe(false);
+      });
+    });
+
+    describe('TIMING agent timings', () => {
+      it('TIMING recordAgentStep uses the real start and end when given, with a duration', () => {
+        const state = recordAgentStep(createFeatureState('t'), 1, '01-researcher', 'PASS', undefined, undefined, undefined, {
+          startedAt: '2026-10-04T10:00:00.000Z',
+          completedAt: '2026-10-04T10:02:30.500Z'
+        });
+        expect(state.stageHistory[0]).toMatchObject({
+          startedAt: '2026-10-04T10:00:00.000Z',
+          completedAt: '2026-10-04T10:02:30.500Z',
+          durationMs: 150500
+        });
+      });
+
+      it('TIMING recordAgentStep without timing keeps the pre-A-2 shape (no durationMs)', () => {
+        const state = recordAgentStep(createFeatureState('t'), 1, '01-researcher', 'PASS');
+        expect('durationMs' in state.stageHistory[0]).toBe(false);
+      });
+
+      it.each([
+        ['an unparseable start', { startedAt: 'yesterday', completedAt: '2026-10-04T10:00:00.000Z' }],
+        ['an end before the start', { startedAt: '2026-10-04T10:00:01.000Z', completedAt: '2026-10-04T10:00:00.000Z' }]
+      ])('TIMING recordAgentStep refuses %s (fails closed)', (_label, timing) => {
+        expect(() =>
+          recordAgentStep(createFeatureState('t'), 1, '01-researcher', 'PASS', undefined, undefined, undefined, timing)
+        ).toThrow();
+      });
+
+      it('TIMING recordAgentInvocation appends the record and adds its duration to timePerStage', () => {
+        let state = createFeatureState('t');
+        const base = { agent: '04-backend-builder', startedAt: '2026-10-04T10:00:00.000Z', completedAt: '2026-10-04T10:00:01.000Z' };
+        state = recordAgentInvocation(state, { ...base, stage: 3, durationMs: 1000, phase: 'stage3', attempt: 1 });
+        state = recordAgentInvocation(state, { ...base, stage: 3, durationMs: 250, phase: 'stage3', attempt: 2 });
+        state = recordAgentInvocation(state, { ...base, agent: '01-researcher', stage: 1, durationMs: 40 });
+
+        expect(state.agentInvocations).toHaveLength(3);
+        expect(state.agentInvocations?.[1]).toMatchObject({ stage: 3, attempt: 2, durationMs: 250 });
+        expect(state.metrics.timePerStage).toEqual({ 1: 40, 3: 1250 });
+      });
+
+      it.each([-1, Number.NaN, Number.POSITIVE_INFINITY])('TIMING recordAgentInvocation refuses a duration of %p', durationMs => {
+        expect(() =>
+          recordAgentInvocation(createFeatureState('t'), {
+            stage: 1,
+            agent: '01-researcher',
+            startedAt: '2026-10-04T10:00:00.000Z',
+            completedAt: '2026-10-04T10:00:00.000Z',
+            durationMs
+          })
+        ).toThrow();
+      });
+
+      it('TIMING tolerates a state file written before the list existed', () => {
+        const old = createFeatureState('t');
+        delete old.agentInvocations;
+        const state = recordAgentInvocation(old, {
+          stage: 2,
+          agent: '02-story-writer',
+          startedAt: '2026-10-04T10:00:00.000Z',
+          completedAt: '2026-10-04T10:00:00.010Z',
+          durationMs: 10
+        });
+        expect(state.agentInvocations).toHaveLength(1);
+      });
+    });
+
+    describe('D-8 recordChangeBase', () => {
+      it('D-8 records the git base or the reason there is none', () => {
+        expect(recordChangeBase(createFeatureState('c'), { kind: 'git', commit: 'abc123' }).changeBase).toEqual({
+          kind: 'git',
+          commit: 'abc123'
+        });
+        expect(recordChangeBase(createFeatureState('c'), { kind: 'none', reason: 'not a git work tree' }).changeBase).toEqual({
+          kind: 'none',
+          reason: 'not a git work tree'
+        });
+      });
+    });
+
+    describe('I-6 invalidateAgentSteps', () => {
+      it('I-6 flags every non-invalidated PASS step of the named agents, keeping the steps', () => {
+        let state = createFeatureState('i');
+        state = recordAgentStep(state, 4, '06-test-verifier', 'PASS');
+        state = recordAgentStep(state, 4, '07-validator', 'FAIL');
+        state = recordAgentStep(state, 4, '07-validator', 'PASS');
+        state = recordAgentStep(state, 3, '04-backend-builder', 'PASS');
+
+        state = invalidateAgentSteps(state, ['06-test-verifier', '07-validator'], 'Stage 4 gate failed');
+
+        expect(state.stageHistory).toHaveLength(4);
+        expect(state.stageHistory[0].invalidated).toMatchObject({ reason: 'Stage 4 gate failed' });
+        expect(Number.isNaN(Date.parse(state.stageHistory[0].invalidated?.at ?? ''))).toBe(false);
+        expect(state.stageHistory[1].invalidated).toBeUndefined();
+        expect(state.stageHistory[2].invalidated).toMatchObject({ reason: 'Stage 4 gate failed' });
+        expect(state.stageHistory[3].invalidated).toBeUndefined();
+      });
+
+      it('I-6 also flags pre-supplied tier-1 steps by the agent of their output', () => {
+        let state = createFeatureState('i');
+        state = recordAgentStep(state, 2, 'tier-1', 'PASS', {
+          stage: 2,
+          agent: '02-story-writer',
+          timestamp: new Date().toISOString(),
+          status: 'PASS',
+          details: { summary: 's', artifacts: [] }
+        });
+        state = invalidateAgentSteps(state, ['02-story-writer'], 'story gate failed');
+        expect(state.stageHistory[0].invalidated?.reason).toBe('story gate failed');
+      });
+
+      it('I-6 does not overwrite an earlier invalidation', () => {
+        let state = recordAgentStep(createFeatureState('i'), 1, '01-researcher', 'PASS');
+        state = invalidateAgentSteps(state, ['01-researcher'], 'first');
+        state = invalidateAgentSteps(state, ['01-researcher'], 'second');
+        expect(state.stageHistory[0].invalidated?.reason).toBe('first');
+      });
+
+      it('I-6 refuses a blank reason (fails closed)', () => {
+        expect(() => invalidateAgentSteps(createFeatureState('i'), ['01-researcher'], ' ')).toThrow();
+      });
+    });
+
+    describe('AC-35 reopenFeature', () => {
+      it('AC-35 reopens an ESCALATED run: IN_PROGRESS, completion fields cleared, latest escalation resolved, resume recorded', () => {
+        const state = reopenFeature(escalatedRun(), { fromClass: 'ESCALATED', action: 'continue' });
+
+        expect(state.status).toBe('IN_PROGRESS');
+        expect(state.completedAt).toBeUndefined();
+        expect(state.completionStatus).toBeUndefined();
+        expect(state.finalSummary).toBeUndefined();
+        expect('completedAt' in state).toBe(false);
+        expect(state.escalations[0].resolvedAt).toBeTruthy();
+        expect(state.escalations[0].resolution).toMatch(/resume/i);
+        expect(state.resumeHistory).toHaveLength(1);
+        expect(state.resumeHistory?.[0]).toMatchObject({ fromClass: 'ESCALATED', action: 'continue' });
+        expect(isResumable(state)).toBe(true);
+      });
+
+      it('AC-72 a grant is recorded in the resume history', () => {
+        const state = reopenFeature(escalatedRun(), { fromClass: 'ESCALATED', action: 'continue', grantedAttempts: 2 });
+        expect(state.resumeHistory?.[0].grantedAttempts).toBe(2);
+      });
+
+      it('AC-35 resolves only the latest unresolved escalation', () => {
+        let state = createFeatureState('two');
+        state = recordEscalation(state, 3, '04-backend-builder', 'MAX_LOOPS', 'first');
+        state.escalations[0].resolvedAt = '2026-01-01T00:00:00.000Z';
+        state.escalations[0].resolution = 'earlier';
+        state = recordEscalation(state, 4, '07-validator', 'CRITICAL_ISSUE', 'second');
+        state = completeFeature(state, 'ESCALATED');
+
+        state = reopenFeature(state, { fromClass: 'ESCALATED', action: 'continue' });
+
+        expect(state.escalations[0].resolution).toBe('earlier');
+        expect(state.escalations[1].resolvedAt).toBeTruthy();
+      });
+
+      it.each([
+        ['SUCCESS', () => completeFeature(createFeatureState('s'), 'SUCCESS')],
+        ['MANUAL_STOP', () => completeFeature(createFeatureState('m'), 'MANUAL_STOP')],
+        ['PAUSED', () => recordPause(createFeatureState('p'), pending)]
+      ])('AC-35 refuses to reopen a %s run', (_label, make) => {
+        expect(() => reopenFeature(make(), { fromClass: 'ESCALATED', action: 'continue' })).toThrow();
+      });
+    });
+
+    it('D-1 a state.json written before A-2 loads and every new recorder tolerates the missing fields', () => {
+      const legacy = deserializeState(
+        JSON.stringify({
+          featureId: 'legacy-run',
+          featureName: 'legacy',
+          createdAt: '2026-01-01T00:00:00.000Z',
+          currentStage: 4,
+          status: 'COMPLETED',
+          stageHistory: [],
+          loopBacks: [],
+          escalations: [
+            {
+              stage: 4,
+              agent: '06-test-verifier',
+              reason: 'CRITICAL_ISSUE',
+              severity: 'CRITICAL',
+              context: { message: 'x' },
+              escalatedAt: '2026-01-01T00:00:00.000Z'
+            }
+          ],
+          checkpointApprovals: [],
+          metrics: { totalTime: 0, timePerStage: {}, loopCount: 0, escalationCount: 1 },
+          completedAt: '2026-01-01T00:01:00.000Z',
+          completionStatus: 'ESCALATED'
+        })
+      );
+
+      expect(isResumable(legacy)).toBe(true);
+      let state = reopenFeature(legacy, { fromClass: 'ESCALATED', action: 'continue' });
+      state = recordAttemptGrant(state, { builder: '04-backend-builder', attempts: 1, at: { phase: 'stage3' } });
+      state = recordBuilderAttempt(state, '04-backend-builder', { phase: 'rework', round: 1 });
+      state = recordAgentInvocation(state, {
+        stage: 4,
+        agent: '06-test-verifier',
+        startedAt: '2026-01-02T00:00:00.000Z',
+        completedAt: '2026-01-02T00:00:01.000Z',
+        durationMs: 1000
+      });
+      state = recordPause(state, pending);
+
+      expect(state.status).toBe('PAUSED');
+      expect(state.resumeHistory).toHaveLength(1);
+      expect(state.attemptGrants).toHaveLength(1);
+      expect(state.builderAttempts?.['04-backend-builder']).toEqual({ stage3: 0, validatorRounds: {}, rework: { 1: 1 } });
     });
   });
 });

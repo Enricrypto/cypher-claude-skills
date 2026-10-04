@@ -14,7 +14,7 @@ import { join } from 'path';
 
 import { passingScript, runToEnd, scriptedInvoker, tempProject, TempProject } from '../fixtures/harness-run';
 import { executionAudit, infraAudit, recordingGates, throwingGate } from '../fixtures/gates';
-import { ALL_SURFACES_PRESENT, backend, researcher, spec, story, testVerifier, validator } from '../fixtures/agent-outputs';
+import { ALL_SURFACES_PRESENT, backend, featureSpec, researcher, spec, story, testVerifier, validator } from '../fixtures/agent-outputs';
 import { AgentInvocation } from '../../runner/invoke-agent';
 import { FeatureState } from '../../harness/state-tracker';
 import { harnessGeneratedLabel } from '../../harness/harness-documents';
@@ -156,6 +156,97 @@ describe('orchestrator gates', () => {
     expect(state.escalations.map(e => e.reason)).toEqual(['MAX_LOOPS']);
     expect(state.loopBacks.filter(l => l.agent === '04-backend-builder')).toHaveLength(3);
     for (const loop of state.loopBacks) expect(loop.reason).toMatch(/details/);
+  });
+
+  // ==========================================================================================
+  // Backlog: a builder's own verdict and a missing envelope (MINOR-6, MINOR-10)
+  // ==========================================================================================
+
+  const builderSteps = (state: FeatureState, status: string) =>
+    state.stageHistory.filter(s => s.agent === '04-backend-builder' && s.status === status);
+  const builderLoopBacks = (state: FeatureState) => state.loopBacks.filter(l => l.agent === '04-backend-builder');
+
+  /** A schema-valid backend build that reports `status` instead of PASS, and no failing test. */
+  const backendWithStatus = (status: 'FAIL' | 'LOOP_BACK') => {
+    const output = backend();
+    return { ...output, status, details: { ...output.details, summary: 'Could not wire the enable route.' } };
+  };
+
+  it('MINOR-6 a builder returning status FAIL with a valid schema and no failing test is retried, never recorded PASS', async () => {
+    const invoker = scriptedInvoker(
+      { ...passingScript(), '04-backend-builder': () => backendWithStatus('FAIL') },
+      { cwd: project.dir }
+    );
+
+    const state = await runToEnd({ cwd: project.dir, invoke: invoker.invoke });
+
+    expect(state.escalations.map(e => [e.stage, e.agent, e.reason])).toEqual([[3, '04-backend-builder', 'MAX_LOOPS']]);
+    expect(builderSteps(state, 'PASS')).toEqual([]);
+    expect(builderLoopBacks(state).map(l => l.failure?.kind)).toEqual(['status', 'status', 'status']);
+    expect(builderLoopBacks(state)[0].reason).toMatch(/status FAIL/);
+    // The retry is briefed with what the builder said about its own attempt.
+    const prompts = invoker.promptsFor('04-backend-builder');
+    expect(prompts).toHaveLength(3);
+    expect(prompts[0]).not.toContain('Could not wire the enable route.');
+    expect(prompts[1]).toContain('Could not wire the enable route.');
+    expect(invoker.agents()).not.toContain('06-test-verifier');
+  });
+
+  it('MINOR-6 a builder returning LOOP_BACK with a valid schema uses an attempt and the next attempt can pass', async () => {
+    const invoker = scriptedInvoker(
+      { ...passingScript(), '04-backend-builder': (_call: AgentInvocation, n: number) => (n === 1 ? backendWithStatus('LOOP_BACK') : backend()) },
+      { cwd: project.dir }
+    );
+
+    const state = await runToEnd({ cwd: project.dir, invoke: invoker.invoke });
+
+    expect(state.completionStatus).toBe('SUCCESS');
+    expect(builderLoopBacks(state).map(l => [l.failure?.kind, l.attempt])).toEqual([['status', 1]]);
+    expect(builderLoopBacks(state)[0].reason).toMatch(/status LOOP_BACK/);
+    expect(builderSteps(state, 'PASS')).toHaveLength(1);
+  });
+
+  it('MINOR-10 a builder invoker returning null is a schema failure that is retried, not a MANUAL escalation', async () => {
+    const invoker = scriptedInvoker(
+      { ...passingScript(), '04-backend-builder': (_call: AgentInvocation, n: number) => (n === 1 ? null : backend()) },
+      { cwd: project.dir }
+    );
+
+    const state = await runToEnd({ cwd: project.dir, invoke: invoker.invoke });
+
+    expect(state.completionStatus).toBe('SUCCESS');
+    expect(state.escalations).toEqual([]);
+    expect(builderLoopBacks(state).map(l => l.failure)).toEqual([{ kind: 'schema', error: 'output is not an object' }]);
+    expect(invoker.promptsFor('04-backend-builder')[1]).toMatch(/MALFORMED/);
+  });
+
+  it.each<[string, unknown]>([
+    ['a string', 'done'],
+    ['a number', 42],
+    ['undefined', undefined]
+  ])('MINOR-10 a builder invoker returning %s on every attempt exhausts its attempts (MAX_LOOPS), not MANUAL', async (_label, value) => {
+    const invoker = scriptedInvoker({ ...passingScript(), '04-backend-builder': () => value }, { cwd: project.dir });
+
+    const state = await runToEnd({ cwd: project.dir, invoke: invoker.invoke });
+
+    expect(state.escalations.map(e => [e.stage, e.agent, e.reason])).toEqual([[3, '04-backend-builder', 'MAX_LOOPS']]);
+    expect(builderLoopBacks(state).map(l => l.failure?.kind)).toEqual(['schema', 'schema', 'schema']);
+  });
+
+  it('NEW-MINOR-3 that spec escalates CRITICAL_ISSUE, not MANUAL', async () => {
+    const supplied = featureSpec({ files: ['src/a.ts'] });
+    supplied.story.details.artifacts.push({ name: 'state.json', path: 'state.json', description: 'Planted', content: '{}' });
+    const invoker = scriptedInvoker(passingScript(), { cwd: project.dir });
+
+    const state = await runToEnd({ cwd: project.dir, invoke: invoker.invoke, preSuppliedSpec: supplied });
+
+    expect(state.completionStatus).toBe('ESCALATED');
+    expect(state.escalations.map(e => [e.stage, e.agent, e.reason])).toEqual([[2, 'tier-1', 'CRITICAL_ISSUE']]);
+    expect(state.escalations[0].context.blockers?.join('\n')).toMatch(/state\.json.*reserved/);
+    expect(invoker.agents()).toEqual([]);
+    // The planted document never replaced the run's record.
+    const record = JSON.parse(readFileSync(join(project.dir, '.factory', state.featureId, 'state.json'), 'utf-8'));
+    expect(record.featureId).toBe(state.featureId);
   });
 
   // ==========================================================================================
@@ -315,17 +406,17 @@ describe('orchestrator gates', () => {
     const testReport = readFileSync(runDir(state, 'TEST_REPORT.md'), 'utf-8');
     expect(testReport.split('\n')[0]).toBe(harnessGeneratedLabel('06-test-verifier'));
     expect(readFileSync(runDir(state, 'VALIDATION_REPORT.md'), 'utf-8')).toContain('# Validation Report');
-    // Every agent's documents land in the run directory, the Consolidator's included.
+    // Every agent's documents land in the run directory. The Consolidator does not run in a run (AC-44).
     for (const name of [
       'RESEARCHER_REPORT.md', 'USER_STORY.md', 'TECHNICAL_BRIEF.md', 'FILE_LIST.md',
-      'TEST_REPORT.md', 'VALIDATION_REPORT.md', 'CONSOLIDATION_REPORT.md', 'PATTERNS.md'
+      'TEST_REPORT.md', 'VALIDATION_REPORT.md'
     ]) {
       expect({ name, inRunDir: existsSync(runDir(state, name)) }).toEqual({ name, inRunDir: true });
       expect({ name, inRoot: existsSync(join(project.dir, name)) }).toEqual({ name, inRoot: false });
     }
   });
 
-  it('AC-21 a Validator that returns no VALIDATION_REPORT.md fails the Stage 4 gate', async () => {
+  it('AC-21 a Validator that returns no VALIDATION_REPORT.md fails its schema and escalates SCHEMA_VALIDATION before the Stage 4 gate (MINOR-8, I-11)', async () => {
     const noReport = validator();
     noReport.details.artifacts = [];
     const invoker = scriptedInvoker({ ...passingScript(), '07-validator': noReport }, { cwd: project.dir });
@@ -333,8 +424,8 @@ describe('orchestrator gates', () => {
     const state = await runToEnd({ cwd: project.dir, invoke: invoker.invoke });
 
     expect(state.completionStatus).toBe('ESCALATED');
-    expect(state.escalations.map(e => [e.stage, e.agent, e.reason])).toEqual([[4, 'harness', 'CRITICAL_ISSUE']]);
-    expect(state.escalations[0].context.blockers?.join('\n')).toMatch(/VALIDATION_REPORT\.md/);
+    expect(state.escalations.map(e => [e.stage, e.agent, e.reason])).toEqual([[4, '07-validator', 'SCHEMA_VALIDATION']]);
+    expect(state.escalations[0].context.message).toMatch(/VALIDATION_REPORT\.md/);
   });
 
   it('AC-67 brief declaring no auth surface and a Validator auth not_applicable with reason does not block Stage 4', async () => {
@@ -388,7 +479,7 @@ describe('orchestrator gates', () => {
   // A8: "No Regressions" is measured by the harness (D-5, D-12)
   // ==========================================================================================
 
-  /** A baseline a previous successful run left in `.factory/` (nothing writes one until A-2). */
+  /** A baseline a previous successful run left in `.factory/` (seeded here; a SUCCESS run also writes one). */
   const writeBaseline = (testCount: number) => {
     const baseline: RegressionBaseline = {
       schemaVersion: 1,
@@ -515,13 +606,15 @@ describe('orchestrator gates', () => {
     const invoker = scriptedInvoker(passingScript(), { cwd: project.dir });
     const recorded = recordingGates({ auditExecution: executionAudit({ total: 1 }) });
 
+    expect(existsSync(baselineFilePath(project.dir))).toBe(false);
     const state = await runToEnd({ cwd: project.dir, invoke: invoker.invoke, gates: recorded.gates });
 
-    expect(existsSync(baselineFilePath(project.dir))).toBe(false);
     expect(state.completionStatus).toBe('SUCCESS');
     expect(state.executionGateHistory).toHaveLength(1);
     expect(state.executionGateHistory?.[0].total).toBe(1);
     expect(state.executionGateHistory?.[0].referenceCount).toBeUndefined();
+    // The run itself now leaves a baseline at SUCCESS (AC-65, write side).
+    expect(existsSync(baselineFilePath(project.dir))).toBe(true);
   });
 
   it('a corrupt baseline file fails closed: the run escalates before Gate 2 runs', async () => {

@@ -84,7 +84,7 @@ export function routeCriticalIssues(issues: ValidatorIssue[], owners: IssueOwner
 }
 
 /**
- * Fold a validator-round build into the builder's earlier output.
+ * Fold a validator-round (or CP3 rework) build into the builder's earlier output.
  *
  * The round's output wins everywhere (its summary, its test results), except `filesModified`:
  * a round fixes a few files, and the files it did not touch are still the builder's work. That
@@ -101,14 +101,23 @@ export function routeCriticalIssues(issues: ValidatorIssue[], owners: IssueOwner
  *     double-count them.
  *   - A round with no `testing` at all keeps that absence (fails closed at the schema/gate).
  */
-export function mergeBuilderOutput<T extends BackendBuilderOutput | FrontendBuilderOutput>(previous: T, next: T): T {
+export function mergeBuilderOutput<T extends BackendBuilderOutput | FrontendBuilderOutput>(
+  previous: T,
+  next: T,
+  /**
+   * The project root (MINOR-5). With it, an absolute path inside the project and the same path
+   * relative to it are one file — the same normalisation the routing and the gates use — and the
+   * merged entry keeps the round's own spelling. Without it, only `./` and leading slashes fold.
+   */
+  cwd?: string
+): T {
   const nextFiles = next.details?.filesModified ?? [];
-  const byPath = new Map(nextFiles.map(f => [normalisePath(f.path), f]));
+  const byPath = new Map(nextFiles.map(f => [normalisePath(f.path, cwd), f]));
   const merged: Array<(typeof nextFiles)[number]> = [];
   const seen = new Set<string>();
 
   for (const file of [...(previous.details?.filesModified ?? []), ...nextFiles]) {
-    const key = normalisePath(file.path);
+    const key = normalisePath(file.path, cwd);
     if (seen.has(key)) continue;
     seen.add(key);
     merged.push(byPath.get(key) ?? file);

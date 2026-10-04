@@ -4,21 +4,28 @@
  * The orchestrator sequences; this module says what each agent is told. Every prompt for 01..08:
  *   - names the absolute run-dir path of each upstream document that EXISTS for that agent
  *     (UPSTREAM_FOR_AGENT, filtered by existingUpstreamArtifacts) — never one that does not (AC-24);
- *   - carries runDirectoryRules: the archive rule (AC-28) and this run's directory.
+ *   - carries runDirectoryRules: the archive rule (AC-28) and this run's directory. The one
+ *     exception is `--consolidate` (AC-47): 08 is told its run's directory, possibly archived,
+ *     is the only one it may read.
  *
  * Prompts are built at invocation time, so "exists" means "exists when the agent starts".
  */
+
+import { resolve } from 'path';
 
 import { getRemediationInstruction } from './error-categories';
 import {
   existingUpstreamArtifacts,
   runDirectoryRules,
+  RunDirectoryRuleOptions,
   UPSTREAM_FOR_AGENT,
   UpstreamArtifact
 } from './upstream-artifacts';
+import { stateFilePathIn } from './state-store';
 import { FeatureFactoryAgent } from '../runner/agent-registry';
 import { ValidatorIssue } from './agent-output-schema';
 import { describeIssue } from './validator-routing';
+import { MAX_BUILDER_ATTEMPTS } from './loop-rules';
 
 /** What every prompt builder needs to know about the run. */
 export interface PromptContext {
@@ -30,12 +37,14 @@ export interface PromptContext {
 }
 
 /**
- * Why the builder is being invoked again: the previous attempt's test or schema failure, or —
+ * Why the builder is being invoked again: the previous attempt's test or schema failure, its own
+ * verdict that it did not finish (`status`: FAIL or LOOP_BACK with a valid envelope, MINOR-6), or —
  * for a validator round (D-9) — the Validator's CRITICAL issues in files this builder owns.
  */
 export type BuilderFailure =
   | { kind: 'test'; error: string }
   | { kind: 'schema'; error: string }
+  | { kind: 'status'; error: string }
   | ValidatorRoundFailure;
 
 /** The CRITICAL issues routed to this builder in validator round `round` of `maxRounds`. */
@@ -78,12 +87,13 @@ export function validatorBriefing(failure: ValidatorRoundFailure): string {
  * BOUND. The bound was real (three attempts, then MAX_LOOPS). The exact gap was being dropped
  * on the floor.
  */
-export function retryBriefing(attempt: number, failure?: BuilderFailure): string {
+export function retryBriefing(attempt: number, failure?: BuilderFailure, maxAttempts: number = MAX_BUILDER_ATTEMPTS): string {
   // A validator round is briefed from attempt 1, by validatorBriefing — not as a retry.
   if (failure?.kind === 'validator') return validatorBriefing(failure);
   if (attempt <= 1) return '';
 
-  const header = `This is attempt ${attempt} of 3. Do not start over — fix what is named below.`;
+  // `maxAttempts` is the budget this loop is allowed: MAX_BUILDER_ATTEMPTS plus any grant (AC-72).
+  const header = `This is attempt ${attempt} of ${maxAttempts}. Do not start over — fix what is named below.`;
 
   if (!failure) {
     // No classified cause. Say so plainly rather than implying a diagnosis we do not have.
@@ -103,6 +113,20 @@ export function retryBriefing(attempt: number, failure?: BuilderFailure): string
     ].join('\n');
   }
 
+  if (failure.kind === 'status') {
+    // MINOR-6: the builder itself said the attempt was not done. Its words are the only diagnosis.
+    return [
+      header,
+      ``,
+      `The previous attempt did not report the work as done. It returned a valid result envelope`,
+      `with a status other than PASS, and said:`,
+      ``,
+      `    ${failure.error}`,
+      ``,
+      `Finish that work. Return PASS only when it is done; if it cannot be done, return ESCALATE and say why.`
+    ].join('\n');
+  }
+
   return [
     header,
     ``,
@@ -111,6 +135,49 @@ export function retryBriefing(attempt: number, failure?: BuilderFailure): string
     ``,
     getRemediationInstruction(failure.error)
   ].join('\n');
+}
+
+/**
+ * Why an agent is producing its work AGAIN after a human or a gate did not accept it (D-5, D-B):
+ * what refused it (a checkpoint's name, or a gate), the notes (a reviewer's words, or the gate's
+ * reason), and the absolute paths of the rejected version.
+ */
+export interface CheckpointRework {
+  checkpointName: string;
+  notes: string;
+  rejectedPaths: string[];
+}
+
+/**
+ * The rework briefing (AC-75). The re-run agent is a fresh context: this is the only place it
+ * learns that its earlier version was refused, why, and where that version is. Every line of the
+ * notes is quoted as given; empty notes (a TTY rejection may have none) are said to be empty
+ * rather than left out.
+ */
+export function checkpointReworkBriefing(rework: CheckpointRework): string {
+  const notes = typeof rework.notes === 'string' ? rework.notes : '';
+  return [
+    `REWORK: ${rework.checkpointName} did not accept the previous version. Produce a new version that`,
+    `addresses the notes below. Read the rejected version first and keep what was not objected to.`,
+    ``,
+    `Notes:`,
+    ...(notes.trim() === '' ? ['  (no notes were given)'] : notes.split(/\r?\n/).map(line => `  > ${line}`)),
+    ...(rework.rejectedPaths.length > 0
+      ? [
+          ``,
+          `The rejected version (absolute paths; for reference only — it is NOT approved):`,
+          ...rework.rejectedPaths.map(path => `  - ${path}`)
+        ]
+      : [])
+  ].join('\n');
+}
+
+/** Optional extras for builderPrompt. */
+export interface BuilderPromptOptions {
+  /** The attempts this loop is allowed; defaults to MAX_BUILDER_ATTEMPTS. */
+  attemptsAllowed?: number;
+  /** Set during a CP3 rework (D-5): briefed on every attempt of the rework. */
+  rework?: CheckpointRework;
 }
 
 /** How a document is described when it is listed in a prompt. */
@@ -161,25 +228,33 @@ function harnessGeneratedNote(ctx: PromptContext, agent: FeatureFactoryAgent): s
   ];
 }
 
-function withRules(ctx: PromptContext, lines: string[]): string {
-  return [...lines, ``, runDirectoryRules(ctx.cwd, ctx.artifactDir)].join('\n');
+function withRules(ctx: PromptContext, lines: string[], rules: RunDirectoryRuleOptions = {}): string {
+  return [...lines, ``, runDirectoryRules(ctx.cwd, ctx.artifactDir, rules)].join('\n');
 }
 
 export function researcherPrompt(ctx: PromptContext): string {
   return withRules(ctx, [`Analyze the codebase for feature: "${ctx.featureDescription}"`]);
 }
 
-export function storyPrompt(ctx: PromptContext): string {
+/** The rework briefing as a prompt section, or nothing. */
+function reworkSection(rework?: CheckpointRework): string[] {
+  return rework ? [``, checkpointReworkBriefing(rework)] : [];
+}
+
+/** `rework`: set when the story is produced again after CP1 rejected it or a gate refused it (D-5, D-B). */
+export function storyPrompt(ctx: PromptContext, rework?: CheckpointRework): string {
   return withRules(ctx, [
     `Write the user story for: "${ctx.featureDescription}".`,
     ``,
     ...upstreamSection(ctx, '02-story-writer'),
+    ...reworkSection(rework),
     ``,
     `Write your USER_STORY.md into artifacts[].content; the harness will persist it for you.`
   ]);
 }
 
-export function specPrompt(ctx: PromptContext): string {
+/** `rework`: set when the brief is produced again after CP2 rejected it or a gate refused it (D-5, D-B). */
+export function specPrompt(ctx: PromptContext, rework?: CheckpointRework): string {
   return withRules(ctx, [
     `Write the technical brief for the approved user story.`,
     ``,
@@ -187,6 +262,7 @@ export function specPrompt(ctx: PromptContext): string {
     ``,
     `Read ALL of them before you start; the acceptance criteria in the story are what the builders`,
     `will be graded against, so do not invent them.`,
+    ...reworkSection(rework),
     ``,
     `Write your TECHNICAL_BRIEF.md and FILE_LIST.md into artifacts[].content.`
   ]);
@@ -234,7 +310,13 @@ export function builderPrompt(
    * `previousFailure` then count and describe the attempts WITHIN the round, so attempts 2–3 also
    * carry the usual test/schema briefing.
    */
-  validatorRound?: ValidatorRoundFailure
+  validatorRound?: ValidatorRoundFailure,
+  /**
+   * `attemptsAllowed`: the attempts this loop is allowed (MAX_BUILDER_ATTEMPTS plus any grant,
+   * AC-72). `rework`: a CP3 rework (D-5), briefed on every attempt; `attempt` and
+   * `previousFailure` then count and describe the attempts within the rework.
+   */
+  options: BuilderPromptOptions = {}
 ): string {
   const agent: FeatureFactoryAgent = half === 'backend' ? '04-backend-builder' : '05-frontend-builder';
   const found = existingFor(ctx, agent).sort(
@@ -259,8 +341,9 @@ export function builderPrompt(
         : `The backend is already built. Consume its API contract; do not invent endpoints.`
       : `Your scope ends at the API contract. Do not touch frontend files.`,
     ...(validatorRound ? [``, validatorBriefing(validatorRound)] : []),
+    ...reworkSection(options.rework),
     ``,
-    retryBriefing(attempt, previousFailure)
+    retryBriefing(attempt, previousFailure, options.attemptsAllowed)
   ].join('\n');
 }
 
@@ -291,12 +374,36 @@ export function validatorPrompt(ctx: PromptContext): string {
   ]);
 }
 
-export function consolidatorPrompt(ctx: PromptContext): string {
-  return withRules(ctx, [
-    `Consolidate feature execution and extract reusable patterns for: "${ctx.featureDescription}".`,
-    ``,
-    ...upstreamSection(ctx, '08-feature-consolidator'),
-    ``,
-    `Those documents are your only inputs. Do not look for records of this feature anywhere else.`
-  ]);
+/** Options for the Consolidator's prompt (D-10). */
+export interface ConsolidatorPromptOptions {
+  /**
+   * `--consolidate <id>`: the finished run's own directory — possibly under `.factory/_archive/` —
+   * named as the only directory the Consolidator may read (AC-28 exception, AC-47).
+   */
+  readableRunDir?: string;
+}
+
+/**
+ * The Consolidator reads a FINISHED run: its documents, and its state.json for the per-agent
+ * timings the harness recorded (D-13) — never an estimate.
+ */
+export function consolidatorPrompt(ctx: PromptContext, options: ConsolidatorPromptOptions = {}): string {
+  const runDir = resolve(ctx.cwd, ctx.artifactDir);
+  return withRules(
+    ctx,
+    [
+      `Consolidate feature execution and extract reusable patterns for: "${ctx.featureDescription}".`,
+      ``,
+      ...upstreamSection(ctx, '08-feature-consolidator'),
+      ``,
+      `Per-agent timings: ${stateFilePathIn(runDir)}. Its \`agentInvocations\` list records every agent`,
+      `invocation of this run (stage, agent, startedAt, completedAt, durationMs). Report times from it;`,
+      `do not estimate them.`,
+      ``,
+      `Those documents and that state.json are your only inputs. Do not look for records of this feature anywhere else.`,
+      ``,
+      `Return CONSOLIDATION_REPORT.md and PATTERNS.md in artifacts[].content; the harness will persist them in this run's directory.`
+    ],
+    { readableRunDir: options.readableRunDir }
+  );
 }

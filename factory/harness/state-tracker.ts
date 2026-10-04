@@ -16,15 +16,26 @@
  */
 
 import { FeatureFactoryAgentOutput } from './agent-output-schema';
+import { classifyRun } from './run-lifecycle';
 
 /**
  * Where a builder step or loop-back happened (D-9). `stage3` is the original build;
- * `validator-round` is a re-invocation for Validator CRITICAL issues, numbered from 1. Builder
- * records keep stage 3 either way — the phase is what tells them apart.
+ * `validator-round` is a re-invocation for Validator CRITICAL issues, numbered from 1; `rework`
+ * (A-2, D-5) is a re-invocation after CHECKPOINT 3 was rejected, numbered by rejection cycle
+ * from 1. Builder records keep stage 3 either way — the phase is what tells them apart.
  */
-export type StepPhase = { phase?: 'stage3' | 'validator-round'; round?: number };
+export type StepPhase = { phase?: 'stage3' | 'validator-round' | 'rework'; round?: number };
+
+/** One builder budget: the Stage 3 build, one validator round, or one CP3 rework cycle. */
+export type BuilderPhase =
+  | { phase: 'stage3' }
+  | { phase: 'validator-round'; round: number }
+  | { phase: 'rework'; round: number };
 
 export type BuilderAgent = '04-backend-builder' | '05-frontend-builder';
+
+/** The three human checkpoints (A-2, D-4): 1 story, 2 brief, 3 validated change. */
+export type CheckpointId = 1 | 2 | 3;
 
 /**
  * How many times a builder has been invoked, per phase (AC-70). Stage 3 attempts and each
@@ -35,6 +46,79 @@ export interface BuilderAttemptCounts {
   stage3: number;
   /** Keyed by validator round (1-based). */
   validatorRounds: Record<number, number>;
+  /** Keyed by CP3 rejection cycle (1-based). Absent until the first rework attempt (A-2, D-5). */
+  rework?: Record<number, number>;
+}
+
+/**
+ * Extra attempts an operator granted with `--resume <id> --grant-attempts <n>` (AC-72). Each
+ * grant adds `attempts` to exactly one builder's budget in exactly one phase.
+ */
+export interface AttemptGrant {
+  builder: BuilderAgent;
+  attempts: number;
+  at: BuilderPhase;
+  grantedAt: string; // ISO8601
+}
+
+/**
+ * The checkpoint a PAUSED run is waiting on (AC-49). `sha256` is the hash of the exact text that
+ * was presented; `--approve` re-builds that text and must get the same hash (AC-52).
+ * `artifactPaths` are relative to the project cwd.
+ */
+export interface PendingCheckpoint {
+  checkpointId: CheckpointId;
+  name: string;
+  stage: number;
+  artifactPaths: string[];
+  sha256: string;
+  /** CP3 only: the files in the presented change. */
+  changedFiles?: string[];
+  pausedAt: string; // ISO8601
+}
+
+/**
+ * A human said no at a checkpoint (A-2, D-5). The run ends ESCALATED (MANUAL) and a resume
+ * re-runs `reworkAgents` with `notes`.
+ */
+export interface CheckpointRejection {
+  checkpointId: CheckpointId;
+  name: string;
+  stage: number;
+  /** '' is allowed from a TTY rejection; the CLI's `--reject` requires non-blank notes. */
+  notes: string;
+  sha256: string;
+  artifactPaths: string[];
+  /** CP1 → ['02-story-writer']; CP2 → ['03-spec-writer']; CP3 → the builders computed at rejection. */
+  reworkAgents: string[];
+  rejectedAt: string; // ISO8601
+  source: 'approver' | 'resume --reject';
+  /** Set when a resume starts the rework. */
+  rework?: { startedAt: string; supersededDir: string };
+}
+
+/** One `--resume` that changed the run (A-2, D-2/D-3). */
+export interface ResumeRecord {
+  resumedAt: string; // ISO8601
+  fromClass: 'ACTIVE' | 'PAUSED' | 'ESCALATED';
+  action: 'continue' | 'approve' | 'reject';
+  checkpointId?: CheckpointId;
+  grantedAttempts?: number;
+}
+
+/** Where the CP3 diff starts (A-2, D-8): HEAD at run start, or why there is no git base. */
+export type ChangeBase = { kind: 'git'; commit?: string } | { kind: 'none'; reason: string };
+
+/** One agent invocation, timed by the harness around the call (A-2, D-13). */
+export interface AgentInvocationRecord {
+  stage: number;
+  agent: string;
+  startedAt: string; // ISO8601
+  completedAt: string; // ISO8601
+  durationMs: number;
+  phase?: StepPhase['phase'];
+  round?: number;
+  attempt?: number;
 }
 
 export interface AgentStepRecord {
@@ -50,9 +134,16 @@ export interface AgentStepRecord {
     message: string;
     context?: any;
   };
-  /** Builder steps only: which phase (and validator round) this attempt belonged to. */
-  phase?: 'stage3' | 'validator-round';
+  /** Builder steps only: which phase (and validator round or rework cycle) this attempt belonged to. */
+  phase?: 'stage3' | 'validator-round' | 'rework';
   round?: number;
+  /** Set when the caller timed the step (A-2, D-13): completedAt - startedAt. */
+  durationMs?: number;
+  /**
+   * Set when a later gate failure means this PASS must be re-run on resume (I-6), or a rework
+   * superseded it (D-5). The step is kept for the record; a resume ignores it.
+   */
+  invalidated?: { at: string; reason: string };
 }
 
 export interface StageLoopBack {
@@ -64,9 +155,11 @@ export interface StageLoopBack {
   /** WARN: a non-fatal verification problem, recorded but not blocking. */
   result: 'PASS' | 'FAIL' | 'WARN';
   timestamp: string;
-  /** Builder loop-backs only: which phase (and validator round) the failed attempt belonged to. */
-  phase?: 'stage3' | 'validator-round';
+  /** Builder loop-backs only: which phase (and validator round or rework cycle) the failed attempt belonged to. */
+  phase?: 'stage3' | 'validator-round' | 'rework';
   round?: number;
+  /** Why the attempt failed, so a resumed attempt can be briefed with it (A-2, D-2). */
+  failure?: { kind: 'test' | 'schema' | 'status'; error: string };
 }
 
 export interface EscalationRecord {
@@ -97,6 +190,11 @@ export interface EscalationRecord {
     remediation?: string;
     passRate?: number;
     buildErrors?: string[];
+    /** MAX_LOOPS by a builder: the budget it exhausted (A-2, D-3 `exhaustedBuilder`). */
+    builderPhase?: BuilderPhase;
+    /** MANUAL after a checkpoint rejection (A-2, D-4). */
+    checkpointId?: CheckpointId;
+    notes?: string;
     message: string;
   };
   escalatedAt: string;
@@ -110,6 +208,9 @@ export interface CheckpointApproval {
   approvedAt: string;
   approvedBy?: string;
   notes?: string;
+  /** A-2 (AC-50): which checkpoint, and the SHA-256 of the exact text the approver was given. */
+  checkpointId?: CheckpointId;
+  sha256?: string;
 }
 
 /**
@@ -157,7 +258,14 @@ export interface FeatureState {
   // Current state
   currentStage: 1 | 2 | 3 | 4 | 5;
   currentAgent?: string;
-  status: 'IN_PROGRESS' | 'BLOCKED' | 'COMPLETED' | 'ESCALATED';
+  /** PAUSED (A-2, AC-49): waiting at `pendingCheckpoint`; committed, never finished. */
+  status: 'IN_PROGRESS' | 'BLOCKED' | 'COMPLETED' | 'ESCALATED' | 'PAUSED';
+
+  /**
+   * The `--feature` text the run was started with, so `--resume` needs no `--feature` (AC-37).
+   * Absent in state files written before A-2.
+   */
+  featureDescription?: string;
 
   // Execution history
   stageHistory: AgentStepRecord[];
@@ -182,6 +290,21 @@ export interface FeatureState {
   /** The highest validator round entered. Optional so a state file written before A-1 still loads. */
   validatorRoundsCompleted?: number;
 
+  // A-2 run lifecycle. Every field is optional so a state file written before A-2 still loads.
+
+  /** Where the CP3 diff starts (D-8). */
+  changeBase?: ChangeBase;
+  /** Set while the run is PAUSED at a checkpoint (AC-49). */
+  pendingCheckpoint?: PendingCheckpoint;
+  /** Every checkpoint rejection, in order; the index + 1 is the rework cycle (D-5). */
+  checkpointRejections?: CheckpointRejection[];
+  /** Extra builder attempts granted on resume (AC-72). */
+  attemptGrants?: AttemptGrant[];
+  /** Every agent invocation, timed (D-13). */
+  agentInvocations?: AgentInvocationRecord[];
+  /** Every resume that changed the run (D-2, D-3). */
+  resumeHistory?: ResumeRecord[];
+
   // Metrics
   metrics: {
     totalTime: number; // milliseconds
@@ -203,12 +326,13 @@ export interface FeatureState {
 /**
  * Create a new feature state
  */
-export function createFeatureState(featureName: string, createdBy?: string): FeatureState {
+export function createFeatureState(featureName: string, createdBy?: string, featureDescription?: string): FeatureState {
   return {
     featureId: generateUUID(),
     featureName,
     createdAt: new Date().toISOString(),
     createdBy,
+    ...(featureDescription !== undefined ? { featureDescription } : {}),
     currentStage: 1,
     status: 'IN_PROGRESS',
     stageHistory: [],
@@ -219,6 +343,10 @@ export function createFeatureState(featureName: string, createdBy?: string): Fea
     executionGateHistory: [],
     builderAttempts: {},
     validatorRoundsCompleted: 0,
+    checkpointRejections: [],
+    attemptGrants: [],
+    agentInvocations: [],
+    resumeHistory: [],
     metrics: {
       totalTime: 0,
       timePerStage: {},
@@ -238,20 +366,24 @@ export function recordAgentStep(
   status: AgentStepRecord['status'],
   output?: FeatureFactoryAgentOutput,
   error?: any,
-  phase?: StepPhase
+  phase?: StepPhase,
+  timing?: { startedAt: string; completedAt: string }
 ): FeatureState {
-  const now = new Date();
+  const now = new Date().toISOString();
 
   const step: AgentStepRecord = {
     stage,
     agent,
     status,
-    startedAt: now.toISOString(),
-    completedAt: now.toISOString(),
+    startedAt: timing?.startedAt ?? now,
+    completedAt: timing?.completedAt ?? now,
     loopCount: countLoopsForAgent(state, agent),
     output,
     ...phaseFields(phase)
   };
+
+  // Without timing the step keeps its pre-A-2 shape. With it, the start is the real start (D-13).
+  if (timing) step.durationMs = durationBetween(timing.startedAt, timing.completedAt);
 
   if (error) {
     step.error = {
@@ -274,7 +406,8 @@ export function recordLoopBack(
   reason: string,
   result: 'PASS' | 'FAIL' | 'WARN',
   fixApplied?: string,
-  phase?: StepPhase
+  phase?: StepPhase,
+  failure?: StageLoopBack['failure']
 ): FeatureState {
   const loopBack: StageLoopBack = {
     stage,
@@ -286,6 +419,7 @@ export function recordLoopBack(
     timestamp: new Date().toISOString(),
     ...phaseFields(phase)
   };
+  if (failure) loopBack.failure = { kind: failure.kind, error: failure.error };
 
   state.loopBacks.push(loopBack);
   state.metrics.loopCount++;
@@ -329,7 +463,8 @@ export function recordCheckpointApproval(
   stage: number,
   checkpointName: string,
   approvedBy?: string,
-  notes?: string
+  notes?: string,
+  binding?: { checkpointId: CheckpointId; sha256: string }
 ): FeatureState {
   const approval: CheckpointApproval = {
     stage,
@@ -338,6 +473,15 @@ export function recordCheckpointApproval(
     approvedBy,
     notes
   };
+
+  // A-2 (AC-50): the approval is bound to the hash of what was presented. Without a binding the
+  // record keeps its pre-A-2 shape; with one, a malformed binding is refused, never stored.
+  if (binding) {
+    assertCheckpointId(binding.checkpointId);
+    assertSha256(binding.sha256);
+    approval.checkpointId = binding.checkpointId;
+    approval.sha256 = binding.sha256;
+  }
 
   state.checkpointApprovals.push(approval);
   return state;
@@ -384,16 +528,24 @@ export function recordExecutionGate(
 export function recordBuilderAttempt(
   state: FeatureState,
   agent: BuilderAgent,
-  at: { phase: 'stage3' } | { phase: 'validator-round'; round: number }
+  at: BuilderPhase
 ): FeatureState {
   const current = state.builderAttempts?.[agent] ?? { stage3: 0, validatorRounds: {} };
-  const next: BuilderAttemptCounts =
-    at.phase === 'stage3'
-      ? { stage3: current.stage3 + 1, validatorRounds: { ...current.validatorRounds } }
-      : {
-          stage3: current.stage3,
-          validatorRounds: { ...current.validatorRounds, [at.round]: (current.validatorRounds[at.round] ?? 0) + 1 }
-        };
+  const next: BuilderAttemptCounts = { stage3: current.stage3, validatorRounds: { ...current.validatorRounds } };
+  // `rework` appears only once a rework attempt exists, so pre-A-2 counts keep their shape.
+  if (current.rework) next.rework = { ...current.rework };
+
+  switch (at.phase) {
+    case 'stage3':
+      next.stage3 += 1;
+      break;
+    case 'validator-round':
+      next.validatorRounds[at.round] = (next.validatorRounds[at.round] ?? 0) + 1;
+      break;
+    case 'rework':
+      next.rework = { ...(next.rework ?? {}), [at.round]: (next.rework?.[at.round] ?? 0) + 1 };
+      break;
+  }
   state.builderAttempts = { ...(state.builderAttempts ?? {}), [agent]: next };
   return state;
 }
@@ -425,14 +577,15 @@ export function advanceToStage(state: FeatureState, nextStage: number): FeatureS
 }
 
 /**
- * Complete feature execution
+ * Complete feature execution. `completedAt` defaults to now; `closeRun` passes its own clock.
  */
 export function completeFeature(
   state: FeatureState,
   status: 'SUCCESS' | 'ESCALATED' | 'MANUAL_STOP',
-  summary?: string
+  summary?: string,
+  completedAt: string = new Date().toISOString()
 ): FeatureState {
-  state.completedAt = new Date().toISOString();
+  state.completedAt = completedAt;
   state.completionStatus = status;
   state.finalSummary = summary;
   state.status = 'COMPLETED';
@@ -526,10 +679,13 @@ export function getEscalationsByType(state: FeatureState, reason: EscalationReco
 }
 
 /**
- * Check if state is resumable
+ * Whether `--resume` can continue this run (D-1): ACTIVE, PAUSED or ESCALATED. A run that ended
+ * ESCALATED is resumable — that is the point of escalating to a human. Only SUCCESS and
+ * MANUAL_STOP are finished for good.
  */
 export function isResumable(state: FeatureState): boolean {
-  return state.status === 'IN_PROGRESS' || (state.status === 'ESCALATED' && !state.completedAt);
+  const runClass = classifyRun(state);
+  return runClass === 'ACTIVE' || runClass === 'PAUSED' || runClass === 'ESCALATED';
 }
 
 /**
@@ -577,4 +733,232 @@ export function getStateStats(state: FeatureState): {
     escalations: state.escalations.length,
     successRate: totalSteps > 0 ? (passedSteps / totalSteps) * 100 : 0
   };
+}
+
+// ─── A-2 run lifecycle recorders ─────────────────────────────────────────────────────────────
+//
+// Pure, like everything above: each takes the state, records one transition, and returns it. The
+// orchestrator commits. Each refuses a malformed input with a thrown error rather than storing
+// something a later resume would have to guess about (C-2: fail closed).
+
+const SHA256_HEX = /^[0-9a-f]{64}$/;
+
+function assertCheckpointId(value: unknown): asserts value is CheckpointId {
+  if (value !== 1 && value !== 2 && value !== 3) {
+    throw new RangeError(`Checkpoint id must be 1, 2 or 3; got ${String(value)}.`);
+  }
+}
+
+function assertSha256(value: unknown): asserts value is string {
+  if (typeof value !== 'string' || !SHA256_HEX.test(value)) {
+    throw new TypeError(`Expected a lowercase hex SHA-256 (64 characters); got ${JSON.stringify(value)}.`);
+  }
+}
+
+function assertNonBlank(value: unknown, what: string): asserts value is string {
+  if (typeof value !== 'string' || value.trim() === '') {
+    throw new TypeError(`${what} must be a non-blank string.`);
+  }
+}
+
+/** completedAt - startedAt in ms. Both must parse, and the end may not precede the start. */
+function durationBetween(startedAt: string, completedAt: string): number {
+  const start = Date.parse(startedAt);
+  const end = Date.parse(completedAt);
+  if (Number.isNaN(start) || Number.isNaN(end)) {
+    throw new TypeError(`Step timing must be ISO8601 timestamps; got ${JSON.stringify({ startedAt, completedAt })}.`);
+  }
+  if (end < start) {
+    throw new RangeError(`Step timing ends (${completedAt}) before it starts (${startedAt}).`);
+  }
+  return end - start;
+}
+
+/**
+ * Pause at a checkpoint (AC-49): status PAUSED and the pending checkpoint, stamped. The run is
+ * committed, NOT finished — no completedAt, no completionStatus.
+ */
+export function recordPause(state: FeatureState, pending: Omit<PendingCheckpoint, 'pausedAt'>): FeatureState {
+  assertCheckpointId(pending.checkpointId);
+  assertNonBlank(pending.name, 'A pending checkpoint name');
+  assertSha256(pending.sha256);
+  if (!Array.isArray(pending.artifactPaths) || pending.artifactPaths.length === 0) {
+    throw new TypeError('A pending checkpoint must name the artifacts it presented.');
+  }
+
+  const record: PendingCheckpoint = {
+    checkpointId: pending.checkpointId,
+    name: pending.name,
+    stage: pending.stage,
+    artifactPaths: [...pending.artifactPaths],
+    sha256: pending.sha256,
+    pausedAt: new Date().toISOString()
+  };
+  if (pending.changedFiles) record.changedFiles = [...pending.changedFiles];
+
+  state.pendingCheckpoint = record;
+  state.status = 'PAUSED';
+  return state;
+}
+
+/** Leave the pause once its checkpoint is decided (AC-51): IN_PROGRESS, no pending checkpoint. */
+export function clearPause(state: FeatureState): FeatureState {
+  if (state.status !== 'PAUSED') {
+    throw new Error(`clearPause: run ${state.featureId} is not PAUSED (status ${state.status}).`);
+  }
+  delete state.pendingCheckpoint;
+  state.status = 'IN_PROGRESS';
+  return state;
+}
+
+/**
+ * Record a checkpoint rejection (AC-46, AC-74, D-5). If the run was paused at that checkpoint, the
+ * pause is resolved by this decision: the pending checkpoint is removed and the status leaves
+ * PAUSED. The caller then records the MANUAL escalation and finishes ESCALATED.
+ */
+export function recordCheckpointRejection(
+  state: FeatureState,
+  rejection: Omit<CheckpointRejection, 'rejectedAt'>
+): FeatureState {
+  assertCheckpointId(rejection.checkpointId);
+  assertNonBlank(rejection.name, 'A rejected checkpoint name');
+  assertSha256(rejection.sha256);
+  if (typeof rejection.notes !== 'string') {
+    throw new TypeError('Rejection notes must be a string (empty is allowed from a TTY).');
+  }
+  if (!Array.isArray(rejection.reworkAgents) || rejection.reworkAgents.length === 0) {
+    throw new TypeError('A rejection must name the agents that re-run on resume.');
+  }
+
+  state.checkpointRejections = [
+    ...(state.checkpointRejections ?? []),
+    { ...rejection, rejectedAt: new Date().toISOString() }
+  ];
+
+  if (state.pendingCheckpoint?.checkpointId === rejection.checkpointId) {
+    delete state.pendingCheckpoint;
+    if (state.status === 'PAUSED') state.status = 'IN_PROGRESS';
+  }
+  return state;
+}
+
+/**
+ * Record that the rework of rejection cycle `cycle` (1-based index into checkpointRejections)
+ * has started (D-5): its documents were superseded into `supersededDir` (relative to the project)
+ * and the steps to re-run were invalidated. Refuses an unknown cycle, a blank directory, and a
+ * rework that already started — a started rework is resumed, never restarted.
+ */
+export function recordReworkStart(
+  state: FeatureState,
+  cycle: number,
+  rework: { supersededDir: string; startedAt?: string }
+): FeatureState {
+  const rejections = state.checkpointRejections ?? [];
+  if (!Number.isInteger(cycle) || cycle < 1 || cycle > rejections.length) {
+    throw new RangeError(`No checkpoint rejection for rework cycle ${String(cycle)} (${rejections.length} recorded).`);
+  }
+  assertNonBlank(rework.supersededDir, 'A superseded directory');
+  if (rejections[cycle - 1].rework) {
+    throw new Error(`The rework of rejection cycle ${cycle} has already started.`);
+  }
+
+  state.checkpointRejections = rejections.map((rejection, index) =>
+    index === cycle - 1
+      ? { ...rejection, rework: { startedAt: rework.startedAt ?? new Date().toISOString(), supersededDir: rework.supersededDir } }
+      : rejection
+  );
+  return state;
+}
+
+/** Record `--grant-attempts <n>` for one builder and phase (AC-72). The 1..3 cap is checkResumeRequest's. */
+export function recordAttemptGrant(state: FeatureState, grant: Omit<AttemptGrant, 'grantedAt'>): FeatureState {
+  if (!Number.isInteger(grant.attempts) || grant.attempts < 1) {
+    throw new RangeError(`A grant must add a whole number of attempts, at least 1; got ${String(grant.attempts)}.`);
+  }
+  state.attemptGrants = [
+    ...(state.attemptGrants ?? []),
+    { builder: grant.builder, attempts: grant.attempts, at: { ...grant.at }, grantedAt: new Date().toISOString() }
+  ];
+  return state;
+}
+
+/** Record one timed agent invocation and add it to its stage's time (D-13). */
+export function recordAgentInvocation(state: FeatureState, record: AgentInvocationRecord): FeatureState {
+  if (!Number.isFinite(record.durationMs) || record.durationMs < 0) {
+    throw new RangeError(`An invocation duration must be a finite, non-negative number of ms; got ${String(record.durationMs)}.`);
+  }
+  state.agentInvocations = [...(state.agentInvocations ?? []), { ...record }];
+  state.metrics.timePerStage[record.stage] = (state.metrics.timePerStage[record.stage] ?? 0) + record.durationMs;
+  return state;
+}
+
+/**
+ * Save the description of a run recorded without one (pre-A-2), supplied with `--feature` on
+ * resume (AC-37, IMPORTANT-1). Refuses a blank description, and never replaces a saved one.
+ */
+export function recordFeatureDescription(state: FeatureState, description: string): FeatureState {
+  assertNonBlank(description, 'A feature description');
+  if (state.featureDescription !== undefined) {
+    throw new Error(`Run ${state.featureId} already has a feature description; it is never replaced.`);
+  }
+  state.featureDescription = description;
+  return state;
+}
+
+/** Record where the CP3 diff starts (D-8). */
+export function recordChangeBase(state: FeatureState, base: ChangeBase): FeatureState {
+  state.changeBase = { ...base };
+  return state;
+}
+
+/**
+ * Flag the PASS steps of `agents` so a resume re-runs them (I-6, D-5). A step matches by its own
+ * agent or by its output's agent, so the pre-supplied path's `tier-1` steps are covered. Steps
+ * are kept, and an earlier invalidation is never overwritten.
+ */
+export function invalidateAgentSteps(state: FeatureState, agents: string[], reason: string): FeatureState {
+  assertNonBlank(reason, 'An invalidation reason');
+  const at = new Date().toISOString();
+  for (const step of state.stageHistory) {
+    if (step.status !== 'PASS' || step.invalidated) continue;
+    if (agents.includes(step.agent) || (step.output?.agent !== undefined && agents.includes(step.output.agent))) {
+      step.invalidated = { at, reason };
+    }
+  }
+  return state;
+}
+
+/**
+ * Reopen an ACTIVE or ESCALATED run for a resume (AC-35): IN_PROGRESS; completedAt,
+ * completionStatus and finalSummary removed; the latest unresolved escalation resolved; the resume
+ * appended to resumeHistory. A finished run is refused, and so is a PAUSED one — its checkpoint
+ * must be decided (clearPause / recordCheckpointRejection) first.
+ */
+export function reopenFeature(state: FeatureState, resume: Omit<ResumeRecord, 'resumedAt'>): FeatureState {
+  const runClass = classifyRun(state);
+  if (runClass !== 'ACTIVE' && runClass !== 'ESCALATED') {
+    throw new Error(`reopenFeature: run ${state.featureId} is ${runClass} and cannot be reopened.`);
+  }
+
+  const now = new Date().toISOString();
+  state.status = 'IN_PROGRESS';
+  delete state.completedAt;
+  delete state.completionStatus;
+  delete state.finalSummary;
+
+  const unresolved = state.escalations.filter(escalation => !escalation.resolvedAt);
+  const latest = unresolved[unresolved.length - 1];
+  if (latest) {
+    latest.resolvedAt = now;
+    latest.resolution =
+      `Reopened by resume (${resume.action})` +
+      (resume.grantedAttempts !== undefined ? ` with ${resume.grantedAttempts} more attempt(s)` : '') +
+      '.';
+  }
+
+  const record: ResumeRecord = { resumedAt: now, fromClass: resume.fromClass, action: resume.action };
+  if (resume.checkpointId !== undefined) record.checkpointId = resume.checkpointId;
+  if (resume.grantedAttempts !== undefined) record.grantedAttempts = resume.grantedAttempts;
+  state.resumeHistory = [...(state.resumeHistory ?? []), record];
+  return state;
 }

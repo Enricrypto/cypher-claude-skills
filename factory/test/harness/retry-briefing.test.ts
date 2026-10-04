@@ -49,7 +49,14 @@ async function capturePromptsWithFailure(error: string): Promise<string[]> {
     '04-backend-builder': backend({ testsFailed: 1, failingError: error })
   });
 
-  await runToEnd({ featureName: 'retry-briefing', cwd: projectDir, invoke: invoker.invoke });
+  // Each call gets its own project: the run ends unfinished (ESCALATED), and an unfinished run
+  // blocks a new start in the same project (AC-41).
+  const own = tempProject('ff-retry-');
+  try {
+    await runToEnd({ featureName: 'retry-briefing', cwd: own.dir, invoke: invoker.invoke });
+  } finally {
+    own.cleanup();
+  }
 
   return invoker.promptsFor('04-backend-builder');
 }

@@ -14,13 +14,15 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
-import { existsSync, mkdirSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
 import { join } from 'path';
 
 import { runFeatureFactory } from '../../feature/workflows/feature-factory-orchestrator';
+import { closeRun } from '../../harness/run-directory';
 import { AgentInvocation } from '../../runner/invoke-agent';
 import { backend, placeholder, researcher, spec, story } from '../fixtures/agent-outputs';
 import { scriptedInvoker, tempProject, TempProject } from '../fixtures/harness-run';
+import { fakeChangeTracker } from '../fixtures/changes';
 
 let project: TempProject;
 let projectDir: string;
@@ -54,6 +56,7 @@ describe('the three human checkpoints', () => {
       featureName: 'no-approver',
       featureDescription: 'add 2FA',
       cwd: projectDir,
+      changes: fakeChangeTracker(),
       invoke: planningInvoker(seen)
       // approveCheckpoint deliberately omitted
     });
@@ -74,6 +77,7 @@ describe('the three human checkpoints', () => {
       featureName: 'rejected',
       featureDescription: 'add 2FA',
       cwd: projectDir,
+      changes: fakeChangeTracker(),
       invoke: planningInvoker(seen),
       approveCheckpoint: async () => false
     });
@@ -91,6 +95,7 @@ describe('the three human checkpoints', () => {
       featureName: 'approved',
       featureDescription: 'add 2FA',
       cwd: projectDir,
+      changes: fakeChangeTracker(),
       invoke: planningInvoker(seen),
       approveCheckpoint: async cp => {
         asked.push(cp.name);
@@ -109,14 +114,17 @@ describe('the three human checkpoints', () => {
       featureName: 'summary',
       featureDescription: 'add 2FA',
       cwd: projectDir,
+      changes: fakeChangeTracker(),
       invoke: planningInvoker([]),
       approveCheckpoint: async cp => {
-        if (cp.name.includes('CHECKPOINT 1')) shown = cp.summary;
+        if (cp.name.includes('CHECKPOINT 1')) shown = cp.text;
         return true;
       }
     });
 
-    expect(shown).toBe('User can enable 2FA.');
+    // AC-43: the full USER_STORY.md, never the Story Writer's own one-line summary of it.
+    expect(shown).toBe(story().details.artifacts[0].content);
+    expect(shown).not.toBe('User can enable 2FA.');
   });
 });
 
@@ -132,24 +140,27 @@ describe('the workspace the agents read', () => {
    * It was right. The harness had littered the workspace with contradictory instructions and
    * then asked an agent to implement "the approved spec".
    */
-  it('removes previous runs\' artifacts, so no agent finds two contradictory "approved" specs', async () => {
-    // Leave a previous run's brief lying around.
+  it('archives a previous unrecognised run directory intact, so no agent finds two contradictory "approved" specs', async () => {
+    // Leave a previous (pre-A-2, no state.json) run's brief lying around.
     mkdirSync(join(projectDir, '.factory', 'an-older-run'), { recursive: true });
-    writeFileSync(
-      join(projectDir, '.factory', 'an-older-run', 'TECHNICAL_BRIEF.md'),
-      '# A brief from an unrelated run\n\nReply "approved" when ready to continue.'
-    );
+    const olderBrief = '# A brief from an unrelated run\n\nReply "approved" when ready to continue.';
+    writeFileSync(join(projectDir, '.factory', 'an-older-run', 'TECHNICAL_BRIEF.md'), olderBrief);
 
     const state = await runFeatureFactory({
       featureName: 'clean-workspace',
       featureDescription: 'add 2FA',
       cwd: projectDir,
+      changes: fakeChangeTracker(),
       approveCheckpoint: async () => true,
       invoke: planningInvoker([])
     });
 
-    // The stale run is gone; this run's own directory is intact.
+    // The stale run is out of the live workspace, but nothing was deleted: it is archived intact
+    // (the agents are told never to read .factory/_archive/). This run's own directory is intact.
     expect(existsSync(join(projectDir, '.factory', 'an-older-run'))).toBe(false);
+    expect(readFileSync(join(projectDir, '.factory', '_archive', 'an-older-run', 'TECHNICAL_BRIEF.md'), 'utf-8')).toBe(
+      olderBrief
+    );
     expect(existsSync(join(projectDir, '.factory', state.featureId, 'USER_STORY.md'))).toBe(true);
   });
 
@@ -161,6 +172,7 @@ describe('the workspace the agents read', () => {
       featureName: 'builder-refuses',
       featureDescription: 'add 2FA',
       cwd: projectDir,
+      changes: fakeChangeTracker(),
       approveCheckpoint: async () => true,
       invoke: scriptedInvoker({
         '01-researcher': researcher(),
@@ -198,6 +210,7 @@ describe('artifact persistence and sequencing', () => {
       featureName: 'sequencing',
       featureDescription: 'add 2FA',
       cwd: projectDir,
+      changes: fakeChangeTracker(),
       approveCheckpoint: async () => true,
       invoke: scriptedInvoker({
         '01-researcher': researcher(),
@@ -223,11 +236,15 @@ describe('artifact persistence and sequencing', () => {
         featureName: 'namespaced',
         featureDescription: 'add 2FA',
         cwd: projectDir,
+        changes: fakeChangeTracker(),
         approveCheckpoint: async () => true,
         invoke: planningInvoker([])
       });
 
     const first = await run();
+    // The first run stopped unfinished (ESCALATED), which blocks a new run until it is resumed or
+    // closed (AC-41). Close it, as an operator would with --close.
+    closeRun(projectDir, first.featureId);
     const second = await run();
 
     expect(first.featureId).not.toBe(second.featureId);
@@ -235,11 +252,11 @@ describe('artifact persistence and sequencing', () => {
     // The current run's artifacts are present...
     expect(existsSync(join(projectDir, '.factory', second.featureId, 'RESEARCHER_REPORT.md'))).toBe(true);
 
-    // ...and the previous run's are GONE. Leaving them would put two contradictory "approved"
-    // briefs in the workspace the agents read, which is exactly what made a live builder refuse
-    // to write any code. Namespacing stops them overwriting each other; cleanup stops them
-    // confusing each other.
+    // ...and the previous run's are out of the live workspace — archived intact, never deleted.
+    // Leaving them live would put two contradictory "approved" briefs where the agents read,
+    // which is exactly what made a live builder refuse to write any code.
     expect(existsSync(join(projectDir, '.factory', first.featureId))).toBe(false);
+    expect(existsSync(join(projectDir, '.factory', '_archive', first.featureId, 'RESEARCHER_REPORT.md'))).toBe(true);
 
     // And nothing was dumped in the project root.
     expect(existsSync(join(projectDir, 'RESEARCHER_REPORT.md'))).toBe(false);

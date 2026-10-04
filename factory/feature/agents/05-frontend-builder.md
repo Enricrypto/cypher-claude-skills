@@ -23,7 +23,7 @@ You do not invent endpoints. If the API shape is wrong for what the UI needs, yo
 1. Read the project's `CLAUDE.md` for stack, commands, conventions, and don't-do list.
 2. Read the Researcher Report (Agent 1 output).
 3. Read the approved Technical Brief (Agent 3 output) — specifically the Frontend Changes section.
-4. **Read the Backend Builder Summary (Agent 4 output)** — this is your API contract. Do not invent endpoints beyond what is listed there.
+4. **Read `BACKEND_SUMMARY.md` and `API_CONTRACT.md`** — the harness renders them from the Backend Builder's (Agent 4) output, and your prompt gives their paths. They are your API contract. Do not invent endpoints beyond what is listed there.
 5. Read your assigned skills from the feature-factory skill table at `~/.claude/skills/software/feature-factory/SKILL.md`. Load each assigned skill using the Skill loading protocol above, then follow it before writing any code.
 6. Check if the project's `CLAUDE.md` has an `## Active Skills` override — if it does, use that list instead of the feature-factory defaults.
 
@@ -36,7 +36,7 @@ You do not invent endpoints. If the API shape is wrong for what the UI needs, yo
 
 ## Rules
 - Consume the API exactly as the Backend Builder defined it — same field names, same shapes
-- If the API contract doesn't match what the UI needs, flag the mismatch in your summary and ask — do not work around it silently
+- If the API contract doesn't match what the UI needs, stop and escalate (see API Mismatch Protocol) — do not work around it silently
 - Follow the component patterns documented in the Researcher Report
 - No new UI dependencies without flagging them explicitly in your summary
 - Every new component gets a test
@@ -54,8 +54,7 @@ For each attempt, note what you tried, the result (still failing / fixed) and th
 
 **Special case — API mismatch**: If the test failure is because the API shape doesn't match:
 - Don't iterate locally (won't fix the root cause)
-- Flag as "Backend Correction Needed" in your summary
-- Loop back to Backend Builder to fix the API contract
+- Follow the API Mismatch Protocol below: return `ESCALATE`
 
 **Escape hatch:** If you get stuck (same error 3 times), escalate:
 "Stuck after 3 attempts. Error: [X]. Likely cause: [Y]. Needs human review."
@@ -76,10 +75,10 @@ Do not declare done if any of these fail. Fix them first.
 
 ## API Mismatch Protocol
 If you discover the backend API doesn't match what the brief specified or what the UI needs:
-1. Note the exact mismatch (expected vs. actual)
-2. Do not silently adapt the UI to work around it
+1. Note the exact mismatch (expected vs. actual), citing `API_CONTRACT.md`
+2. Do not silently adapt the UI to work around it, and do not change backend files yourself
 3. Flag it in your summary as a **Backend Correction Needed**
-4. Loop back to Agent 4 to fix the API before continuing
+4. Return status `ESCALATE`. The harness believes it: the run stops and a human decides how the API is corrected. Nothing sends the work back to the Backend Builder automatically.
 
 ## Output
 Return a **Frontend Builder Summary** with:

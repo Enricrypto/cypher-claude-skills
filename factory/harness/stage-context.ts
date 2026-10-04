@@ -21,12 +21,17 @@
  * the filesystem. Nothing is assumed, and nothing defaults to a passing value.
  */
 
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'fs';
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'path';
+import { existsSync, readFileSync, readdirSync, statSync } from 'fs';
+import { basename, isAbsolute, join, relative, resolve, sep } from 'path';
 
 import { ExecutionMeasurement, Stage4Metadata, StageContext } from './stage-gates';
 import { evaluateSecurityChecks } from './security-checks';
 import { HARNESS_RENDERED_ARTIFACTS } from './harness-documents';
+import { MAX_BUILDER_ATTEMPTS } from './loop-rules';
+import { assertNoFollowWritable, UnsafeArtifactPathError, writeFileNoFollow } from './safe-write';
+import { STATE_FILENAME } from './state-store';
+import { BASELINE_FILENAME } from './regression-baseline';
+import { ARCHIVE_DIRNAME, SUPERSEDED_DIRNAME } from './run-directory';
 import {
   ArtifactRef,
   FeatureFactoryAgentOutput,
@@ -56,8 +61,11 @@ export interface BuildStageContextInput {
   /** The target project. Artifact paths resolve against this. */
   cwd: string;
   outputs: StageOutputs;
-  loops?: { backend?: number; frontend?: number };
-  knowledgeStored?: boolean;
+  /**
+   * The attempts each builder used in its latest loop, and (`max`) the attempts it was allowed
+   * there — MAX_BUILDER_ATTEMPTS plus any grant (AC-72). `max` defaults to MAX_BUILDER_ATTEMPTS.
+   */
+  loops?: { backend?: number; frontend?: number; max?: { backend?: number; frontend?: number } };
   /**
    * This run's directory, relative to `cwd` (`.factory/<featureId>`). Top-level documents in it
    * are readable by the gates even when no agent claimed them — that is how the harness-rendered
@@ -121,11 +129,13 @@ export function claimedFilesFromBuilders(
  * builder wrote.
  */
 export function claimsInsideFactoryDir(claims: ArtifactRef[], cwd: string): string[] {
-  const factoryDir = resolve(cwd, '.factory');
+  // Compared case-insensitively (MINOR-4): on a case-insensitive filesystem (APFS, NTFS by
+  // default) `.Factory/x` IS `.factory/x`. Over-matching on a case-sensitive one fails closed.
+  const factoryDir = resolve(cwd, '.factory').toLowerCase();
   return claims
     .map(claim => claim.path)
     .filter(path => {
-      const absolute = isAbsolute(path) ? resolve(path) : resolve(cwd, path);
+      const absolute = (isAbsolute(path) ? resolve(path) : resolve(cwd, path)).toLowerCase();
       return absolute === factoryDir || absolute.startsWith(factoryDir + sep);
     });
 }
@@ -167,47 +177,11 @@ export interface PersistedArtifact {
  * the filesystem; a document path that tries to leave the run directory is either a malformed
  * output or a prompt injection, and either way the run must stop and say so — silently dropping
  * the document would let the stage proceed on a run dir that is missing what the agent produced.
+ *
+ * The class lives in safe-write.ts (the no-follow writer throws it too) and is re-exported here,
+ * so every existing import keeps working and there is one class, not two.
  */
-export class UnsafeArtifactPathError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'UnsafeArtifactPathError';
-  }
-}
-
-/**
- * Remove artifact directories from previous runs.
- *
- * Artifacts are namespaced per run (.factory/<featureId>/), which stops one feature's documents
- * overwriting another's. But nothing removed the old directories, so they accumulated inside the
- * project the agents READ.
- *
- * A live Backend Builder found FOUR technical briefs for the same feature, from four separate
- * runs, every one of them still saying "reply 'approved' when ready to continue" — and refused
- * to write any code:
- *
- *     "No spec in this repo is approved... 'Newest wins' is not a safe inference: these are
- *      parallel runs, not revisions of one another."
- *
- * It was right to refuse. The harness had littered the workspace with contradictory instructions
- * and then asked an agent to act on "the approved spec".
- *
- * The current run's directory is preserved; every other one is removed.
- */
-export function clearStaleArtifacts(cwd: string, keepFeatureId: string): string[] {
-  const factoryDir = resolve(cwd, '.factory');
-  if (!existsSync(factoryDir)) return [];
-
-  const removed: string[] = [];
-
-  for (const entry of readdirSync(factoryDir, { withFileTypes: true })) {
-    if (!entry.isDirectory() || entry.name === keepFeatureId) continue;
-    rmSync(join(factoryDir, entry.name), { recursive: true, force: true });
-    removed.push(entry.name);
-  }
-
-  return removed;
-}
+export { UnsafeArtifactPathError };
 
 /**
  * Write the documents produced by read-only agents to disk, so the gates can read them.
@@ -266,14 +240,17 @@ export function persistArtifacts(
         );
       }
 
+      // NEW-MINOR-1: no symlinked target, no directory resolving outside the project. Checked
+      // here, before anything is written, like every other refusal.
+      assertNoFollowWritable(root, absolutePath);
+
       planned.push({ agent: agentOutput.agent, artifact, path, absolutePath });
     }
   }
 
   return planned.map(({ agent, artifact, path, absolutePath }) => {
     artifact.path = path;
-    mkdirSync(dirname(absolutePath), { recursive: true });
-    writeFileSync(absolutePath, artifact.content as string, 'utf-8');
+    writeFileNoFollow(root, absolutePath, artifact.content as string);
     return { agent, path };
   });
 }
@@ -294,8 +271,24 @@ function plainArtifactName(agent: string, name: unknown): string {
       `${agent}: artifact name ${JSON.stringify(name)} is not a plain filename; refusing to write it.`
     );
   }
+  if (name.startsWith('.') || RESERVED_ARTIFACT_NAMES.has(name.toLowerCase())) {
+    throw new UnsafeArtifactPathError(
+      `${agent}: artifact name ${JSON.stringify(name)} is reserved for the harness; refusing to write it.`
+    );
+  }
   return name;
 }
+
+/**
+ * Names in a run directory that only the harness writes (NEW-MINOR-2), lower-cased: an agent's
+ * document saved under one would overwrite the run's record (state.json), a harness-rendered
+ * document, or stand where the harness keeps superseded and archived runs. Compared
+ * case-insensitively, because `STATE.JSON` is `state.json` on a case-insensitive filesystem.
+ * Hidden names (a leading `.`) are refused too.
+ */
+const RESERVED_ARTIFACT_NAMES: ReadonlySet<string> = new Set(
+  [STATE_FILENAME, BASELINE_FILENAME, ...HARNESS_RENDERED_ARTIFACTS, ARCHIVE_DIRNAME, SUPERSEDED_DIRNAME].map(n => n.toLowerCase())
+);
 
 /** Legacy (no run dir): the agent's path, if relative; otherwise throw. Containment is checked by the caller. */
 function legacyArtifactPath(agent: string, path: unknown): string {
@@ -439,6 +432,8 @@ export function buildStageContext(input: BuildStageContextInput): StageContext {
 
     metadata.backendLoops = input.loops?.backend ?? 0;
     metadata.frontendLoops = input.loops?.frontend ?? 0;
+    metadata.maxBackendLoops = input.loops?.max?.backend ?? MAX_BUILDER_ATTEMPTS;
+    metadata.maxFrontendLoops = input.loops?.max?.frontend ?? MAX_BUILDER_ATTEMPTS;
     metadata.abandonedTODOs = countAbandonedMarkers(filesModified, cwd);
   }
 
@@ -488,7 +483,6 @@ export function buildStageContext(input: BuildStageContextInput): StageContext {
     const patterns = outputs.consolidator.details.patterns;
     metadata.patternsFound =
       (patterns?.reusedPatterns?.length ?? 0) + (patterns?.newPatterns?.length ?? 0);
-    metadata.knowledgeStored = input.knowledgeStored ?? false;
   }
 
   return {

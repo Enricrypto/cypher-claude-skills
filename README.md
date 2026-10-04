@@ -53,12 +53,18 @@ Those are tested, offline, in CI, with no model and no tokens ([`stage-context.t
 ```bash
 npm install
 npm run typecheck     # tsc, strict
-npm test              # 152 tests, no network, no tokens
+npm test              # the full suite: no network, no tokens
 
 npm run factory -- --feature "add an endpoint to update a user's email" --cwd /path/to/project
 ```
 
-Exits `0` only on SUCCESS — the Stage 4 gate passed and the consolidator ran. Any escalation exits `1`.
+A run stops for a human three times: CHECKPOINT 1 (the story), CHECKPOINT 2 (the technical brief) and CHECKPOINT 3 (the validated change, after the Stage 4 gate). Each shows the full document. On a terminal you answer approve / reject / pause; with no terminal and no `--yes`, the run pauses.
+
+- Exit `0`: SUCCESS — the Stage 4 gate passed and CHECKPOINT 3 was approved. `.factory/baseline.json` is written.
+- Exit `3`: paused at a checkpoint. Decide with `--resume <id> --approve <n>` or `--resume <id> --reject <n> --notes "<why>"`.
+- Exit `1`: escalated, refused, or a usage error. An escalated run continues from where it stopped with `--resume <id>` (a rejected checkpoint is reworked first), or is given up with `--close <id>`.
+
+The Feature Consolidator is not part of a run: `--consolidate <id>` runs it on a SUCCESS run. Starting a new run moves finished runs into `.factory/_archive/` (nothing is deleted) and is refused while another run is unfinished. The CLI prints the exact next commands after every run; [`factory/feature/SKILL.md`](factory/feature/SKILL.md) documents every flag and the whole run lifecycle.
 
 ### Authentication
 
@@ -131,7 +137,7 @@ The orchestrator honors that. An agent declaring a blocker is a finding, not noi
 factory/
 ├── harness/          SHARED: gates, schemas, error taxonomy, state, context building
 ├── runner/           SHARED: Agent SDK dispatch, tool grants, output schemas, CLI
-├── test/             152 tests — all offline, no model, no tokens
+├── test/             the test suite — all offline, no model, no tokens
 │
 ├── feature/          Tier 2 — the feature pipeline (this is "Feature Factory")
 │   ├── agents/       the 10 agent contracts (each becomes a system prompt)

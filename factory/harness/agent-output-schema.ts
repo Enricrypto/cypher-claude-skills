@@ -8,6 +8,8 @@
  * Specialized for: Feature Factory stages 1-5
  */
 
+import { FeatureFactoryAgent, isReadOnly, REQUIRED_ARTIFACTS } from '../runner/agent-registry';
+
 export interface ArtifactRef {
   name: string;
   path: string;
@@ -749,10 +751,36 @@ export function validateOutputSchema(
       break;
   }
 
+  errors.push(...missingDocuments(agent, output.details.artifacts));
+
   return {
     valid: errors.length === 0,
     errors
   };
+}
+
+/**
+ * MINOR-8 (I-11, I-14): a READ-ONLY agent cannot write files, so its documents exist only as the
+ * content it returns, and the harness persists that content into the run directory. Each document
+ * its gate requires (REQUIRED_ARTIFACTS) must therefore be in `details.artifacts`, under its exact
+ * name, with non-blank content. Without that, the gate would read whatever else happens to sit at
+ * that name — a stale copy in the project root, or a superseded report — as if this agent had
+ * written it. Agents that write their own files (the builders, the Test Verifier) are not held
+ * to this rule; they have no required documents.
+ */
+function missingDocuments(agent: string, artifacts: unknown): string[] {
+  if (!isFeatureFactoryAgent(agent) || !isReadOnly(agent)) return [];
+  const returned: Array<{ name?: unknown; content?: unknown }> = Array.isArray(artifacts) ? artifacts : [];
+
+  return REQUIRED_ARTIFACTS[agent]
+    .filter(name =>
+      !returned.some(a => a?.name === name && typeof a.content === 'string' && a.content.trim().length > 0)
+    )
+    .map(name => `${name} must be returned in details.artifacts with its content (MINOR-8)`);
+}
+
+function isFeatureFactoryAgent(agent: string): agent is FeatureFactoryAgent {
+  return Object.prototype.hasOwnProperty.call(REQUIRED_ARTIFACTS, agent);
 }
 
 /**
@@ -849,6 +877,8 @@ export async function verifyArtifactMaterialization(
       readable: false
     };
 
+    let notRegularFile = false;
+
     try {
       const filePath = artifact.path;
 
@@ -877,6 +907,7 @@ export async function verifyArtifactMaterialization(
               verification.error = `File exists but not readable (possibly binary or permission issue)`;
             }
           } else {
+            notRegularFile = true;
             verification.error = `Path is not a regular file (may be directory)`;
           }
         } catch (statsError) {
@@ -888,8 +919,9 @@ export async function verifyArtifactMaterialization(
         verification.error = `File does not exist at path: ${absolutePath}`;
       }
 
-      // Track missing artifacts
-      if (!verification.exists) {
+      // Track missing artifacts. A path that exists but is not a regular file (a directory, say)
+      // is missing too (MINOR-7): claiming `src/lib` must not stand in for the files in it.
+      if (!verification.exists || notRegularFile) {
         missingArtifacts.push(artifact);
       }
     } catch (error) {

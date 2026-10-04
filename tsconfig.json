@@ -25,14 +25,6 @@
     // await, so it cannot typecheck as a CommonJS module. It is Tier 3 and deferred.
     // The feature-factory orchestrator was rewritten as a real Node module in Phase 0b and
     // is now typechecked. See docs/REFACTOR_PLAN.md.
-    "factory/e2e/workflows",
-
-    // Untracked local scratch scripts (operator tooling, not part of the package). probe-cwd.ts
-    // statically imports the ESM-only Agent SDK and cannot typecheck as CommonJS. Deleted in
-    // PR A-2 (AC-61), which also removes these four entries.
-    "run-cpf-factory.ts",
-    "run-frontend-only.ts",
-    "probe-cwd.ts",
-    "probe-cwd.mjs"
+    "factory/e2e/workflows"
   ]
 }

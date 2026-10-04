@@ -2,7 +2,7 @@
  * SKILL.md drift (D-10, D-11; AC-59, AC-60).
  *
  * SKILL.md is what a human reads to learn what the factory does. It used to describe a 10-agent
- * chain, a third checkpoint, a factory that opened PRs, builders that logged to memory and a
+ * chain, a PR-review checkpoint the program never enforced, a factory that opened PRs, builders that logged to memory and a
  * Gate 2 that looped back to the Test Verifier — none of which the code did. These tests pin the
  * document to the code: every claim that has a source of truth in the program is checked against
  * that source, and every claim that was retired is forbidden from coming back.
@@ -15,6 +15,7 @@ import { existsSync, readFileSync } from 'fs';
 import { join, resolve } from 'path';
 
 import { AGENT_STAGE } from '../../runner/agent-registry';
+import { CLI_FLAGS, EXIT_CODES, parseArgs } from '../../runner/cli';
 import {
   CHECKPOINTS,
   LOOP_BACK_RULES,
@@ -36,7 +37,44 @@ interface FactoryClaims {
   agents: string[];
   checkpoints: number[];
   loopBackRules: Array<{ situation: string; action: string; bound?: number }>;
+  cliFlags: string[];
+  exitCodes: Record<string, number>;
 }
+
+/**
+ * Every `--flag` the prose names (not the `npm run factory --` separator, not `<!-- -->`). The
+ * "Skill assignments" section is left out: its loading rule names other tools' flags (`rg --files`).
+ */
+function documentedFlags(text: string): string[] {
+  const withoutSkillSection = prose(text).replace(/^## Skill assignments[\s\S]*?(?=^## )/m, '');
+  return [...new Set([...withoutSkillSection.matchAll(/(?<![\w-])--([a-z][a-z-]*)/g)].map(m => m[1]))];
+}
+
+/**
+ * Every `npm run factory -- …` command line SKILL.md shows, as argv: quoted words unquoted, and each
+ * `<placeholder>` replaced by `1` — a valid run id, checkpoint, attempt count, path or text alike.
+ */
+function documentedCommands(text: string): string[][] {
+  return [...text.matchAll(/npm run factory -- ([^\n`]+)/g)].map(m =>
+    (m[1].trim().match(/"[^"]*"|\S+/g) ?? []).map(word => word.replace(/^"(.*)"$/, '$1').replace(/<[^>]+>/g, '1'))
+  );
+}
+
+/** One valid command line per flag: the flag in a combination parseArgs accepts. */
+const VALID_USE: Readonly<Record<string, string[]>> = {
+  feature: ['--feature', 'add a health check'],
+  name: ['--feature', 'add a health check', '--name', 'health'],
+  cwd: ['--feature', 'add a health check', '--cwd', '/tmp/project'],
+  model: ['--feature', 'add a health check', '--model', 'some-model'],
+  yes: ['--feature', 'add a health check', '--yes'],
+  resume: ['--resume', 'run-1'],
+  approve: ['--resume', 'run-1', '--approve', '2'],
+  reject: ['--resume', 'run-1', '--reject', '1', '--notes', 'the AC are vague'],
+  notes: ['--resume', 'run-1', '--reject', '3', '--notes', 'the AC are vague'],
+  'grant-attempts': ['--resume', 'run-1', '--grant-attempts', '1'],
+  close: ['--close', 'run-1'],
+  consolidate: ['--consolidate', 'run-1']
+};
 
 /** The JSON fenced block immediately after `<!-- factory-claims -->`. Throws if it is absent. */
 function factoryClaims(text: string): FactoryClaims {
@@ -140,7 +178,18 @@ describe('doc drift: SKILL.md matches the code (AC-59, AC-60)', () => {
       ['Gate 2 loops back to 06', /loops?\s+back\s+to\s+\[?06/i],
       ['Gate 2 loops back to 06', /Test Verifier\s+loops?\s+back/i],
       ['every Gate 2 evaluation is recorded (MINOR-13: a throwing audit records nothing)', /Every Gate 2 evaluation is recorded/i],
-      ['dev fails on timeout (MINOR-13: for dev, the timeout is the pass condition)', /non-zero exit, timeout, or for dev/i]
+      ['dev fails on timeout (MINOR-13: for dev, the timeout is the pass condition)', /non-zero exit, timeout, or for dev/i],
+      ['a Knowledge Stored criterion (AC-48: Stage 5 judges its two documents only)', /Knowledge Stored/],
+      ['the run is waiting for a PR merge but does not wait (AC-44: there is no such log line)', /does not wait/i],
+      ['there is no third checkpoint (AC-44: CHECKPOINT 3 approves the validated change)', /no third checkpoint/i],
+      ['--resume starts again at Stage 1 (AC-34: a resume skips what state records as done)', /run starts again at Stage 1/],
+      ['the old usage form --feature "…" --resume <featureId> (AC-37: --resume <id> alone; --feature is optional)', /--resume <featureId>/],
+      ['the old usage form --feature "…" --resume <featureId> (AC-37: --resume <id> alone; --feature is optional)', /--feature\s+"[^"]*"\s+--resume\b/],
+      ['the CLI refuses --resume of a run with completedAt (AC-35: an ESCALATED run is reopened)', /refuses `?--resume`? of a run that has a `?completedAt/i],
+      ['decision and grant flags arrive later (AC-79: they exist)', /arrive with the CLI change later/i],
+      ['--consolidate is still being added (AC-47: it exists)', /being added in PR A-2/i],
+      ['a y/N checkpoint prompt (D-11: y / n / p)', /\[y\/N\]/],
+      ['no TTY rejects the checkpoint (AC-77: it pauses, exit 3)', /no TTY[^.]*\b(is\s+rejected|rejects)\b/i]
     ];
 
     const found = retired.filter(([, pattern]) => pattern.test(skill)).map(([claim, pattern]) => `${claim}: ${pattern}`);
@@ -167,10 +216,71 @@ describe('doc drift: SKILL.md matches the code (AC-59, AC-60)', () => {
   });
 });
 
+describe('doc drift: SKILL.md documents the CLI the parser accepts (AC-79)', () => {
+  const claims = factoryClaims(skill);
+
+  test('AC-79 SKILL.md documents --resume, --approve, --reject --notes, --close, --grant-attempts and --consolidate', () => {
+    const flags = documentedFlags(skill);
+    for (const flag of ['resume', 'approve', 'reject', 'notes', 'close', 'grant-attempts', 'consolidate']) {
+      expect({ flag, documented: flags.includes(flag) }).toEqual({ flag, documented: true });
+    }
+    // --notes is documented as part of a rejection, the only place the parser accepts it.
+    expect(prose(skill)).toMatch(/--reject\s+\S+\s+--notes\b/);
+  });
+
+  test('AC-79 every CLI flag named in SKILL.md is accepted by parseArgs', () => {
+    const flags = documentedFlags(skill);
+    expect(flags.length).toBeGreaterThan(0);
+
+    for (const flag of flags) {
+      // Named in the doc → the parser knows it, and it parses in a valid combination.
+      expect({ flag, known: Object.prototype.hasOwnProperty.call(CLI_FLAGS, flag) }).toEqual({ flag, known: true });
+      const argv = VALID_USE[flag];
+      expect({ flag, hasValidUse: argv !== undefined }).toEqual({ flag, hasValidUse: true });
+      expect(argv).toContain(`--${flag}`);
+      expect(() => parseArgs(argv)).not.toThrow();
+    }
+
+    // Every command line the doc shows parses as written.
+    const commands = documentedCommands(skill);
+    expect(commands.length).toBeGreaterThan(0);
+    for (const argv of commands) {
+      expect({ argv, parsed: (() => { try { parseArgs(argv); return true; } catch (e) { return (e as Error).message; } })() })
+        .toEqual({ argv, parsed: true });
+    }
+
+    // ...and the doc names every flag the parser has: none is undocumented.
+    expect([...flags].sort()).toEqual(Object.keys(CLI_FLAGS).sort());
+  });
+
+  test('AC-79 the claims block lists exactly CLI_FLAGS and EXIT_CODES', () => {
+    expect(claims.cliFlags).toEqual(Object.keys(CLI_FLAGS));
+    expect(claims.exitCodes).toEqual({ ...EXIT_CODES });
+
+    // The prose exit-code table says the same: | <code> | <NAME> | …
+    const rows = [...prose(skill).matchAll(/^\|\s*(\d+)\s*\|\s*([A-Z_]+)\s*\|/gm)].map(m => [m[2], Number(m[1])]);
+    expect(Object.fromEntries(rows)).toEqual({ ...EXIT_CODES });
+  });
+
+  test('carry-over README states no fixed test count', () => {
+    // "152 tests" went stale within a PR. The README says how to run the suite, not how big it is.
+    expect(readme).not.toMatch(/\b\d[\d,]*\s+(?:offline\s+|unit\s+)?tests\b/i);
+  });
+
+  test('AC-44 README does not say a run needs the Consolidator to succeed', () => {
+    // SUCCESS = the Stage 4 gate passed and CHECKPOINT 3 was approved; the Consolidator runs later, on request.
+    expect(readme).not.toMatch(/consolidator ran/i);
+    expect(readme).toMatch(/CHECKPOINT 3/);
+    expect(readme).toMatch(/--consolidate\b/);
+  });
+});
+
 describe('the checkpoint definitions (D-11)', () => {
-  test('D-11 CHECKPOINTS holds the story and brief checkpoints, numbered 1 and 2', () => {
+  test('D-11 CHECKPOINTS holds the story, brief and change checkpoints, numbered 1, 2 and 3', () => {
     expect(CHECKPOINTS.STORY).toEqual({ id: 1, name: 'CHECKPOINT 1: Approve the story', stage: 2 });
     expect(CHECKPOINTS.BRIEF).toEqual({ id: 2, name: 'CHECKPOINT 2: Approve the technical brief', stage: 2 });
+    expect(CHECKPOINTS.CHANGE).toEqual({ id: 3, name: 'CHECKPOINT 3: Approve the validated change', stage: 4 });
+    expect(Object.keys(CHECKPOINTS)).toEqual(['STORY', 'BRIEF', 'CHANGE']);
     for (const def of Object.values(CHECKPOINTS)) {
       expect(def.name.startsWith(`CHECKPOINT ${def.id}:`)).toBe(true);
     }
@@ -181,6 +291,7 @@ describe('the checkpoint definitions (D-11)', () => {
     expect(source).not.toMatch(/checkpoint\(\s*['"`]CHECKPOINT/);
     expect(source).toMatch(/checkpoint\(CHECKPOINTS\.STORY\b/);
     expect(source).toMatch(/checkpoint\(CHECKPOINTS\.BRIEF\b/);
+    expect(source).toMatch(/checkpoint\(CHECKPOINTS\.CHANGE\b/);
   });
 
   test('D-9 the documented bounds are the exported ones', () => {

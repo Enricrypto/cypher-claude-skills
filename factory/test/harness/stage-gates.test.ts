@@ -12,11 +12,14 @@ import { describe, it, expect, beforeEach } from '@jest/globals';
 import {
   stageContracts,
   canAdvanceStage,
+  STAGE2_SPEC_CONTRACT,
+  STAGE2_STORY_CONTRACT,
   StageContext,
   StageContract,
   Stage4Metadata
 } from '../../harness/stage-gates';
 import { createFeatureState, recordImportantFindings } from '../../harness/state-tracker';
+import { MAX_BUILDER_ATTEMPTS } from '../../harness/loop-rules';
 
 describe('Stage Gates', () => {
   let mockContext: StageContext;
@@ -167,6 +170,31 @@ describe('Stage Gates', () => {
       const decision = await canAdvanceStage(3, stage3, mockContext);
 
       expect(decision.canAdvance).toBe(false);
+    });
+
+    it('AC-72 the loop criterion reads the allowed attempts from metadata: a granted 4th attempt is within limits', async () => {
+      const stage3 = stageContracts[3];
+      const criterion = stage3.acceptance.criteria.find(c => c.name === 'Loop Count Within Limits')!;
+
+      mockContext.metadata = { backendLoops: 4, frontendLoops: 1, maxBackendLoops: 4 };
+      expect((await criterion.validator(mockContext)).passed).toBe(true);
+
+      mockContext.metadata = { backendLoops: 1, frontendLoops: 4, maxBackendLoops: 4 };
+      expect((await criterion.validator(mockContext)).passed).toBe(false);
+
+      mockContext.metadata = { backendLoops: 5, frontendLoops: 0, maxBackendLoops: 4, maxFrontendLoops: 3 };
+      const over = await criterion.validator(mockContext);
+      expect(over.passed).toBe(false);
+      expect(over.details).toMatch(/max 4/);
+    });
+
+    it('AC-72 without max metadata the loop limit is MAX_BUILDER_ATTEMPTS', async () => {
+      const criterion = stageContracts[3].acceptance.criteria.find(c => c.name === 'Loop Count Within Limits')!;
+
+      mockContext.metadata = { backendLoops: MAX_BUILDER_ATTEMPTS, frontendLoops: MAX_BUILDER_ATTEMPTS };
+      expect((await criterion.validator(mockContext)).passed).toBe(true);
+      mockContext.metadata = { backendLoops: MAX_BUILDER_ATTEMPTS + 1 };
+      expect((await criterion.validator(mockContext)).passed).toBe(false);
     });
 
     // The claimed files below are real paths in this repo, so the materialization gate is
@@ -575,5 +603,95 @@ describe('Stage Gates', () => {
     it('Stage 4 should loop back to Stage 3 on critical issues', () => {
       expect(stageContracts[4].loopBackStage).toBe(3);
     });
+  });
+});
+
+describe('the split Stage 2 gate (C-9, A-2 step 4)', () => {
+  const criteria = (contract: StageContract) => contract.acceptance.criteria.map(c => [c.name, c.severity]);
+
+  it('AC-56 STAGE2_STORY_CONTRACT judges the story alone: User Story Complete and AC Testable (CRITICAL), USER_STORY.md required', () => {
+    expect(STAGE2_STORY_CONTRACT.stage).toBe(2);
+    expect(criteria(STAGE2_STORY_CONTRACT)).toEqual([
+      ['User Story Complete', 'CRITICAL'],
+      ['AC Testable', 'CRITICAL']
+    ]);
+    expect(STAGE2_STORY_CONTRACT.artifacts.required).toEqual(['USER_STORY.md']);
+  });
+
+  it('AC-78 STAGE2_SPEC_CONTRACT judges the brief alone: Technical Brief Complete (CRITICAL), File List Documented (IMPORTANT), both documents required', () => {
+    expect(STAGE2_SPEC_CONTRACT.stage).toBe(2);
+    expect(criteria(STAGE2_SPEC_CONTRACT)).toEqual([
+      ['Technical Brief Complete', 'CRITICAL'],
+      ['File List Documented', 'IMPORTANT']
+    ]);
+    expect(STAGE2_SPEC_CONTRACT.artifacts.required).toEqual(['TECHNICAL_BRIEF.md', 'FILE_LIST.md']);
+  });
+
+  it('C-9 stageContracts[2] is the concatenation of the story and spec contracts, so acceptFeatureSpec judges both', () => {
+    expect(stageContracts[2].stage).toBe(2);
+    expect(stageContracts[2].acceptance.criteria).toEqual([
+      ...STAGE2_STORY_CONTRACT.acceptance.criteria,
+      ...STAGE2_SPEC_CONTRACT.acceptance.criteria
+    ]);
+    expect(stageContracts[2].artifacts.required).toEqual([
+      ...STAGE2_STORY_CONTRACT.artifacts.required,
+      ...STAGE2_SPEC_CONTRACT.artifacts.required
+    ]);
+  });
+
+  it('AC-57 each part blocks only on its own documents, with blockers', async () => {
+    const context = (artifacts: Record<string, string>): StageContext => ({
+      cwd: process.cwd(),
+      stageDir: '',
+      artifacts,
+      metadata: {}
+    });
+    const testableStory = ['# Story', ...[1, 2, 3].flatMap(i => [`Given ${i}`, `When ${i}`, `Then ${i}`])].join('\n');
+
+    // The story part passes on a testable story with no brief anywhere...
+    expect((await canAdvanceStage(2, STAGE2_STORY_CONTRACT, context({ 'USER_STORY.md': testableStory }))).canAdvance).toBe(true);
+    // ...and the spec part blocks on the missing brief, naming it.
+    const spec = await canAdvanceStage(2, STAGE2_SPEC_CONTRACT, context({ 'USER_STORY.md': testableStory }));
+    expect(spec.canAdvance).toBe(false);
+    expect(spec.blockers.join('\n')).toMatch(/TECHNICAL_BRIEF\.md/);
+
+    // The story part blocks on prose with no Given/When/Then.
+    const story = await canAdvanceStage(2, STAGE2_STORY_CONTRACT, context({ 'USER_STORY.md': '# Story\nIt should work.' }));
+    expect(story.canAdvance).toBe(false);
+    expect(story.blockers.join('\n')).toMatch(/Given\/When\/Then/);
+  });
+});
+
+describe('the Stage 5 contract (D-10, A-2 step 5)', () => {
+  const context = (artifacts: Record<string, string>, metadata: Record<string, unknown> = {}): StageContext => ({
+    cwd: process.cwd(),
+    stageDir: '',
+    artifacts,
+    metadata
+  });
+
+  it('AC-48 Stage 5 judges Consolidation Complete and Patterns Extracted, both CRITICAL, and requires CONSOLIDATION_REPORT.md and PATTERNS.md', () => {
+    expect(stageContracts[5].acceptance.criteria.map(c => [c.name, c.severity])).toEqual([
+      ['Consolidation Complete', 'CRITICAL'],
+      ['Patterns Extracted', 'CRITICAL']
+    ]);
+    expect(stageContracts[5].artifacts.required).toEqual(['CONSOLIDATION_REPORT.md', 'PATTERNS.md']);
+  });
+
+  it('AC-48 the Stage 5 gate passes on the two documents alone, whatever any metadata says about memory', async () => {
+    const both = { 'CONSOLIDATION_REPORT.md': '# Consolidation', 'PATTERNS.md': '# Patterns' };
+
+    expect((await canAdvanceStage(5, stageContracts[5], context(both))).canAdvance).toBe(true);
+    expect((await canAdvanceStage(5, stageContracts[5], context(both, { knowledgeStored: false }))).canAdvance).toBe(true);
+  });
+
+  it.each(['CONSOLIDATION_REPORT.md', 'PATTERNS.md'])('AC-48 the Stage 5 gate fails without %s, naming it', async missing => {
+    const artifacts: Record<string, string> = { 'CONSOLIDATION_REPORT.md': '# Consolidation', 'PATTERNS.md': '# Patterns' };
+    delete artifacts[missing];
+
+    const decision = await canAdvanceStage(5, stageContracts[5], context(artifacts, { knowledgeStored: true }));
+
+    expect(decision.canAdvance).toBe(false);
+    expect(decision.blockers.join('\n')).toContain(missing);
   });
 });

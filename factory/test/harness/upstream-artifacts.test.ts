@@ -12,6 +12,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'os';
 import { join, resolve } from 'path';
 
+import { consolidateRun } from '../../feature/workflows/consolidate-run';
 import {
   ARCHIVE_RULE,
   existingUpstreamArtifacts,
@@ -22,7 +23,7 @@ import {
 } from '../../harness/upstream-artifacts';
 import { harnessGeneratedLabel, HARNESS_RENDERED_ARTIFACTS } from '../../harness/harness-documents';
 import { FeatureFactoryAgent, AGENT_STAGE } from '../../runner/agent-registry';
-import { AgentInvocation } from '../../runner/invoke-agent';
+import { AgentInvocation, AgentInvoker } from '../../runner/invoke-agent';
 import { backend, frontend, researcher, spec, validator } from '../fixtures/agent-outputs';
 import { passingScript, runToEnd, scriptedInvoker, tempProject, TempProject } from '../fixtures/harness-run';
 
@@ -81,12 +82,20 @@ function observing(script: Record<string, object>, observations: PromptObservati
   return wrapped;
 }
 
+/**
+ * The Feature Consolidator no longer runs inside a run (AC-44): it runs on the finished SUCCESS run
+ * through `consolidateRun` (`--consolidate`, D-10), with the same invoker.
+ */
+function consolidate(featureId: string, invoke: AgentInvoker) {
+  return consolidateRun({ cwd: project.dir, runId: featureId, invoke, logger: () => {} });
+}
+
 function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 describe('upstream artifacts in prompts', () => {
-  it('AC-24 prompts for 05, 06, 07, 08 name the absolute run-dir path of every existing upstream artifact, and each named path exists at invocation', async () => {
+  it('AC-24 prompts for 05, 06, 07 (and 08 for the finished run) name the absolute run-dir path of every existing upstream artifact, and each named path exists at invocation', async () => {
     const observations: PromptObservation[] = [];
     const invoker = scriptedInvoker(observing(uiScript(), observations), { cwd: project.dir });
 
@@ -94,6 +103,10 @@ describe('upstream artifacts in prompts', () => {
 
     expect(state.completionStatus).toBe('SUCCESS');
     const runDir = resolve(project.dir, '.factory', state.featureId);
+
+    // The Consolidator is not invoked in the run (AC-44); --consolidate invokes it on the finished run.
+    expect(invoker.agents()).not.toContain('08-feature-consolidator');
+    await consolidate(state.featureId, invoker.invoke);
 
     for (const agent of ['05-frontend-builder', '06-test-verifier', '07-validator', '08-feature-consolidator'] as const) {
       const seen = observations.filter(o => o.agent === agent);
@@ -124,6 +137,11 @@ describe('upstream artifacts in prompts', () => {
     const state = await runToEnd({ cwd: project.dir, invoke: invoker.invoke });
 
     expect(state.completionStatus).toBe('SUCCESS');
+    for (const o of observations) {
+      for (const n of o.named) expect(n.existedAtInvocation).toBe(true);
+    }
+    expect(invoker.agents()).not.toContain('08-feature-consolidator');
+    await consolidate(state.featureId, invoker.invoke);
     for (const o of observations) {
       for (const n of o.named) expect(n.existedAtInvocation).toBe(true);
     }
@@ -179,12 +197,21 @@ describe('upstream artifacts in prompts', () => {
     const state = await runToEnd({ cwd: project.dir, invoke: invoker.invoke });
 
     expect(state.completionStatus).toBe('SUCCESS');
-    expect([...new Set(invoker.agents())].sort()).toEqual([...ALL_AGENTS].sort());
+    // Every agent but the Consolidator runs in the run (AC-44).
+    expect([...new Set(invoker.agents())].sort()).toEqual(ALL_AGENTS.filter(a => a !== '08-feature-consolidator').sort());
     expect(ARCHIVE_RULE).toContain('.factory/_archive/');
-    for (const call of invoker.calls) {
-      expect(call.prompt).toContain(ARCHIVE_RULE);
-      expect(call.prompt).toContain(resolve(project.dir, '.factory', state.featureId));
+    const runDir = resolve(project.dir, '.factory', state.featureId);
+    for (const prompt of invoker.calls.map(c => c.prompt)) {
+      expect(prompt).toContain(ARCHIVE_RULE);
+      expect(prompt).toContain(runDir);
     }
+
+    // The single exception (AC-47): under --consolidate, 08 is told to read only that run's directory.
+    await consolidate(state.featureId, invoker.invoke);
+    const [consolidatorPrompt] = invoker.promptsFor('08-feature-consolidator');
+    expect(consolidatorPrompt).not.toContain(ARCHIVE_RULE);
+    expect(consolidatorPrompt).toContain(runDir);
+    expect(consolidatorPrompt).toMatch(/only directory/i);
   });
 });
 
@@ -219,6 +246,8 @@ describe('persisted documents land in the run directory under their artifact nam
       expect(existsSync(supplied)).toBe(false);
       expect(existsSync(join(project.dir, 'VALIDATION_REPORT.md'))).toBe(false);
       expect(existsSync(join(runDir, 'VALIDATION_REPORT.md'))).toBe(true);
+      expect(invoker.agents()).not.toContain('08-feature-consolidator');
+      await consolidate(state.featureId, invoker.invoke);
       expect(invoker.promptsFor('08-feature-consolidator')[0]).toContain(join(runDir, 'VALIDATION_REPORT.md'));
     } finally {
       rmSync(elsewhere, { recursive: true, force: true });
@@ -226,8 +255,10 @@ describe('persisted documents land in the run directory under their artifact nam
   });
 
   it('a document whose name escapes the run dir FAILS CLOSED: the run escalates and nothing is written outside it', async () => {
+    // The report itself is returned too (MINOR-8 refuses a Researcher without it at the schema);
+    // the second document's name is the attack.
     const hostile = researcher();
-    hostile.details.artifacts[0] = { ...hostile.details.artifacts[0], name: '../../escaped.md' };
+    hostile.details.artifacts.push({ ...hostile.details.artifacts[0], name: '../../escaped.md' });
     const invoker = scriptedInvoker({ ...passingScript(), '01-researcher': hostile }, { cwd: project.dir });
 
     const state = await runToEnd({ cwd: project.dir, invoke: invoker.invoke });
@@ -296,9 +327,20 @@ describe('upstream-artifacts helpers', () => {
     expect(rules).toMatch(/unrelated run/i);
   });
 
-  it('runDirectoryRules accepts the A-2 options bag without changing A-1 behaviour', () => {
-    expect(runDirectoryRules(project.dir, '.factory/run-1', { readableRunDir: '/elsewhere' })).toBe(
-      runDirectoryRules(project.dir, '.factory/run-1')
-    );
+  it('runDirectoryRules with readableRunDir names that directory as the only one readable and drops the blanket archive rule (AC-47)', () => {
+    const archived = join(project.dir, '.factory/_archive/run-1');
+    const rules = runDirectoryRules(project.dir, '.factory/_archive/run-1', { readableRunDir: archived });
+
+    expect(rules).not.toBe(runDirectoryRules(project.dir, '.factory/_archive/run-1'));
+    expect(rules).not.toContain(ARCHIVE_RULE);
+    expect(rules).toContain(archived);
+    expect(rules).toMatch(/only directory/i);
+    expect(rules).toMatch(/other archived run/i);
+  });
+
+  it('runDirectoryRules refuses a readableRunDir that is not this run\'s directory', () => {
+    expect(() =>
+      runDirectoryRules(project.dir, '.factory/run-1', { readableRunDir: join(project.dir, '.factory/_archive/run-2') })
+    ).toThrow(/only its own run/i);
   });
 });
