@@ -1,1 +1,1 @@
-../../feature-factory/SKILL.md
+../../factory/feature/SKILL.md
