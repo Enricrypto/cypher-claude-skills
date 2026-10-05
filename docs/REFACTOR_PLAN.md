@@ -1,3 +1,5 @@
+Superseded as the plan of record by [ROADMAP.md](ROADMAP.md).
+
 # Software Factory — Refactoring Plan
 
 > Phased plan to turn Feature Factory from a well-specified design into a running,

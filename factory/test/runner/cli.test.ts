@@ -41,11 +41,18 @@ import {
   tempProject,
   TempProject
 } from '../fixtures/harness-run';
-import { backend, testVerifier } from '../fixtures/agent-outputs';
+import { backend, story, testVerifier } from '../fixtures/agent-outputs';
 import { recordingGates } from '../fixtures/gates';
 import { fakeChangeTracker } from '../fixtures/changes';
+import { plantFactoryCaseVariant, treeSnapshot } from '../fixtures/factory-case-variant';
 import { baselineFilePath } from '../../harness/regression-baseline';
 import { sha256Hex } from '../../harness/checkpoint-presentation';
+import {
+  DIRECTION_CHARACTER_RANGES,
+  directionCharacterPattern,
+  escapeCodePoint,
+  escapeDirectionCharacters
+} from '../../harness/direction-characters';
 import { prepareNewRunDirectory } from '../../harness/run-directory';
 import { loadState, saveState, stateFilePath } from '../../harness/state-store';
 import { FeatureState } from '../../harness/state-tracker';
@@ -368,7 +375,7 @@ describe('D-11 parseArgs', () => {
 });
 
 describe('SEC terminal-safe printing', () => {
-  it('SEC printableForTerminal escapes C0 and C1 controls and ESC sequences but keeps newlines and tabs', () => {
+  it('SEC AC-102 printableForTerminal escapes C0 and C1 controls as \\xNN and every shared-set character as \\u{XXXX}, keeping newlines and tabs', () => {
     expect(printableForTerminal('plain\ttext\nnext line')).toBe('plain\ttext\nnext line');
     expect(printableForTerminal('\u001b[2J\u001b]0;pwned\u0007')).toBe('\\x1B[2J\\x1B]0;pwned\\x07');
     expect(printableForTerminal('over\rwrite\u0008\u007f')).toBe('over\\x0Dwrite\\x08\\x7F');
@@ -377,6 +384,34 @@ describe('SEC terminal-safe printing', () => {
     expect(printableForTerminal('ünïcödé ✓ — fine')).toBe('ünïcödé ✓ — fine');
     // Nothing raw survives.
     expect(printableForTerminal('\u0000\u001f\u0080\u009f')).not.toMatch(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/);
+
+    // AC-102: every member of the shared set (AC-105) is shown as its \u{XXXX} escape, built here
+    // from the code point so no raw character sits in this file.
+    for (const [low, high] of DIRECTION_CHARACTER_RANGES) {
+      for (let codePoint = low; codePoint <= high; codePoint++) {
+        const shown = printableForTerminal(`a${String.fromCodePoint(codePoint)}b`);
+        expect(shown).toBe(`a${escapeCodePoint(codePoint)}b`);
+      }
+    }
+    const rlo = String.fromCodePoint(0x202e);
+    const zwj = String.fromCodePoint(0x200d);
+    expect(printableForTerminal(`x${rlo}y\u001b[2J${zwj}\tz\r\nw`)).toBe(
+      'x' + '\\' + 'u{202E}y\\x1B[2J' + '\\' + 'u{200D}\tz\nw'
+    );
+    expect(directionCharacterPattern().test(printableForTerminal(`${rlo}${zwj}${String.fromCodePoint(0xfeff)}`))).toBe(false);
+  });
+
+  it('AC-102 printableForTerminal leaves already-escaped text and a literal backslash unchanged', () => {
+    const rlo = String.fromCodePoint(0x202e);
+    const alreadyEscaped = escapeDirectionCharacters(`see ${rlo} here`);
+    const backslashes = 'C:\\path\\to and \\x1B and \\\\ and ' + '\\' + 'u{202E} typed';
+
+    expect(alreadyEscaped).toBe('see ' + '\\' + 'u{202E} here');
+    expect(printableForTerminal(alreadyEscaped)).toBe(alreadyEscaped);
+    expect(printableForTerminal(backslashes)).toBe(backslashes);
+    // Escaping twice is the same as escaping once.
+    const once = printableForTerminal(`a${rlo}\u0007b`);
+    expect(printableForTerminal(once)).toBe(once);
   });
 
   it('SEC the TTY approver escapes terminal control sequences in presented text, and the hash stays over the raw text', async () => {
@@ -514,6 +549,43 @@ describe('D-11 exit codes and next-step hints', () => {
 
     expect(result.code).toBe(EXIT_CODES.STOPPED);
     expect(result.output).toMatch(/artifact changed/);
+    expect(result.invoker.calls).toEqual([]);
+    expect(stateBytes(id)).toBe(before);
+  }, RUN_TIMEOUT_MS);
+
+  /** A script whose USER_STORY.md holds U+202E (built from its code point, never typed raw). */
+  const storyWithDirectionCharacter = (): InvokerScript => {
+    const output = story();
+    output.details.artifacts[0].content = `${output.details.artifacts[0].content}\n\nThe fee is ${String.fromCodePoint(0x202e)}01 USD.\n`;
+    return { ...passingScript(), '02-story-writer': output };
+  };
+
+  it('AC-109 --resume --approve exits as the run continues', async () => {
+    const script = storyWithDirectionCharacter();
+    expect((await cli(at('--feature', 'add 2FA'), { approver: decisions({ decision: 'PAUSE' }).approve }, script)).code).toBe(3);
+    const id = liveRunId();
+
+    const result = await cli(at('--resume', id, '--approve', '1'), {}, script);
+
+    expect(result.code).toBe(EXIT_CODES.SUCCESS);
+    expect(onDisk(id).checkpointApprovals.find(a => a.checkpointId === 1)?.approvedBy).toBe('resume --approve');
+  }, RUN_TIMEOUT_MS);
+
+  it('AC-110 the refusal exits 1', async () => {
+    const script = storyWithDirectionCharacter();
+    await cli(at('--feature', 'add 2FA'), { approver: decisions({ decision: 'PAUSE' }).approve }, script);
+    const id = liveRunId();
+    // A pause recorded before PR B-1: its hash was taken over the raw, unescaped story.
+    const recorded = onDisk(id);
+    recorded.pendingCheckpoint!.sha256 = sha256Hex(readFileSync(join(project.dir, '.factory', id, 'USER_STORY.md'), 'utf-8'));
+    saveState(project.dir, recorded);
+    const before = stateBytes(id);
+
+    const result = await cli(at('--resume', id, '--approve', '1'), {}, script);
+
+    expect(result.code).toBe(EXIT_CODES.STOPPED);
+    expect(result.output).toContain('the presentation changed in this version');
+    expect(result.output).toContain(`npm run factory -- --close ${id} --cwd ${project.dir}`);
     expect(result.invoker.calls).toEqual([]);
     expect(stateBytes(id)).toBe(before);
   }, RUN_TIMEOUT_MS);
@@ -664,6 +736,115 @@ describe('D-11 exit codes and next-step hints', () => {
     expect(result.output).toContain(`--resume ${id}`);
     expect(result.output).toContain(`--close ${id}`);
     expect(liveRunId()).toBe(id);
+  }, RUN_TIMEOUT_MS);
+
+  it('AC-97 --feature and --resume next to a .Factory entry exit 1, name it, and create nothing', async () => {
+    // --feature: a project whose only harness-like entry is a .Factory directory.
+    const freshVariant = plantFactoryCaseVariant(project.dir);
+    const freshBefore = treeSnapshot(project.dir);
+
+    const fresh = await cli(at('--feature', 'add 2FA'));
+
+    expect(fresh.code).toBe(EXIT_CODES.STOPPED);
+    expect(fresh.output).toContain(`${freshVariant} differs from the harness directory .factory only in letter case`);
+    expect(fresh.invoker.calls).toEqual([]);
+    expect(treeSnapshot(project.dir)).toEqual(freshBefore);
+
+    // --resume: a real run, then its .factory turned into (or joined by) a .Factory entry.
+    rmSync(freshVariant, { recursive: true, force: true });
+    await cli(at('--feature', 'add 2FA'), {}, verifierFails());
+    const id = liveRunId();
+    const resumeVariant = plantFactoryCaseVariant(project.dir);
+    const resumeBefore = treeSnapshot(project.dir);
+
+    const resumed = await cli(at('--resume', id));
+
+    expect(resumed.code).toBe(EXIT_CODES.STOPPED);
+    expect(resumed.output).toContain(`${resumeVariant} differs from the harness directory .factory only in letter case`);
+    expect(resumed.invoker.calls).toEqual([]);
+    expect(treeSnapshot(project.dir)).toEqual(resumeBefore);
+  }, RUN_TIMEOUT_MS);
+
+  it('AC-97 --resume next to a .Factory entry is refused before the CLI reads the run directory', async () => {
+    // The real module object, so the spy replaces what cli.ts calls.
+    const runDirectory = require('../../harness/run-directory') as typeof import('../../harness/run-directory');
+    await cli(at('--feature', 'add 2FA'), {}, verifierFails());
+    const id = liveRunId();
+    const variant = plantFactoryCaseVariant(project.dir);
+    const before = treeSnapshot(project.dir);
+    const lookups = jest.spyOn(runDirectory, 'findRun');
+
+    // A real run: on a case-insensitive file system the lookup would succeed through .Factory.
+    const real = await cli(at('--resume', id));
+    // An unknown id: had the lookup run first, it would have said "No run ...".
+    const unknown = await cli(at('--resume', 'no-such-run'));
+
+    for (const result of [real, unknown]) {
+      expect(result.code).toBe(EXIT_CODES.STOPPED);
+      expect(result.output).toContain(`${variant} differs from the harness directory .factory only in letter case`);
+      expect(result.output).not.toMatch(/No run /);
+      expect(result.invoker.calls).toEqual([]);
+    }
+    expect(lookups).not.toHaveBeenCalled();
+    expect(treeSnapshot(project.dir)).toEqual(before);
+  }, RUN_TIMEOUT_MS);
+
+  it('AC-99 each description refusal exits 1 with state.json unchanged', async () => {
+    const cases: Array<[string, () => Promise<string>, string[], RegExp]> = [
+      [
+        'a finished run given a different --feature',
+        async () => (await cli(at('--feature', 'add 2FA')), liveRunId()),
+        ['--feature', 'add SMS login'],
+        /already finished \(SUCCESS\)/
+      ],
+      [
+        'an exhausted-builder run given a different --feature',
+        async () => (await cli(at('--feature', 'add 2FA'), {}, { ...passingScript(), '04-backend-builder': stillRed }), liveRunId()),
+        ['--feature', 'add SMS login'],
+        /--grant-attempts <n>/
+      ],
+      [
+        'a resumable run given a different --feature',
+        async () => (await cli(at('--feature', 'add 2FA'), {}, verifierFails()), liveRunId()),
+        ['--feature', 'add SMS login'],
+        /--feature "add SMS login" does not match the description saved in run \S+ \("add 2FA"\)/
+      ],
+      ['a run recorded without a description, given none', () => runWithoutDescription(), [], /recorded without a feature description/]
+    ];
+
+    for (const [label, start, extra, message] of cases) {
+      rmSync(join(project.dir, '.factory'), { recursive: true, force: true });
+      const id = await start();
+      const before = stateBytes(id);
+
+      const result = await cli(at('--resume', id, ...extra));
+
+      expect([label, result.code]).toEqual([label, EXIT_CODES.STOPPED]);
+      expect(result.output).toMatch(message);
+      expect(result.invoker.calls).toEqual([]);
+      expect(stateBytes(id)).toBe(before);
+    }
+  }, RUN_TIMEOUT_MS * 2);
+
+  it('AC-101 the CLI names --grant-attempts and exits 1', async () => {
+    await cli(at('--feature', 'add 2FA'), {}, { ...passingScript(), '04-backend-builder': stillRed });
+    const id = liveRunId();
+    const legacy = onDisk(id);
+    delete legacy.escalations.at(-1)!.context.builderPhase;
+    saveState(project.dir, legacy);
+    const before = stateBytes(id);
+
+    const result = await cli(at('--resume', id));
+
+    expect(result.code).toBe(EXIT_CODES.STOPPED);
+    expect(result.output).toContain('exhausted its attempts (Stage 3)');
+    expect(result.output).toContain('--grant-attempts <n>');
+    expect(result.invoker.calls).toEqual([]);
+    expect(stateBytes(id)).toBe(before);
+
+    const granted = await cli(at('--resume', id, '--grant-attempts', '1'));
+    expect(granted.code).toBe(EXIT_CODES.SUCCESS);
+    expect(onDisk(id).attemptGrants).toEqual([expect.objectContaining({ builder: '04-backend-builder', attempts: 1, at: { phase: 'stage3' } })]);
   }, RUN_TIMEOUT_MS);
 
   it('AC-71 the refusal exits 1', async () => {

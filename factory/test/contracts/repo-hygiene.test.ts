@@ -9,22 +9,20 @@
 
 import { describe, it, expect } from '@jest/globals';
 import { existsSync, readFileSync, readdirSync } from 'fs';
-import { join, relative, resolve } from 'path';
+import { join, relative, resolve, sep } from 'path';
 
 import { DEFAULT_GATES } from '../../feature/workflows/feature-factory-orchestrator';
 import { auditInfrastructure, parseJsonc } from '../../harness/infrastructure-gates';
 import { auditExecution } from '../../harness/execution-gates';
+import { GIT_READ_SUBCOMMANDS, GIT_SNAPSHOT_SUBCOMMANDS } from '../../harness/change-diff';
+import { DIRECTION_CHARACTER_RANGES, isDirectionCharacter } from '../../harness/direction-characters';
+import { code } from '../fixtures/source-code';
 
 const factoryRoot = resolve(__dirname, '../..');
 const repoRoot = resolve(factoryRoot, '..');
 const testRoot = join(factoryRoot, 'test');
 const fixturesDir = join(testRoot, 'fixtures');
 const thisFile = __filename;
-
-/** Strip block and line comments, so prose that describes a bug does not trip the scan. */
-function code(source: string): string {
-  return source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
-}
 
 /**
  * Every regular file in the repo that a person or an agent could read, for whole-repo scans.
@@ -295,43 +293,100 @@ describe('repo hygiene', () => {
     expect(errorCategories).toMatch(/export function getFixCodeTemplate\b/);
   });
 
-  it('AC-45 no orchestrator, CLI, workflow or harness code creates a PR, commits or pushes, and change-diff.ts uses only rev-parse, diff and ls-files', () => {
-    const scanned = ['feature/workflows', 'runner', 'harness'].flatMap(dir =>
+  it('AC-90 contracts 04 and 05 say never commit, push or switch branches, and never write under .git/ or .factory/', () => {
+    for (const name of ['04-backend-builder.md', '05-frontend-builder.md']) {
+      const contract = readFileSync(join(factoryRoot, 'feature', 'agents', name), 'utf-8');
+
+      expect(contract).toContain(
+        '- Never commit, push or switch branches, and never write under `.git/` or `.factory/`. The harness snapshots your work itself.'
+      );
+    }
+  });
+
+  it('AC-91 contracts 04 and 05 tell the builder to run only the tests related to its changes and say the full suite runs in Gate 2', () => {
+    // An instruction only: no test checks which tests a builder ran. Gate 2's full suite enforces.
+    for (const name of ['04-backend-builder.md', '05-frontend-builder.md']) {
+      const contract = readFileSync(join(factoryRoot, 'feature', 'agents', name), 'utf-8');
+      const beforeDone = /## Before Declaring Done\n([\s\S]*?)\n## /.exec(contract);
+      expect(beforeDone).not.toBeNull();
+
+      expect(beforeDone![1]).toContain(
+        '3. Tests: run only the tests related to the files you changed (for example `jest --findRelatedTests <files>` or `vitest related <files> --run`). All must pass. The full suite runs in Gate 2 after you finish.'
+      );
+      // The old item 3 asked for a whole suite.
+      expect(beforeDone![1]).not.toMatch(/test suite — all must pass/);
+    }
+  });
+
+  it('AC-45 AC-80 git is spawned only by change-diff.ts with one spawnSync, the subcommands are exactly GIT_READ_SUBCOMMANDS and GIT_SNAPSHOT_SUBCOMMANDS, no forbidden subcommand appears in any literal, and the only refs/factory/ literal is in factoryRef', () => {
+    const scanned = ['feature/workflows', 'runner', 'harness', 'contracts'].flatMap(dir =>
       readdirSync(join(factoryRoot, dir))
         .filter(name => name.endsWith('.ts'))
         .map(name => join(factoryRoot, dir, name))
     );
-    expect(scanned).toContain(join(factoryRoot, 'harness', 'change-diff.ts'));
+    const changeDiffPath = join(factoryRoot, 'harness', 'change-diff.ts');
+    expect(scanned).toContain(changeDiffPath);
+    expect(scanned).toContain(join(factoryRoot, 'contracts', 'feature-spec.ts'));
 
-    // Every string literal in the code: an argv entry, a command line, a URL path.
+    // Every string literal in the code: an argv entry, a command line, a URL path, a message.
     const literal = /'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*"|`(?:[^`\\]|\\.)*`/g;
+    const literalsOf = (file: string) => code(readFileSync(file, 'utf-8')).match(literal) ?? [];
+
+    // AC-80: never a PR, a push, a porcelain commit or anything that moves the branch, index or tree.
+    const neverRun = ['push', 'commit', 'checkout', 'switch', 'reset', 'merge', 'rebase', 'stash', 'branch', 'tag', 'worktree', 'fetch', 'clone'];
     const forbidden = [
-      /^['"`](commit|push)['"`]$/,
-      /\bgit\s+(commit|push)\b/,
+      new RegExp(`^['"\`](${neverRun.join('|')})['"\`]$`),
+      new RegExp(`\\bgit\\s+(${neverRun.join('|')})\\b`),
       /\bgh\s+pr\b/,
       /\bpr\s+create\b/i,
       /\/pulls\b/
     ];
-    const offenders = scanned.flatMap(file => {
-      const literals = code(readFileSync(file, 'utf-8')).match(literal) ?? [];
-      return literals
+    const offenders = scanned.flatMap(file =>
+      literalsOf(file)
         .filter(text => forbidden.some(pattern => pattern.test(text)))
-        .map(text => `${relative(repoRoot, file)}: ${text}`);
-    });
+        .map(text => `${relative(repoRoot, file)}: ${text}`)
+    );
     expect(offenders).toEqual([]);
 
-    // Git is spawned in exactly one place, and only with the three read-only subcommands.
+    // Git is spawned in exactly one place, with exactly one spawn call.
     const spawnsGit = scanned.filter(file => /\b(spawn|spawnSync|exec|execSync|execFile|execFileSync)\(\s*['"`]git\b/.test(code(readFileSync(file, 'utf-8'))));
     expect(spawnsGit.map(file => relative(repoRoot, file))).toEqual([join('factory', 'harness', 'change-diff.ts')]);
 
-    const changeDiff = code(readFileSync(join(factoryRoot, 'harness', 'change-diff.ts'), 'utf-8'));
+    const changeDiff = code(readFileSync(changeDiffPath, 'utf-8'));
     expect(changeDiff.match(/spawnSync\(/g)).toHaveLength(1);
-    expect(changeDiff).toMatch(/type GitSubcommand = 'rev-parse' \| 'diff' \| 'ls-files';/);
-    const subcommands = [...changeDiff.matchAll(/\bgit(?:OrThrow)?\(\s*\w+\s*,\s*'([^']+)'/g)].map(m => m[1]);
-    expect(subcommands.length).toBeGreaterThan(0);
-    expect(new Set(subcommands)).toEqual(new Set(['rev-parse', 'diff', 'ls-files']));
     // The subcommand passed to spawnSync is the typed parameter, never a literal.
     expect(changeDiff).toMatch(/spawnSync\('git', \[\.\.\.SAFE_GIT_CONFIG, subcommand, \.\.\.args\]/);
+
+    // The allow-list is exactly the two arrays, and the type is built from them.
+    expect(changeDiff).toMatch(/export const GIT_READ_SUBCOMMANDS = \['rev-parse', 'diff', 'ls-files'\] as const;/);
+    expect(changeDiff).toMatch(/export const GIT_SNAPSHOT_SUBCOMMANDS = \['add', 'write-tree', 'commit-tree', 'update-ref'\] as const;/);
+    expect(changeDiff).toMatch(
+      /type GitSubcommand = \(typeof GIT_READ_SUBCOMMANDS\)\[number\] \| \(typeof GIT_SNAPSHOT_SUBCOMMANDS\)\[number\];/
+    );
+    expect([...GIT_READ_SUBCOMMANDS, ...GIT_SNAPSHOT_SUBCOMMANDS]).toEqual([
+      'rev-parse', 'diff', 'ls-files', 'add', 'write-tree', 'commit-tree', 'update-ref'
+    ]);
+    // Every call site of git() and its two wrappers names its subcommand as a literal.
+    const subcommands = [...changeDiff.matchAll(/\b(?:git|gitOrThrow|snapshotStep)\(\s*\w+\s*,\s*'([^']+)'/g)].map(m => m[1]);
+    expect(new Set(subcommands)).toEqual(new Set([...GIT_READ_SUBCOMMANDS, ...GIT_SNAPSHOT_SUBCOMMANDS]));
+
+    // No production file other than change-diff.ts imports its git() choke point.
+    const importsGit = scanned
+      .filter(file => file !== changeDiffPath)
+      .filter(file => /import\s*\{[^}]*\bgit\b[^}]*\}\s*from\s*['"][^'"]*change-diff['"]/.test(readFileSync(file, 'utf-8')));
+    expect(importsGit.map(file => relative(repoRoot, file))).toEqual([]);
+
+    // Every ref the harness writes is built by factoryRef: the only refs/factory/ literal is in it.
+    const refLiterals = scanned.flatMap(file =>
+      literalsOf(file)
+        .filter(text => text.includes('refs/factory/'))
+        .map(text => `${relative(repoRoot, file)}: ${text}`)
+    );
+    expect(refLiterals).toHaveLength(1);
+    expect(refLiterals[0]).toMatch(/^factory\/harness\/change-diff\.ts: /);
+    const factoryRefBody = /export function factoryRef\([^)]*\)[^{]*\{([\s\S]*?)\n\}/.exec(changeDiff);
+    expect(factoryRefBody).not.toBeNull();
+    expect(factoryRefBody![1]).toContain('refs/factory/');
   });
 
   it('AC-48 no knowledgeStored field or Knowledge Stored criterion exists in the Stage 5 contract, the stage context or the orchestrator', () => {
@@ -368,5 +423,277 @@ describe('repo hygiene', () => {
       return needles.some(needle => text.includes(needle));
     });
     expect(holders.map(file => relative(repoRoot, file))).toEqual([relative(repoRoot, home)]);
+  });
+
+  it('AC-104 no production call site passes stateWriter', () => {
+    // The non-durable state writer is for tests only. Production code (everything under factory/
+    // but test/) never names the option, so every production save is the durable saveState. The
+    // one exception is the orchestrator, which declares it and resolves it in exactly one place.
+    // The name is built by concatenation so this file does not match itself.
+    const option = 'state' + 'Writer';
+    const orchestratorPath = join(factoryRoot, 'feature', 'workflows', 'feature-factory-orchestrator.ts');
+    const productionTs = (dir: string): string[] =>
+      readdirSync(dir, { withFileTypes: true }).flatMap(entry => {
+        const full = join(dir, entry.name);
+        if (entry.isDirectory()) return full === testRoot ? [] : productionTs(full);
+        return entry.name.endsWith('.ts') ? [full] : [];
+      });
+
+    const sources = productionTs(factoryRoot);
+    expect(sources).toContain(orchestratorPath);
+
+    const holders = sources.filter(file => new RegExp(`\\b${option}\\b`).test(code(readFileSync(file, 'utf-8'))));
+    expect(holders.map(file => relative(repoRoot, file))).toEqual([relative(repoRoot, orchestratorPath)]);
+
+    // In the orchestrator: the optional declaration and one resolution against saveState, nothing else.
+    const orchestrator = code(readFileSync(orchestratorPath, 'utf-8'));
+    const mentions = orchestrator.match(new RegExp(`\\b${option}\\b`, 'g')) ?? [];
+    expect(mentions).toHaveLength(2);
+    expect(orchestrator).toMatch(new RegExp(`^\\s*${option}\\?:`, 'm'));
+    expect(orchestrator).toMatch(new RegExp(`options\\.${option}\\s*\\?\\?\\s*saveState\\b`));
+  });
+
+  it('AC-100 cli.ts makes no description comparison and no DESCRIPTION_* decision, and reads the description only for its banner', () => {
+    const cli = code(readFileSync(join(factoryRoot, 'runner', 'cli.ts'), 'utf-8'));
+
+    // No refusal code, no description helper from the library, no description check of its own.
+    expect(cli).not.toMatch(/DESCRIPTION_/);
+    expect(cli).not.toMatch(/\b(?:resumeDescription|checkResumeDescription|assertSameDescription)\b/);
+    expect(cli).not.toMatch(/featureDescription\s*(?:===|!==|==|!=)|(?:===|!==|==|!=)\s*\w+(?:\.\w+)*\.featureDescription\b/);
+    expect(cli).not.toMatch(/\bfeature\s*(?:===|!==|==|!=)|(?:===|!==|==|!=)\s*(?:command\.)?feature\b/);
+
+    // featureDescription is read exactly once (the banner) and passed through exactly once.
+    const reads = cli.match(/\.featureDescription\b/g) ?? [];
+    expect(reads).toHaveLength(1);
+    const bannerSource = /const\s+banner\s*=([^;]*);/.exec(cli);
+    expect(bannerSource?.[1]).toMatch(/resumeFromState\.featureDescription\s*\?\?\s*command\.feature\s*\?\?\s*'\(not recorded\)'/);
+    expect(cli).toMatch(/out\.log\(`  feature: \$\{banner\}`\)/);
+    expect(cli.match(/\bfeatureDescription\s*:/g) ?? []).toHaveLength(1);
+    expect(cli).toMatch(/\bfeatureDescription:\s*command\.feature\s*,/);
+  });
+
+  it('AC-97 the CLI resume path calls assertNoFactoryCaseVariant before it looks the run up, and --close and --consolidate do not', () => {
+    const cli = code(readFileSync(join(factoryRoot, 'runner', 'cli.ts'), 'utf-8'));
+
+    // The library guard, imported, not re-implemented.
+    expect(cli).toMatch(/import\s*\{[^}]*\bassertNoFactoryCaseVariant\b[^}]*\}\s*from\s*'\.\.\/harness\/run-directory'/);
+    expect(cli).not.toMatch(/toLowerCase\(\)/);
+
+    const calls = [...cli.matchAll(/\bassertNoFactoryCaseVariant\s*\(/g)];
+    expect(calls).toHaveLength(1);
+    const guard = calls[0].index!;
+    const lookup = cli.search(/\bliveRunToResume\s*\(\s*command\./);
+    expect(lookup).toBeGreaterThan(guard);
+    // The guard sits in the run/resume branch, after the close and consolidate branches.
+    expect(guard).toBeGreaterThan(cli.indexOf(`case 'consolidate':`, cli.indexOf('async function execute')));
+    // findRun is reached only through liveRunToResume.
+    expect(cli.match(/\bfindRun\s*\(/g) ?? []).toHaveLength(1);
+    expect(/function liveRunToResume[\s\S]*?\bfindRun\s*\(/.test(cli)).toBe(true);
+  });
+
+  it('AC-105 printableForTerminal, the document check and checkpoint presentation import the one set, and no other copy exists', () => {
+    const home = join(factoryRoot, 'harness', 'direction-characters.ts');
+    const homeSource = readFileSync(home, 'utf-8');
+
+    // The module is pure: it imports nothing, and it holds the one set.
+    expect(homeSource).not.toMatch(/^\s*import\b|\brequire\s*\(/m);
+    expect(code(homeSource)).toMatch(/export const DIRECTION_CHARACTER_RANGES\b/);
+
+    /**
+     * Every way a source file can spell a member of the set: the raw character, a hex literal
+     * (`0x202e`), a `\u` escape in either form, or a `\u` range that spans a member. Escapes and
+     * literals are looked for in code only, so prose in a comment does not count.
+     */
+    const setSpellings = (source: string): string[] => {
+      const found: string[] = [];
+      const name = (cp: number) => `U+${cp.toString(16).toUpperCase().padStart(4, '0')}`;
+      for (const char of source) {
+        if (isDirectionCharacter(char.codePointAt(0)!)) found.push(`raw ${name(char.codePointAt(0)!)}`);
+      }
+      const body = code(source);
+      for (const match of body.matchAll(/\b0x0*([0-9a-f]{1,6})\b/gi)) {
+        if (isDirectionCharacter(parseInt(match[1], 16))) found.push(`literal ${match[0]}`);
+      }
+      const escape = String.raw`\\u(?:\{([0-9a-fA-F]+)\}|([0-9a-fA-F]{4}))`;
+      const value = (braced?: string, plain?: string) => parseInt(braced ?? plain ?? '', 16);
+      for (const match of body.matchAll(new RegExp(`${escape}-${escape}`, 'g'))) {
+        const [low, high] = [value(match[1], match[2]), value(match[3], match[4])];
+        if (DIRECTION_CHARACTER_RANGES.some(([a, b]) => low <= b && high >= a)) found.push(`range ${match[0]}`);
+      }
+      for (const match of body.matchAll(new RegExp(escape, 'g'))) {
+        if (isDirectionCharacter(value(match[1], match[2]))) found.push(`escape ${match[0]}`);
+      }
+      return found;
+    };
+
+    // The detector works: the module itself spells the set.
+    expect(setSpellings(homeSource).length).toBeGreaterThan(0);
+
+    // No other copy: no source file in the repo, tests aside (they build characters from code
+    // points to exercise the set), spells a member of the set.
+    const sources = repoFiles().filter(file => /\.(ts|js|mjs|cjs)$/.test(file) && !file.startsWith(testRoot + sep));
+    expect(sources).toContain(home);
+    const copies = sources
+      .filter(file => file !== home)
+      .flatMap(file => setSpellings(readFileSync(file, 'utf-8')).map(spelling => `${relative(repoRoot, file)}: ${spelling}`));
+    expect(copies).toEqual([]);
+
+    // Every production file that uses the set's API imports it from the module and defines none
+    // of it. The names are built from a list, so a new consumer (the document check, the
+    // checkpoint presentation) is held to this the moment it uses any of them.
+    const api = [
+      'DIRECTION_CHARACTER_RANGES',
+      'isDirectionCharacter',
+      'directionCharacterPattern',
+      'findDirectionCharacters',
+      'formatCodePoint',
+      'escapeCodePoint',
+      'escapeDirectionCharacters',
+      'documentFinding',
+      'DOCUMENT_CHECK_SOURCE'
+    ];
+    const uses = (source: string) => api.some(name => new RegExp(`\\b${name}\\b`).test(source));
+    const consumers = sources.filter(file => file !== home && uses(code(readFileSync(file, 'utf-8'))));
+    for (const file of consumers) {
+      const source = code(readFileSync(file, 'utf-8'));
+      const label = relative(repoRoot, file);
+      expect({ label, imports: /import\s*\{[^}]*\}\s*from\s*'(?:\.\.?\/)+(?:harness\/)?direction-characters'/.test(source) }).toEqual({
+        label,
+        imports: true
+      });
+      const ownDefinitions = api.filter(name =>
+        new RegExp(`\\b(?:function|const|let|var|class)\\s+${name}\\b`).test(source)
+      );
+      expect({ label, ownDefinitions }).toEqual({ label, ownDefinitions: [] });
+    }
+
+    // The terminal is a consumer today: printableForTerminal escapes through the shared pattern
+    // and the shared escape. The document check (step 8) is one as soon as it exists.
+    const cliPath = join(factoryRoot, 'runner', 'cli.ts');
+    expect(consumers).toContain(cliPath);
+    const printable = /export function printableForTerminal\([^)]*\)[^{]*\{([\s\S]*?)\n\}/.exec(code(readFileSync(cliPath, 'utf-8')));
+    expect(printable?.[1]).toMatch(/\bescapeCodePoint\s*\(/);
+    expect(code(readFileSync(cliPath, 'utf-8'))).toMatch(/\bdirectionCharacterPattern\s*\(\s*\)/);
+    const documentCheck = join(factoryRoot, 'harness', 'document-check.ts');
+    if (existsSync(documentCheck)) expect(consumers).toContain(documentCheck);
+    // The checkpoint presentation (step 9) finds, escapes and names the characters through the set's API.
+    expect(consumers).toContain(join(factoryRoot, 'harness', 'checkpoint-presentation.ts'));
+  });
+
+  it('AC-109 presentationFor is the only checkpoint presentation the orchestrator uses, for presenting, --approve and the I-7 re-check', () => {
+    const productionTs = (dir: string): string[] =>
+      readdirSync(dir, { withFileTypes: true }).flatMap(entry => {
+        const full = join(dir, entry.name);
+        if (entry.isDirectory()) return full === testRoot ? [] : productionTs(full);
+        return entry.name.endsWith('.ts') ? [full] : [];
+      });
+    const sources = productionTs(factoryRoot);
+    const presentationPath = join(factoryRoot, 'harness', 'checkpoint-presentation.ts');
+    const orchestratorPath = join(factoryRoot, 'feature', 'workflows', 'feature-factory-orchestrator.ts');
+    expect(sources).toEqual(expect.arrayContaining([presentationPath, orchestratorPath]));
+    const mentions = (name: string) =>
+      sources
+        .filter(file => file !== presentationPath && new RegExp(`\\b${name}\\b`).test(code(readFileSync(file, 'utf-8'))))
+        .map(file => relative(repoRoot, file));
+
+    // The per-checkpoint builders stay exported for unit tests, but no production file reaches past presentationFor.
+    for (const name of ['presentStory', 'presentBrief', 'presentChange']) expect({ name, files: mentions(name) }).toEqual({ name, files: [] });
+    // presentationFor is used by the orchestrator only, and there only inside presentCheckpoint.
+    expect(mentions('presentationFor')).toEqual([relative(repoRoot, orchestratorPath)]);
+    const orchestrator = code(readFileSync(orchestratorPath, 'utf-8'));
+    const presentCheckpoint = /\nasync function presentCheckpoint\([\s\S]*?\n\}\n/.exec(orchestrator)?.[0] ?? '';
+    const calls = (text: string, name: string) => (text.match(new RegExp(`\\b${name}\\s*\\(`, 'g')) ?? []).length;
+    expect(calls(presentCheckpoint, 'presentationFor')).toBeGreaterThan(0);
+    expect(calls(orchestrator, 'presentationFor')).toBe(calls(presentCheckpoint, 'presentationFor'));
+
+    // Presenting: every checkpoint is presented through presentCheckpoint.
+    const presented = [...orchestrator.matchAll(/\bcheckpoint\(\s*CHECKPOINTS\.(\w+),\s*([^\n]*)/g)].map(m => [m[1], m[2]]);
+    expect(presented.map(([name]) => name).sort()).toEqual(['BRIEF', 'CHANGE', 'STORY']);
+    for (const [name, presenter] of presented) {
+      expect({ name, presenter }).toEqual({
+        name,
+        presenter: expect.stringMatching(/^\(\) => presentCheckpoint\([123],|^presentValidatedChange\)/)
+      });
+    }
+    expect(orchestrator).toMatch(/const presentValidatedChange = \(\): Promise<CheckpointPresentation> =>\s*presentCheckpoint\(3,/);
+
+    // --approve and the I-7 re-check: both re-build through presentCheckpoint, and read it only through one helper.
+    expect(orchestrator).toMatch(/const representCheckpoint = \(id: CheckpointId\) => presentCheckpoint\(id,/);
+    expect(orchestrator).toMatch(/assertPendingUnchanged\(resumed, representCheckpoint, cwd\)/);
+    expect(orchestrator).toMatch(/assertApprovedArtifactsUnchanged\(resumed, representCheckpoint, resumedRunDir, cwd\)/);
+    for (const check of ['assertPendingUnchanged', 'assertApprovedArtifactsUnchanged']) {
+      const body = new RegExp(`\\nasync function ${check}\\([\\s\\S]*?\\n\\}\\n`).exec(orchestrator)?.[0] ?? '';
+      expect({ check, rebuilds: /\bcurrentPresentation\(represent,/.test(body) }).toEqual({ check, rebuilds: true });
+    }
+    // No other checkpoint text is hashed in the orchestrator.
+    expect(orchestrator).not.toMatch(/\bsha256Hex\b/);
+  });
+
+  it('AC-107 every harness write path for agent and harness-rendered documents goes through the document check', () => {
+    const productionTs = (dir: string): string[] =>
+      readdirSync(dir, { withFileTypes: true }).flatMap(entry => {
+        const full = join(dir, entry.name);
+        if (entry.isDirectory()) return full === testRoot ? [] : productionTs(full);
+        return entry.name.endsWith('.ts') ? [full] : [];
+      });
+    const sources = productionTs(factoryRoot);
+    const at = (...parts: string[]) => join(factoryRoot, ...parts);
+    const orchestratorPath = at('feature', 'workflows', 'feature-factory-orchestrator.ts');
+    const consolidatePath = at('feature', 'workflows', 'consolidate-run.ts');
+    const featureSpecPath = at('contracts', 'feature-spec.ts');
+    // Operator-only (D-12): it writes a Researcher's report for a person to read, outside any run,
+    // so there is no run state to record a finding in. Excluded on purpose.
+    const smokeResearcherPath = at('runner', 'smoke-researcher.ts');
+    const callers = (name: string) =>
+      sources
+        .filter(file => new RegExp(`(?<!function\\s)\\b${name}\\s*\\(`).test(code(readFileSync(file, 'utf-8'))))
+        .map(file => relative(repoRoot, file))
+        .sort();
+    const label = (...files: string[]) => files.map(file => relative(repoRoot, file)).sort();
+
+    // The two document writers are the only callers of the no-follow document write, and each is
+    // called only from the known paths below.
+    expect(callers('writeFileNoFollow')).toEqual(label(at('harness', 'stage-context.ts'), at('harness', 'harness-documents.ts')));
+    expect(callers('persistArtifacts')).toEqual(label(orchestratorPath, consolidatePath, featureSpecPath, smokeResearcherPath));
+    expect(callers('writeHarnessDocument')).toEqual(label(orchestratorPath));
+    // The pre-supplied spec is written only through acceptFeatureSpec, which only the orchestrator calls.
+    expect(callers('acceptFeatureSpec')).toEqual(label(orchestratorPath));
+
+    const orchestrator = code(readFileSync(orchestratorPath, 'utf-8'));
+    const body = (name: string): string => {
+      const match = new RegExp(`const ${name} = (?:async )?\\([^)]*\\)[^{]*=> \\{([\\s\\S]*?)\\n  \\};`).exec(orchestrator);
+      expect({ name, found: match !== null }).toEqual({ name, found: true });
+      return match![1];
+    };
+
+    // checkDocuments reads back and records once per message, under the document-check source.
+    expect(body('checkDocuments')).toMatch(/recordFindingsOnce\(\s*stage,\s*DOCUMENT_CHECK_SOURCE,\s*documentFindings\(\s*files\s*\)\s*\)/);
+    expect(body('recordFindingsOnce')).toMatch(/\baddImportantFindingsOnce\(/);
+    expect(body('recordFindingsOnce')).toMatch(/state = commit\(/);
+
+    // One call of each writer in the orchestrator, each inside its wrapper, followed by the check.
+    expect(orchestrator.match(/\bpersistArtifacts\s*\(/g)).toHaveLength(1);
+    expect(body('persist')).toMatch(/persistArtifacts\([\s\S]*\bcheckDocuments\(/);
+    expect(orchestrator.match(/\bwriteHarnessDocument\s*\(/g)).toHaveLength(1);
+    expect(body('writeDocument')).toMatch(/writeHarnessDocument\([\s\S]*\bcheckDocuments\(/);
+
+    // The accepted pre-supplied spec: its documents are checked, at Stage 2, before the run goes on.
+    const supplied = body('preSuppliedStages');
+    const accepted = supplied.indexOf('acceptFeatureSpec(');
+    const check = supplied.search(/\bcheckDocuments\(\s*2\s*,/);
+    expect(accepted).toBeGreaterThanOrEqual(0);
+    expect(check).toBeGreaterThan(accepted);
+    expect(check).toBeLessThan(supplied.indexOf('recordAgentStep('));
+
+    // The Validator's findings use the same once-only recorder: one dedup rule, not two.
+    expect(body('recordValidatorFindings')).toMatch(/\brecordFindingsOnce\(\s*4,\s*'07-validator'/);
+    expect(body('recordValidatorFindings')).not.toMatch(/new Set\(/);
+
+    // consolidate-run checks what it persisted, once per message, and saves.
+    const consolidate = code(readFileSync(consolidatePath, 'utf-8'));
+    expect(consolidate.match(/\bpersistArtifacts\s*\(/g)).toHaveLength(1);
+    expect(consolidate).toMatch(
+      /persistArtifacts\([\s\S]*addImportantFindingsOnce\(\s*state,\s*STAGE,\s*DOCUMENT_CHECK_SOURCE,\s*documentFindings\(/
+    );
   });
 });

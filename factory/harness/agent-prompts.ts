@@ -340,6 +340,9 @@ export function builderPrompt(
         ? `The backend is already built. Consume its API contract (listed above); do not invent endpoints.`
         : `The backend is already built. Consume its API contract; do not invent endpoints.`
       : `Your scope ends at the API contract. Do not touch frontend files.`,
+    // B2 (AC-90, AC-91): an instruction, not enforced; Gate 2 runs the full suite.
+    `Run only the tests related to the files you changed; the harness runs the full suite in Gate 2.`,
+    `Never commit, push or switch branches, and never write under .git/ or .factory/.`,
     ...(validatorRound ? [``, validatorBriefing(validatorRound)] : []),
     ...reworkSection(options.rework),
     ``,

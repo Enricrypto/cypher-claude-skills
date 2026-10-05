@@ -40,6 +40,7 @@ import {
 } from './agent-outputs';
 import { fakeChangeTracker } from './changes';
 import { recordingGates } from './gates';
+import { nonDurableStateWriter } from './state-writer';
 
 export interface TempProject {
   dir: string;
@@ -137,8 +138,9 @@ export function passingScript(): InvokerScript {
 
 /**
  * Run the orchestrator with test defaults: silent logger, an approver that approves every
- * checkpoint, passing recorded gates and a fake change tracker (so no test but change-diff's runs
- * git). Anything in `overrides` wins.
+ * checkpoint, passing recorded gates, a fake change tracker (so no test but change-diff's runs
+ * git) and the non-durable state writer (AC-104: same file and bytes, no fsync). Anything in
+ * `overrides` wins, `stateWriter` included. Tests that call runFeatureFactory directly stay durable.
  */
 export function runToEnd(
   overrides: Partial<OrchestrationOptions> & Pick<OrchestrationOptions, 'cwd' | 'invoke'>
@@ -150,6 +152,7 @@ export function runToEnd(
     approveCheckpoint: async () => true,
     gates: recordingGates().gates,
     changes: fakeChangeTracker(),
+    stateWriter: nonDurableStateWriter,
     ...overrides
   });
 }

@@ -20,6 +20,7 @@ import {
   isSafeRunId,
   nextStepHints,
   parseCheckpointId,
+  checkResumeDescription,
   resumeDescription,
   usedAttempts
 } from '../../harness/run-lifecycle';
@@ -188,12 +189,10 @@ describe('Run lifecycle (D-1, D-3)', () => {
       });
     });
 
+    // MINOR-8 (pre-approved, AC-101): the pre-A-2 row "a MAX_LOOPS escalation without builderPhase"
+    // used to expect undefined here. Its phase is now inferred; see the AC-101 test below.
     it.each([
       ['an escalation that is not MAX_LOOPS', () => escalatedOther()],
-      [
-        'a MAX_LOOPS escalation without builderPhase (pre-A-2 record)',
-        () => completeFeature(recordEscalation(createFeatureState('o'), 3, '04-backend-builder', 'MAX_LOOPS', 'x'), 'ESCALATED')
-      ],
       [
         'a MAX_LOOPS escalation by a non-builder agent',
         () =>
@@ -221,6 +220,63 @@ describe('Run lifecycle (D-1, D-3)', () => {
       ['a PAUSED run', () => paused()]
     ])('AC-71 is undefined for %s', (_label, make) => {
       expect(exhaustedBuilder(make())).toBeUndefined();
+    });
+
+    /** A pre-A-2 record: the builder escalated MAX_LOOPS at `stage` with no builderPhase. */
+    function preA2Exhausted(stage: number, validatorRoundsCompleted?: number, agent = '04-backend-builder'): FeatureState {
+      const state = recordEscalation(createFeatureState('pre-a2'), stage, agent, 'MAX_LOOPS', 'Builder exceeded max attempts');
+      if (validatorRoundsCompleted === undefined) delete state.validatorRoundsCompleted;
+      else state.validatorRoundsCompleted = validatorRoundsCompleted;
+      expect(state.escalations.at(-1)!.context.builderPhase).toBeUndefined();
+      return completeFeature(state, 'ESCALATED', 'exhausted');
+    }
+
+    it('AC-101 a MAX_LOOPS record without builderPhase infers Stage 3 from escalation stage 3, validator round validatorRoundsCompleted from stage 4, and nothing when the round is unknown', () => {
+      // Escalation stage 3 → Stage 3, whatever the validator rounds say.
+      expect(exhaustedBuilder(preA2Exhausted(3))).toEqual({ builder: '04-backend-builder', at: { phase: 'stage3' } });
+      expect(exhaustedBuilder(preA2Exhausted(3, 2))).toEqual({ builder: '04-backend-builder', at: { phase: 'stage3' } });
+      // A run killed before finish() (ACTIVE) infers the same.
+      const killed = recordEscalation(createFeatureState('killed'), 3, '05-frontend-builder', 'MAX_LOOPS', 'x');
+      expect(exhaustedBuilder(killed)).toEqual({ builder: '05-frontend-builder', at: { phase: 'stage3' } });
+
+      // Escalation stage 4 → the validator round the run had entered.
+      expect(exhaustedBuilder(preA2Exhausted(4, 1))).toEqual({
+        builder: '04-backend-builder',
+        at: { phase: 'validator-round', round: 1 }
+      });
+      expect(exhaustedBuilder(preA2Exhausted(4, 2, '05-frontend-builder'))).toEqual({
+        builder: '05-frontend-builder',
+        at: { phase: 'validator-round', round: 2 }
+      });
+
+      // I-11: stage 4 without a usable round infers nothing (the old behaviour).
+      expect(exhaustedBuilder(preA2Exhausted(4, 0))).toBeUndefined();
+      expect(exhaustedBuilder(preA2Exhausted(4))).toBeUndefined();
+      expect(exhaustedBuilder(preA2Exhausted(4, 1.5))).toBeUndefined();
+      expect(exhaustedBuilder(preA2Exhausted(4, -1))).toBeUndefined();
+      // Any other stage is not a builder phase: nothing.
+      expect(exhaustedBuilder(preA2Exhausted(2))).toBeUndefined();
+      expect(exhaustedBuilder(preA2Exhausted(5, 1))).toBeUndefined();
+      // A recorded builderPhase still wins over the inference.
+      const recorded = recordEscalation(createFeatureState('a2'), 4, '04-backend-builder', 'MAX_LOOPS', 'x', {
+        builderPhase: { phase: 'rework', round: 1 }
+      });
+      recorded.validatorRoundsCompleted = 2;
+      expect(exhaustedBuilder(recorded)).toEqual({ builder: '04-backend-builder', at: { phase: 'rework', round: 1 } });
+
+      // The refusal and the hint follow the inference.
+      const stage3 = preA2Exhausted(3);
+      expect(refusal(stage3, CONTINUE)).toBe('NEEDS_GRANT');
+      expect(refusal(stage3, { action: { kind: 'continue' }, grantAttempts: 1 })).toBeUndefined();
+      expect(() => checkResumeRequest(stage3, CONTINUE)).toThrow(/exhausted its attempts \(Stage 3\)\..*--grant-attempts <n>/);
+      expect(() => checkResumeRequest(preA2Exhausted(4, 2), CONTINUE)).toThrow(/\(validator-round 2\)/);
+      expect(nextStepHints(stage3, '/p')).toEqual([
+        `Resume with: npm run factory -- --resume ${stage3.featureId} --cwd /p --grant-attempts <n>`,
+        `Close with: npm run factory -- --close ${stage3.featureId} --cwd /p`
+      ]);
+      // Not inferable: a plain continue is accepted and a grant does not apply, as before.
+      expect(refusal(preA2Exhausted(4, 0), CONTINUE)).toBeUndefined();
+      expect(refusal(preA2Exhausted(4, 0), { action: { kind: 'continue' }, grantAttempts: 1 })).toBe('GRANT_NOT_APPLICABLE');
     });
   });
 
@@ -467,4 +523,47 @@ describe('IMPORTANT-1 resumeDescription', () => {
       expect((refusal as Error).message).toContain(state.featureId);
     }
   );
+});
+
+describe('AC-99 checkResumeDescription', () => {
+  function descriptionRefusal(state: FeatureState, supplied: string | undefined): RunRefusedError | undefined {
+    try {
+      checkResumeDescription(state, supplied);
+      return undefined;
+    } catch (error) {
+      if (error instanceof RunRefusedError) return error;
+      throw error;
+    }
+  }
+
+  it.each([[undefined], [''], ['   '], ['add 2FA']])(
+    'AC-99 a run with a saved description resumes with it when the supplied one (%j) is absent, blank or equal',
+    supplied => {
+      expect(checkResumeDescription(createFeatureState('n', undefined, 'add 2FA'), supplied)).toBe('add 2FA');
+    }
+  );
+
+  it('AC-99 a supplied description that differs from the saved one is refused DESCRIPTION_MISMATCH with the CLI wording', () => {
+    const state = createFeatureState('n', undefined, 'add 2FA');
+    const refused = descriptionRefusal(state, 'add SMS login');
+    expect(refused?.code).toBe('DESCRIPTION_MISMATCH');
+    expect(refused?.message).toBe(
+      `--feature "add SMS login" does not match the description saved in run ${state.featureId} ("add 2FA"). ` +
+        'Omit --feature to resume it as it was started.'
+    );
+    // Exact comparison: case and surrounding spaces count as a difference.
+    expect(descriptionRefusal(state, 'Add 2FA')?.code).toBe('DESCRIPTION_MISMATCH');
+    expect(descriptionRefusal(state, ' add 2FA')?.code).toBe('DESCRIPTION_MISMATCH');
+  });
+
+  it('AC-99 a run recorded without a description takes the supplied one, and is refused DESCRIPTION_REQUIRED when none (or a blank one) is supplied', () => {
+    expect(checkResumeDescription(createFeatureState('n'), 'add 2FA')).toBe('add 2FA');
+    for (const supplied of [undefined, '', '  ']) {
+      const state = createFeatureState('n');
+      const refused = descriptionRefusal(state, supplied);
+      expect(refused?.code).toBe('DESCRIPTION_REQUIRED');
+      expect(refused?.message).toContain('--feature');
+      expect(refused?.message).toContain(state.featureId);
+    }
+  });
 });

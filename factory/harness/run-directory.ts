@@ -71,8 +71,49 @@ export interface FoundRun {
   runDir: string;
 }
 
+/** The harness directory's exact spelling. */
+const FACTORY_DIRNAME = '.factory';
+
 function factoryDir(cwd: string): string {
-  return resolve(cwd, '.factory');
+  return resolve(cwd, FACTORY_DIRNAME);
+}
+
+/**
+ * AC-97: refuse when `cwd` holds an entry — directory, file or anything else — whose name is
+ * `.factory` in another letter case (`.Factory`, `.FACTORY`...). The harness writes `.factory/`, and
+ * every git call excludes exactly `:(exclude).factory`, which git does NOT apply to `.Factory/`
+ * even with core.ignorecase (AC-98 probe), so such an entry would leak harness state into the
+ * CHECKPOINT 3 change and snapshots. On a case-insensitive file system it may also BE the harness
+ * directory under another name. The run's pre-flight calls this first, before anything is read or
+ * written; it only lists `cwd`.
+ *
+ * A missing `cwd` has no entries (ENOENT). Any other listing error propagates: never fail open.
+ */
+export function assertNoFactoryCaseVariant(cwd: string): void {
+  let names: string[];
+  try {
+    names = readdirSync(cwd);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+    throw error;
+  }
+
+  const variants = names
+    .filter(name => name !== FACTORY_DIRNAME && name.toLowerCase() === FACTORY_DIRNAME)
+    .sort()
+    .map(name => resolve(cwd, name));
+  if (variants.length === 0) return;
+
+  throw new RunRefusedError(
+    'FACTORY_DIR_CASE_CONFLICT',
+    variants
+      .map(
+        path =>
+          `${path} differs from the harness directory ${FACTORY_DIRNAME} only in letter case; ` +
+          `git's \`:(exclude)${FACTORY_DIRNAME}\` would not exclude it. Rename or remove it, then run again.`
+      )
+      .join('\n')
+  );
 }
 
 function archiveDir(cwd: string): string {

@@ -2,7 +2,7 @@
 
 Two things live here:
 
-1. **Feature Factory** — a deterministic, gate-driven engine that runs a feature through five stages with eight specialist agents. Hard gates, enforced in code.
+1. **Feature Factory** — a deterministic, gate-driven engine that runs a feature through four stages and three human checkpoints, with eight specialist agents. Hard gates, enforced in code.
 2. **A library of Claude Code skills** — activated by `Read`-ing them in a session. Catalogued at the bottom of this file.
 
 Not an npm package. Not a CLI you install. You clone this repo and run it.
@@ -88,17 +88,25 @@ Two caveats worth knowing:
 
 ---
 
-## The five stages
+## The stages
 
 ```
-Stage 1  DISCOVER   01-researcher                        → Researcher Report
-Stage 2  PLAN       02-story-writer → 03-spec-writer     → User Story + Technical Brief
-                    ⏸ CHECKPOINT 1 (story)  ⏸ CHECKPOINT 2 (brief)
+Stage 1  DISCOVER   01-researcher                          → Researcher Report
+Stage 2  PLAN       02-story-writer                        → User Story
+                    ⏸ CHECKPOINT 1 (the story)
+                    03-spec-writer                         → Technical Brief + File List
+                    ⏸ CHECKPOINT 2 (the brief)
 Stage 3  EXECUTE    04-backend-builder → 05-frontend-builder   (max 3 attempts each)
-Stage 4  VERIFY     06-test-verifier → 07-validator      → regression + security check
-                    (PR review: a human step outside the program)
-Stage 5  DELIVER    08-feature-consolidator              → reusable patterns
+                    Gate 1 (claimed files exist) → snapshot under refs/factory/<id>/
+Stage 4  VERIFY     Gate 1.5 (infrastructure) → 06-test-verifier → Gate 2 (build, test, dev)
+                    → 07-validator → regression + security check
+                    ⏸ CHECKPOINT 3 (the validated change, with the diff)
+SUCCESS             .factory/baseline.json written
+
+Stage 5  DELIVER    08-feature-consolidator: only via --consolidate <id> on a SUCCESS run
 ```
+
+A run is Stages 1–4 and three human checkpoints. SUCCESS means the Stage 4 gate passed and CHECKPOINT 3 was approved; the Feature Consolidator runs later, on request. What you do with the approved change (commit it, push it, ask for review) is up to you: the factory never touches your branch, index or working tree, never pushes, and writes git objects only under `refs/factory/<id>/`, for its own snapshots.
 
 Each stage has a contract in [`harness/stage-gates.ts`](factory/harness/stage-gates.ts) — a list of criteria tagged CRITICAL / IMPORTANT / NICE_TO_HAVE. **All CRITICAL criteria must pass or the stage does not advance.** The recommendation (ADVANCE / WAIT / ESCALATE) falls out of the pass rate.
 
@@ -154,8 +162,8 @@ factory/
 ├── feature/          Tier 2 — the feature pipeline (this is "Feature Factory")
 │   ├── agents/       the 10 agent contracts (each becomes a system prompt)
 │   ├── workflows/    the orchestrator
-│   ├── docs/         deeper docs
-│   ├── reference/    lookup tables (contracts, schemas, errors, state)
+│   ├── docs/         pointers to archived docs
+│   ├── reference/    ERROR_CATEGORIES.md plus pointers
 │   └── SKILL.md
 │
 ├── e2e/              Tier 3 — post-merge E2E system (see status table above)
@@ -163,7 +171,8 @@ factory/
 
 skills/               standalone Claude Code skills — catalogue below
 scripts/link-skills.sh  symlink them into ~/.claude/skills/
-docs/REFACTOR_PLAN.md   the phased plan, including known open bugs
+docs/ROADMAP.md         the plan of record (Phases A–E)
+docs/REFACTOR_PLAN.md   the earlier phased plan, superseded by ROADMAP.md
 ```
 
 `harness/` and `runner/` sit at the top because they are **shared**. Tier 1, when it lands, gets a `product/` sibling to `feature/` and reuses the same gates — that is the whole point of the two-tier design: one deterministic harness, swappable tiers above it.

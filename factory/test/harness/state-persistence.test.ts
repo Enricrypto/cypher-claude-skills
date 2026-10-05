@@ -12,17 +12,18 @@
  * Not on success only — an escalation is the case where you most need to know what happened.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
+import { describe, it, expect, beforeEach, afterEach, jest } from '@jest/globals';
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
 import { join } from 'path';
 
-import { runFeatureFactory } from '../../feature/workflows/feature-factory-orchestrator';
+import { OrchestrationOptions, runFeatureFactory } from '../../feature/workflows/feature-factory-orchestrator';
 import { AgentInvocation } from '../../runner/invoke-agent';
 import { loadState, saveState, stateFilePath, StatePersistenceError } from '../../harness/state-store';
-import { createFeatureState, deserializeState, recordAgentStep, FeatureState } from '../../harness/state-tracker';
+import { createFeatureState, deserializeState, recordAgentStep, FeatureState, serializeState } from '../../harness/state-tracker';
 import { placeholder, researcher, story } from '../fixtures/agent-outputs';
 import { scriptedInvoker, tempProject, TempProject } from '../fixtures/harness-run';
 import { fakeChangeTracker } from '../fixtures/changes';
+import { nonDurableStateWriter } from '../fixtures/state-writer';
 
 let project: TempProject;
 let projectDir: string;
@@ -284,5 +285,78 @@ describe('the state store', () => {
     expect(() => JSON.parse(raw)).not.toThrow();
     expect(JSON.parse(raw).featureId).toBe(state.featureId);
     expect(JSON.parse(raw).stageHistory).toHaveLength(1);
+  });
+});
+
+// ============================================================================
+// The state writer seam (AC-104)
+// ============================================================================
+
+describe('the state writer seam', () => {
+  it('AC-104 a test can inject a non-durable state writer through OrchestrationOptions and the default stays durable', async () => {
+    // The real modules, not import-star copies, so the spies replace what the orchestrator and
+    // safe-write.ts actually call.
+    const fs = require('fs');
+    const stateStore = require('../../harness/state-store');
+    const fsync = jest.spyOn(fs, 'fsyncSync');
+    const durableSave = jest.spyOn(stateStore, 'saveState');
+    const other = tempProject('ff-state-default-');
+
+    /** The same run each time: CP1 and CP2 approved, then it escalates at the Spec Writer's placeholder. */
+    const run = (cwd: string, extra: Partial<OrchestrationOptions> = {}) =>
+      runFeatureFactory({
+        featureName: 'state-writer-seam',
+        featureDescription: 'add 2FA',
+        cwd,
+        changes: fakeChangeTracker(),
+        invoke: planningInvoker(),
+        approveCheckpoint: async () => true,
+        logger: () => {},
+        ...extra
+      });
+
+    try {
+      // Injected: every save of the run goes through the writer. None reaches saveState, and
+      // nothing is fsynced.
+      const written: Array<{ cwd: string; state: FeatureState }> = [];
+      const injected = await run(projectDir, {
+        stateWriter: (cwd, state) => {
+          written.push({ cwd, state: structuredClone(state) });
+          nonDurableStateWriter(cwd, state);
+        }
+      });
+
+      expect(written.length).toBeGreaterThan(2);
+      expect(written.every(entry => entry.cwd === projectDir)).toBe(true);
+      expect(written.at(-1)!.state).toEqual(injected);
+      expect(durableSave).not.toHaveBeenCalled();
+      expect(fsync).not.toHaveBeenCalled();
+      // The writer leaves the same file, with the same bytes, that the durable store would.
+      expect(readFileSync(stateFilePath(projectDir, injected.featureId), 'utf-8')).toBe(serializeState(injected));
+
+      // Default: no stateWriter, so the same run saves the same number of times through the
+      // durable saveState, and fsyncs.
+      const durable = await run(other.dir);
+
+      expect(durableSave).toHaveBeenCalledTimes(written.length);
+      expect(durableSave.mock.calls.every(([cwd]) => cwd === other.dir)).toBe(true);
+      expect(fsync.mock.calls.length).toBeGreaterThanOrEqual(written.length);
+      expect(readFileSync(stateFilePath(other.dir, durable.featureId), 'utf-8')).toBe(serializeState(durable));
+    } finally {
+      fsync.mockRestore();
+      durableSave.mockRestore();
+      other.cleanup();
+    }
+  });
+
+  it('AC-104 the non-durable writer fails closed with StatePersistenceError, leaving no scratch file', () => {
+    const state = createFeatureState('non-durable-failure');
+    const runDir = join(projectDir, '.factory', state.featureId);
+    mkdirSync(join(runDir, 'state.json'), { recursive: true }); // rename onto a dir fails
+
+    expect(() => nonDurableStateWriter(projectDir, state)).toThrow(StatePersistenceError);
+
+    const strays = require('fs').readdirSync(runDir).filter((e: string) => e.endsWith('.tmp'));
+    expect(strays).toEqual([]);
   });
 });

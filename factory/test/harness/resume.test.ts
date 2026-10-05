@@ -23,6 +23,8 @@ import { AgentInvocation, AgentInvoker } from '../../runner/invoke-agent';
 import { loadState, saveState } from '../../harness/state-store';
 import { FeatureState } from '../../harness/state-tracker';
 import { exhaustedBuilder, RunRefusedError } from '../../harness/run-lifecycle';
+import { runFeatureFactory } from '../../feature/workflows/feature-factory-orchestrator';
+import { treeSnapshot } from '../fixtures/factory-case-variant';
 import { BASELINE_FILENAME } from '../../harness/regression-baseline';
 import { MAX_BUILDER_ATTEMPTS } from '../../harness/loop-rules';
 import { ValidatorIssue } from '../../harness/agent-output-schema';
@@ -37,6 +39,7 @@ import {
   restoreSnapshot,
   runToEnd,
   scriptedInvoker,
+  seedRun,
   tempProject,
   TempProject
 } from '../fixtures/harness-run';
@@ -844,5 +847,171 @@ describe('D-3 a paused run resumed with a plain continue', () => {
     expect(resumed.calls).toEqual([]);
     expect(approver.requests).toEqual([]);
     expect(stateBytes()).toBe(before);
+  }, RUN_TIMEOUT_MS);
+});
+
+// ============================================================================================
+// PR B-1 step 6: the library makes every description refusal (AC-99), and a pre-A-2 MAX_LOOPS
+// record has its builder phase inferred (AC-101).
+// ============================================================================================
+
+/** Run `start`, then hand back what a refused call must leave untouched: the tree and the agent log. */
+async function refusedAfter(start: () => Promise<unknown>, resume: (invoke: AgentInvoker) => Promise<unknown>) {
+  await start();
+  const before = treeSnapshot(project.dir);
+  const resumed = scriptedInvoker(passingScript(), { cwd: project.dir });
+  let refusal: unknown;
+  try {
+    await resume(resumed.invoke);
+  } catch (error) {
+    refusal = error;
+  }
+  return { refusal, before, resumed };
+}
+
+describe('AC-99 the library makes the description refusals, after checkResumeRequest', () => {
+  /** Drop featureDescription from the only run's state.json, as a pre-A-2 record. */
+  const forgetDescription = () => {
+    const legacy = onDisk()!;
+    delete legacy.featureDescription;
+    saveState(project.dir, legacy);
+  };
+
+  it.each<[string, string, () => Promise<unknown>, (invoke: AgentInvoker) => Promise<unknown>, RegExp]>([
+    [
+      'RUN_FINISHED for a finished run given a different description',
+      'RUN_FINISHED',
+      () => runToEnd({ cwd: project.dir, invoke: scriptedInvoker(passingScript(), { cwd: project.dir }).invoke }),
+      invoke => runToEnd({ cwd: project.dir, invoke, featureDescription: 'add SMS login', resumeFromState: onDisk()! }),
+      /already finished \(SUCCESS\)/
+    ],
+    [
+      'NEEDS_GRANT for an exhausted-builder run given a different description',
+      'NEEDS_GRANT',
+      () => runToEnd({ cwd: project.dir, invoke: scriptedInvoker({ ...passingScript(), '04-backend-builder': stillRed }, { cwd: project.dir }).invoke }),
+      invoke => runToEnd({ cwd: project.dir, invoke, featureDescription: 'add SMS login', resumeFromState: onDisk()! }),
+      /--grant-attempts <n>/
+    ],
+    [
+      'DESCRIPTION_MISMATCH for a resumable run given a different description, with runFeatureFactory called directly',
+      'DESCRIPTION_MISMATCH',
+      () => runToEnd({ cwd: project.dir, invoke: scriptedInvoker({ ...passingScript(), '06-test-verifier': testVerifier({ failed: 1 }) }, { cwd: project.dir }).invoke }),
+      invoke =>
+        runFeatureFactory({
+          featureName: 'fixture-run',
+          featureDescription: 'add SMS login',
+          cwd: project.dir,
+          invoke,
+          resumeFromState: onDisk()!,
+          logger: () => {},
+          approveCheckpoint: async () => true,
+          gates: recordingGates().gates,
+          changes: fakeChangeTracker()
+        }),
+      /--feature "add SMS login" does not match the description saved in run \S+ \("add 2FA"\)\. Omit --feature to resume it as it was started\./
+    ],
+    [
+      'DESCRIPTION_REQUIRED for a run recorded without a description and given none',
+      'DESCRIPTION_REQUIRED',
+      async () => {
+        await runToEnd({ cwd: project.dir, invoke: scriptedInvoker({ ...passingScript(), '06-test-verifier': testVerifier({ failed: 1 }) }, { cwd: project.dir }).invoke });
+        forgetDescription();
+      },
+      invoke => runToEnd({ cwd: project.dir, invoke, featureDescription: undefined, resumeFromState: onDisk()! }),
+      /recorded without a feature description.*--feature "<the description it was started with>"/
+    ]
+  ])('AC-99 the library refuses %s after checkResumeRequest and writes nothing', async (_label, code, start, resume, message) => {
+    const { refusal, before, resumed } = await refusedAfter(start, resume);
+
+    expect(refusal).toBeInstanceOf(RunRefusedError);
+    expect(refusal).toMatchObject({ code });
+    expect((refusal as Error).message).toMatch(message);
+    expect(resumed.calls).toEqual([]);
+    expect(treeSnapshot(project.dir)).toEqual(before);
+  }, RUN_TIMEOUT_MS);
+
+  it.each([[undefined], [''], ['   ']])(
+    'AC-99 a fresh run without a description (%j) is refused DESCRIPTION_REQUIRED before the run directory is prepared, and writes nothing',
+    async description => {
+      // A finished run that a fresh start would archive: refused first, so it stays where it is.
+      seedRun(project.dir, 'SUCCESS');
+      const before = treeSnapshot(project.dir);
+      const invoker = scriptedInvoker(passingScript(), { cwd: project.dir });
+
+      let refusal: unknown;
+      try {
+        await runToEnd({ cwd: project.dir, invoke: invoker.invoke, featureDescription: description });
+      } catch (error) {
+        refusal = error;
+      }
+
+      expect(refusal).toBeInstanceOf(RunRefusedError);
+      expect(refusal).toMatchObject({ code: 'DESCRIPTION_REQUIRED', message: 'A new run needs a feature description (--feature).' });
+      expect(invoker.calls).toEqual([]);
+      expect(treeSnapshot(project.dir)).toEqual(before);
+    },
+    RUN_TIMEOUT_MS
+  );
+});
+
+describe('AC-101 a pre-A-2 MAX_LOOPS record (no builderPhase)', () => {
+  it.each<[number, string, { phase: 'stage3' } | { phase: 'validator-round'; round: number }, number]>([
+    [2, 'Stage 3', { phase: 'stage3' }, 3],
+    [1, 'validator round 1', { phase: 'validator-round', round: 1 }, 4]
+  ])('AC-101 a plain resume of a pre-A-2 MAX_LOOPS record is refused NEEDS_GRANT with state.json byte-identical, and --grant-attempts n gives exactly n attempts in the inferred phase (%i, %s)', async (n, _label, at, stage) => {
+    const first = scriptedInvoker(
+      {
+        ...passingScript(),
+        '04-backend-builder': (_call: AgentInvocation, call: number) =>
+          at.phase === 'stage3' || call > 1 ? stillRed() : backend(),
+        '07-validator': (_call: AgentInvocation, call: number) =>
+          call === 1 ? validator({ status: 'FAIL', issues: [issue()] }) : validator()
+      },
+      { cwd: project.dir }
+    );
+    await runToEnd({ cwd: project.dir, invoke: first.invoke });
+
+    // Make it a pre-A-2 record: the exhaustion carries no builderPhase.
+    const legacy = onDisk()!;
+    const last = legacy.escalations.at(-1)!;
+    expect([last.stage, last.agent, last.reason]).toEqual([stage, '04-backend-builder', 'MAX_LOOPS']);
+    delete last.context.builderPhase;
+    saveState(project.dir, legacy);
+    expect(onDisk()!.escalations.at(-1)!.context.builderPhase).toBeUndefined();
+    expect(exhaustedBuilder(onDisk()!)).toEqual({ builder: '04-backend-builder', at });
+    const before = stateBytes();
+
+    // A plain resume: refused, naming --grant-attempts, nothing written.
+    const plain = scriptedInvoker(passingScript(), { cwd: project.dir });
+    let refusal: unknown;
+    try {
+      await runToEnd({ cwd: project.dir, invoke: plain.invoke, resumeFromState: onDisk()! });
+    } catch (error) {
+      refusal = error;
+    }
+    expect(refusal).toBeInstanceOf(RunRefusedError);
+    expect(refusal).toMatchObject({ code: 'NEEDS_GRANT' });
+    expect((refusal as Error).message).toContain('--grant-attempts <n>');
+    expect(plain.calls).toEqual([]);
+    expect(stateBytes()).toBe(before);
+
+    // --grant-attempts n: exactly n more attempts, in the inferred phase.
+    const resumed = scriptedInvoker({ ...passingScript(), '04-backend-builder': stillRed }, { cwd: project.dir });
+    const state = await runToEnd({
+      cwd: project.dir,
+      invoke: resumed.invoke,
+      resumeFromState: onDisk()!,
+      resume: { action: { kind: 'continue' }, grantAttempts: n }
+    });
+
+    expect(resumed.agents()).toEqual(Array(n).fill('04-backend-builder'));
+    // Every resumed invocation ran in the inferred phase.
+    const resumedInvocations = (state.agentInvocations ?? []).slice(-n);
+    expect(resumedInvocations.map(record => record.agent)).toEqual(Array(n).fill('04-backend-builder'));
+    for (const record of resumedInvocations) expect(record).toMatchObject(at);
+    expect(state.attemptGrants).toEqual([{ builder: '04-backend-builder', attempts: n, at, grantedAt: expect.any(String) }]);
+    const counts = state.builderAttempts!['04-backend-builder']!;
+    expect(at.phase === 'stage3' ? counts.stage3 : counts.validatorRounds[1]).toBe(MAX_BUILDER_ATTEMPTS + n);
+    expect(state.escalations.at(-1)!.context).toMatchObject({ loopCount: MAX_BUILDER_ATTEMPTS + n, builderPhase: at });
   }, RUN_TIMEOUT_MS);
 });

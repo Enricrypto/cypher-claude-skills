@@ -16,7 +16,7 @@
  */
 
 import { FeatureFactoryAgentOutput } from './agent-output-schema';
-import { classifyRun } from './run-lifecycle';
+import { classifyRun, samePhase } from './run-lifecycle';
 
 /**
  * Where a builder step or loop-back happened (D-9). `stage3` is the original build;
@@ -106,8 +106,38 @@ export interface ResumeRecord {
   grantedAttempts?: number;
 }
 
-/** Where the CP3 diff starts (A-2, D-8): HEAD at run start, or why there is no git base. */
-export type ChangeBase = { kind: 'git'; commit?: string } | { kind: 'none'; reason: string };
+/**
+ * Where the CP3 diff starts (A-2, D-8): HEAD at run start, or why there is no git base.
+ *
+ * PR B-1 (D-4, D-6) adds, for a fresh start inside git:
+ *  - `branch`: `refs/heads/<x>`, or `HEAD` when detached; absent on an unborn branch (I-6) and in
+ *    a base recorded before B-1 (then only `commit` is compared by the snapshot's HEAD check);
+ *  - `preExisting`: the paths already changed or untracked at run start, sorted unique; absent
+ *    when they could not be read, or in a base recorded before B-1 ("unknown").
+ */
+export type ChangeBase =
+  | { kind: 'git'; commit?: string; branch?: string; preExisting?: string[] }
+  | { kind: 'none'; reason: string };
+
+/**
+ * One Stage 3 snapshot event (PR B-1, D-7): after every passing Stage 3 gate (the Stage 3 build, a
+ * validator round, a CP3 rework), either the snapshot commit written at `ref`
+ * (`refs/factory/<id>/stage3-<n>`), or why none was attempted. `at` is the phase key: a run holds at
+ * most one entry per phase, and a re-evaluated gate in the same phase reuses its `n` (I-4).
+ * `reused` is set when an identical commit already at `ref` was kept (AC-85).
+ */
+export type Stage3Snapshot =
+  | { status: 'written'; n: number; ref: string; commit: string; tree: string; at: BuilderPhase; takenAt: string; reused?: true }
+  | { status: 'skipped'; reason: string; at: BuilderPhase; takenAt: string };
+
+/** A snapshot that was written. */
+export type WrittenStage3Snapshot = Extract<Stage3Snapshot, { status: 'written' }>;
+
+/** HEAD as recorded at run start and as found at a snapshot (D-8): the HEAD_MOVED context. */
+export interface HeadMove {
+  recorded: { commit?: string; branch?: string };
+  current: { commit?: string; branch?: string };
+}
 
 /** One agent invocation, timed by the harness around the call (A-2, D-13). */
 export interface AgentInvocationRecord {
@@ -178,7 +208,12 @@ export interface EscalationRecord {
     // Distinct because the fix is to the repo, not to the feature.
     | 'INFRASTRUCTURE_FAILURE'
     // The agent process itself failed — crashed, hit max turns, exhausted its budget.
-    | 'EXECUTION_FAILURE';
+    | 'EXECUTION_FAILURE'
+    // PR B-1 (D-8): HEAD's commit or branch is not what the run started on, so no snapshot was
+    // written (AC-86).
+    | 'HEAD_MOVED'
+    // PR B-1 (D-8): git could not write the snapshot; nothing was recorded (AC-88).
+    | 'SNAPSHOT_FAILED';
   severity: 'CRITICAL' | 'IMPORTANT';
   context: {
     failingTests?: string[];
@@ -195,6 +230,8 @@ export interface EscalationRecord {
     /** MANUAL after a checkpoint rejection (A-2, D-4). */
     checkpointId?: CheckpointId;
     notes?: string;
+    /** HEAD_MOVED (PR B-1, D-8): the HEAD the run started on, and the one found. */
+    head?: HeadMove;
     message: string;
   };
   escalatedAt: string;
@@ -304,6 +341,13 @@ export interface FeatureState {
   agentInvocations?: AgentInvocationRecord[];
   /** Every resume that changed the run (D-2, D-3). */
   resumeHistory?: ResumeRecord[];
+
+  /**
+   * PR B-1 (D-7): one record per phase whose Stage 3 gate passed, in the order first recorded.
+   * NOT initialised by createFeatureState: absent means the run has no B-1 snapshot event yet (so
+   * CP3 shows no snapshot section, I-5).
+   */
+  stage3Snapshots?: Stage3Snapshot[];
 
   // Metrics
   metrics: {
@@ -441,7 +485,7 @@ export function recordEscalation(
     stage,
     agent,
     reason,
-    severity: ['MAX_LOOPS', 'CRITICAL_ISSUE', 'TIMEOUT'].includes(reason) ? 'CRITICAL' : 'IMPORTANT',
+    severity: ['MAX_LOOPS', 'CRITICAL_ISSUE', 'TIMEOUT', 'HEAD_MOVED', 'SNAPSHOT_FAILED'].includes(reason) ? 'CRITICAL' : 'IMPORTANT',
     context: {
       message: context,
       ...details
@@ -505,6 +549,40 @@ export function recordImportantFindings(
     ...messages.map(message => ({ stage, source, message, recordedAt }))
   ];
   return state;
+}
+
+/**
+ * Record non-blocking findings, skipping any message the run already holds with the same `source`,
+ * and any repeat within `messages` (D-12). Re-checking the same evidence, such as a resume that
+ * re-renders identical documents or a Validator repeating an issue, so adds nothing. A message
+ * recorded under another source does not count. Touches no filesystem — the caller commits.
+ */
+export function recordImportantFindingsOnce(
+  state: FeatureState,
+  stage: number,
+  source: string,
+  messages: string[]
+): FeatureState {
+  const known = new Set((state.importantFindings ?? []).filter(f => f.source === source).map(f => f.message));
+  const fresh = messages.filter(message => !known.has(message) && (known.add(message), true));
+  return recordImportantFindings(state, stage, source, fresh);
+}
+
+/**
+ * recordImportantFindingsOnce, reporting what it added (MINOR-3): `added` holds the messages newly
+ * recorded, in order, and is empty when every message was already held. The one place the
+ * "record once, then log and save only what is new" callers get their list from. Touches no
+ * filesystem: the caller logs and saves.
+ */
+export function addImportantFindingsOnce(
+  state: FeatureState,
+  stage: number,
+  source: string,
+  messages: string[]
+): { next: FeatureState; added: string[] } {
+  const before = state.importantFindings?.length ?? 0;
+  const next = recordImportantFindingsOnce(state, stage, source, messages);
+  return { next, added: (next.importantFindings ?? []).slice(before).map(finding => finding.message) };
 }
 
 /**
@@ -961,4 +1039,105 @@ export function reopenFeature(state: FeatureState, resume: Omit<ResumeRecord, 'r
   if (resume.grantedAttempts !== undefined) record.grantedAttempts = resume.grantedAttempts;
   state.resumeHistory = [...(state.resumeHistory ?? []), record];
   return state;
+}
+
+// ─── PR B-1 Stage 3 snapshot records (D-7) ───────────────────────────────────────────────────
+
+/** A full git object id: SHA-1 (40) or SHA-256 (64) lowercase hex. The one spelling of the rule (MINOR-4). */
+export const OBJECT_ID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+
+function assertObjectId(value: unknown, what: string): asserts value is string {
+  if (typeof value !== 'string' || !OBJECT_ID.test(value)) {
+    throw new TypeError(`${what} must be a full object id; got ${JSON.stringify(value)}.`);
+  }
+}
+
+function assertBuilderPhase(at: unknown): asserts at is BuilderPhase {
+  const phase = at as BuilderPhase | undefined;
+  const ok =
+    phase?.phase === 'stage3' ||
+    ((phase?.phase === 'validator-round' || phase?.phase === 'rework') && Number.isInteger(phase.round) && phase.round >= 1);
+  if (!ok) throw new TypeError(`A snapshot's phase must be stage3, or a validator round or rework with a round >= 1; got ${JSON.stringify(at)}.`);
+}
+
+/**
+ * Record one Stage 3 snapshot event (D-7), replacing the entry for the same phase if there is one
+ * (I-4): a gate re-evaluated on resume keeps exactly one entry for its phase (AC-85). A malformed
+ * record is refused, never stored. Touches no filesystem — the caller commits.
+ */
+export function recordStage3Snapshot(state: FeatureState, snapshot: Stage3Snapshot): FeatureState {
+  assertBuilderPhase(snapshot.at);
+  assertNonBlank(snapshot.takenAt, 'A snapshot time');
+  let record: Stage3Snapshot;
+  if (snapshot.status === 'written') {
+    if (!Number.isInteger(snapshot.n) || snapshot.n < 1) throw new RangeError(`A snapshot number must be a positive integer; got ${String(snapshot.n)}.`);
+    assertNonBlank(snapshot.ref, 'A snapshot ref');
+    assertObjectId(snapshot.commit, 'A snapshot commit');
+    assertObjectId(snapshot.tree, 'A snapshot tree');
+    record = {
+      status: 'written',
+      n: snapshot.n,
+      ref: snapshot.ref,
+      commit: snapshot.commit,
+      tree: snapshot.tree,
+      at: { ...snapshot.at },
+      takenAt: snapshot.takenAt,
+      ...(snapshot.reused ? { reused: true as const } : {})
+    };
+  } else if (snapshot.status === 'skipped') {
+    assertNonBlank(snapshot.reason, 'A skipped snapshot reason');
+    record = { status: 'skipped', reason: snapshot.reason, at: { ...snapshot.at }, takenAt: snapshot.takenAt };
+  } else {
+    throw new TypeError(`A snapshot status must be written or skipped; got ${JSON.stringify((snapshot as { status?: unknown }).status)}.`);
+  }
+
+  const existing = state.stage3Snapshots ?? [];
+  const index = existing.findIndex(entry => samePhase(entry.at, record.at));
+  state.stage3Snapshots = index === -1 ? [...existing, record] : existing.map((entry, i) => (i === index ? record : entry));
+  return state;
+}
+
+/**
+ * The `n` the snapshot of phase `at` gets (D-5): the `n` of a written entry for the same phase (a
+ * re-evaluated gate pass reuses it, covering a kill before or after the ref write), else one more
+ * than the highest written `n`, starting at 1.
+ */
+export function stage3SnapshotNumber(state: FeatureState, at: BuilderPhase): number {
+  const written = (state.stage3Snapshots ?? []).filter((entry): entry is WrittenStage3Snapshot => entry.status === 'written');
+  const same = written.find(entry => samePhase(entry.at, at));
+  if (same) return same.n;
+  return written.reduce((highest, entry) => Math.max(highest, entry.n), 0) + 1;
+}
+
+/** The agents that run after a Stage 3 gate passed: Stage 4's verification (IMPORTANT-1). */
+const VERIFYING_AGENTS: readonly string[] = ['06-test-verifier', '07-validator'];
+
+/**
+ * Whether the run has moved past the Stage 3 snapshot of phase `at` (IMPORTANT-1, resume by
+ * recorded completion): a `written` entry for `at` exists, AND a later step is on record — a Test
+ * Verifier or Validator invocation that started, or a Gate 2 evaluation recorded, at or after the
+ * snapshot was taken. Then that gate pass is complete, and a resume must not re-evaluate it (the
+ * tree now holds later agents' work). Without a later step — a kill after the ref write and before
+ * the next agent (AC-85) — it is false, and the gate is evaluated again.
+ */
+export function stage3SnapshotPassedBy(state: FeatureState, at: BuilderPhase): boolean {
+  const entry = (state.stage3Snapshots ?? []).find(
+    (snapshot): snapshot is WrittenStage3Snapshot => snapshot.status === 'written' && samePhase(snapshot.at, at)
+  );
+  if (!entry) return false;
+  const taken = Date.parse(entry.takenAt);
+  const after = (time: string) => Date.parse(time) >= taken;
+  return (
+    (state.agentInvocations ?? []).some(invocation => VERIFYING_AGENTS.includes(invocation.agent) && after(invocation.startedAt)) ||
+    (state.executionGateHistory ?? []).some(record => after(record.recordedAt))
+  );
+}
+
+/** The written snapshot with the highest `n`, or undefined (the B-2 seam, D-17). */
+export function latestStage3Snapshot(state: FeatureState): WrittenStage3Snapshot | undefined {
+  let latest: WrittenStage3Snapshot | undefined;
+  for (const entry of state.stage3Snapshots ?? []) {
+    if (entry.status === 'written' && (latest === undefined || entry.n > latest.n)) latest = entry;
+  }
+  return latest;
 }

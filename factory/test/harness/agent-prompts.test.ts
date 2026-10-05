@@ -118,6 +118,28 @@ describe('agent prompts', () => {
     expect(prompt).toContain('details.testing missing');
   });
 
+  it('AC-90 AC-91 the builder prompt says run only related tests, Gate 2 runs the full suite, and never commit, push, switch branches or write under .git/ or .factory/', () => {
+    // B2 is an instruction (AC-91): the prompt tells the builder; Gate 2's full suite enforces.
+    const relatedTests = 'Run only the tests related to the files you changed; the harness runs the full suite in Gate 2.';
+    const neverGit = 'Never commit, push or switch branches, and never write under .git/ or .factory/.';
+    const prompts = [
+      builderPrompt(ctx, 'backend', 1),
+      builderPrompt(ctx, 'frontend', 1),
+      builderPrompt(ctx, 'backend', 2, { kind: 'test', error: 'boom' }),
+      builderPrompt(ctx, 'frontend', 3, { kind: 'schema', error: 'bad' })
+    ];
+
+    for (const prompt of prompts) {
+      const lines = prompt.split('\n');
+      expect(lines).toContain(relatedTests);
+      expect(lines).toContain(neverGit);
+      // Both lines follow the scope line, before any briefing.
+      const scope = lines.findIndex(line => /^(Your scope ends at the API contract|The backend is already built)/.test(line));
+      expect(scope).toBeGreaterThanOrEqual(0);
+      expect(lines.slice(scope + 1, scope + 3)).toEqual([relatedTests, neverGit]);
+    }
+  });
+
   it('the Test Verifier prompt says the harness renders TEST_REPORT.md and the agent must not write one', () => {
     onDisk('USER_STORY.md', 'TECHNICAL_BRIEF.md', 'BACKEND_SUMMARY.md');
 

@@ -2,8 +2,9 @@
 
 An 8-agent chain that takes a feature description to tested, validated code, behind gates that
 are code rather than prose. This document describes what the program does in this version
-(Phase A, PR A-2). Where the code and this file disagree, the code is right and this file is a
-bug: `factory/test/contracts/doc-drift.test.ts` checks the claims below against the code.
+(Phase B, PR B-1). Where the code and this file disagree, the code is right and this file is a
+bug: `factory/test/contracts/doc-drift.test.ts` checks the claims below against the code. What
+comes next is in [docs/ROADMAP.md](../../docs/ROADMAP.md).
 
 ---
 
@@ -76,8 +77,13 @@ point outside `.factory/`.
 `state.json`, and only the next commands that apply to the run's state: approve / reject / close
 for a paused run, resume (with `--grant-attempts` when a builder is out of attempts) and close for
 an escalated one, consolidate for a SUCCESS run, nothing for a closed one. Everything printed is
-made terminal-safe: control characters and escape sequences in agent text, documents or diffs are
-shown as visible `\xNN` codes, never interpreted.
+made terminal-safe, never interpreted: control characters and escape sequences in agent text,
+documents or diffs are shown as visible `\xNN` codes, and every character of the shared invisible
+and direction-control set (U+061C, U+200B–U+200F, U+2028–U+202E, U+2066–U+2069 and U+FEFF; see
+[Invisible and direction-control characters](#invisible-and-direction-control-characters)) as
+`\u{XXXX}` (uppercase hex, at least four digits). A backslash is never escaped, so text that is
+already escaped, or a literal backslash, prints as it is. A checkpoint's hash is taken over its
+presented text, before this terminal escaping.
 
 ---
 
@@ -119,8 +125,16 @@ Feature description
 ```
 
 **SUCCESS means: the Stage 4 gate passed and CHECKPOINT 3 was approved.** The run stays in
-Stage 4. The factory makes no pull request, commit or push: what happens to an approved change
-is a human step outside the program.
+Stage 4. The factory never touches your branch, index or working tree, never pushes, and writes git objects only under `refs/factory/<id>/`.
+Those objects are its own snapshots (see [Snapshots after Stage 3](#snapshots-after-stage-3)).
+What happens to an approved change next (a commit on your branch, a push, a review) is yours to
+do; the factory does none of it.
+
+Builders are told to run only the tests related to their change; that is an instruction, not
+enforced, and nothing checks which tests a builder ran. Gate 2's full suite is the enforcement.
+Builders are told never to commit, push, switch branches or write under `.git/` or `.factory/`.
+That too is an instruction; the HEAD check before each snapshot detects a commit or a branch
+switch (`HEAD_MOVED`).
 
 Any agent from 01 to 05 that returns `ESCALATE` (01 to 03 also on `FAIL`) is believed: the run
 escalates. Any output that fails its schema escalates, except a builder's, which is retried.
@@ -141,6 +155,33 @@ A checkpoint presents whole documents, never an agent's summary of them, and an 
 recorded, and saved before the next agent runs, with the SHA-256 of the exact text presented. A
 document that cannot be presented (missing, empty, a symlink) escalates the run without asking
 anyone. A story or brief that fails its part of the Stage 2 gate is never presented.
+
+**Invisible characters in what is presented.** A checkpoint is built from parts: its documents
+(`USER_STORY.md`, `TECHNICAL_BRIEF.md`, `FILE_LIST.md`, `VALIDATION_REPORT.md`) and, at
+CHECKPOINT 3, `the IMPORTANT findings`, `the snapshot notes` and `the change`. When no part holds
+a character of the shared set (see
+[Invisible and direction-control characters](#invisible-and-direction-control-characters)), the
+text is exactly what it was before PR B-1. When any part does, the presentation starts with a
+warning banner, "WARNING: this presentation contains <N> invisible or direction-control
+character(s). Each is shown below as \u{XXXX}; the stored documents are unchanged.", then one
+line per occurrence, `- <part>, line <L>: U+XXXX`, with the line counted within that part, then
+`---`. Below the banner every such character is shown escaped, as `\u{XXXX}`. The SHA-256 the
+approval binds to is taken over this escaped text, banner included: exactly what the approver
+was shown. A real character gets a banner line and text that was typed as `\u{XXXX}` gets none,
+so swapping one for the other alone always changes the text and the hash. Builder source code
+in the CHECKPOINT 3 change is escaped the same way and its occurrences are listed as `the change`
+(lines counted within the change); a source file raises no IMPORTANT finding, the banner is its
+warning.
+
+**A run paused before PR B-1** has a hash taken over unescaped text. If its documents hold no
+character of the set, nothing changed and `--approve` works. If they hold one, the presentation
+is now different, so `--approve` is refused `ARTIFACT_CHANGED` with nothing written: the message
+says the presentation changed in this version and tells you to close the run with `--close <id>`.
+An approved checkpoint re-checked on resume is refused the same way
+(`APPROVED_ARTIFACT_CHANGED`, same message). For a run paused at CHECKPOINT 3 before PR B-1,
+`--approve 3` can record a `document-check` IMPORTANT finding after the approval: the approval is
+recorded first, and the harness documents are re-rendered after it, which now runs the document
+check. Such a finding was not shown at the approval.
 
 **The answer.** At each checkpoint the human approves, rejects or pauses:
 - On a TTY the CLI prints the presented text and asks
@@ -165,9 +206,70 @@ What each answer does:
 CHECKPOINT 3 shows `git diff` from that commit (committed and uncommitted changes alike) plus
 every untracked, non-ignored file, with `.factory/` excluded. Changes that were already
 uncommitted when the run started appear too. An untracked file is listed with its size and
-SHA-256, and its text is shown unless it is binary or larger than 256 KiB. Git is only ever
-asked to read (`rev-parse`, `diff`, `ls-files`). Outside a git work tree the change is instead a
-manifest of the files the builders claimed, labelled as not a git diff.
+SHA-256, and its text is shown unless it is binary or larger than 256 KiB. Outside a git work
+tree the change is instead a manifest of the files the builders claimed, labelled as not a git
+diff. The harness runs exactly these git subcommands and no others: the reads `rev-parse`, `diff`
+and `ls-files`, and the snapshot writes `add`, `write-tree`, `commit-tree` and `update-ref`
+(below), all from one function in `factory/harness/change-diff.ts`.
+
+### Snapshots after Stage 3
+
+Every time the Stage 3 gate passes (in Stage 3, in each validator round and in each CHECKPOINT 3
+rework), the harness writes a snapshot of the project before the run moves on: a private git
+commit at `refs/factory/<id>/stage3-<n>`, with `n` counting from 1 in each run.
+
+- **What it holds:** the working tree as CHECKPOINT 3 sees it. That is every non-ignored file in
+  the project, tracked or untracked, plus the tracked files that are ignored (as your index lists
+  them, if they still exist), with `.factory/` excluded. The tree's root is the project directory
+  (the run's cwd), also when that is a subdirectory of the repository. Its parent is HEAD; on a
+  branch with no commit yet it is a root commit. Files outside a sparse checkout are absent.
+- **How it is written:** with git plumbing only. `add` and `write-tree` build the tree in a
+  temporary index in its own temporary directory outside the repository, never `.git/index`;
+  `commit-tree` makes the commit and a compare-and-swap `update-ref` moves the ref. Every git call
+  runs with hooks off (`core.hooksPath=/dev/null`, which a repository's own `core.hooksPath`
+  cannot override), no signing, no reflog and stdin closed, so no hook runs and nothing waits for
+  input. The author and committer are the harness's own identity,
+  `Feature Factory <feature-factory@localhost.invalid>`, so no git identity needs to be configured.
+  Filter drivers (git-lfs, say) do run during `add`, as they do during the CHECKPOINT 3 `git diff`:
+  an accepted risk (A-2 MINOR-3 in [docs/ROADMAP.md](../../docs/ROADMAP.md)). A huge non-ignored tree
+  (an unignored `node_modules/`) makes the snapshot slow, as it makes CHECKPOINT 3 slow.
+- **Recorded before the next agent runs:** each snapshot is saved in `state.json`
+  (`stage3Snapshots`: `n`, ref, commit, tree, the phase and the time) before anything else happens.
+- **Idempotent on resume:** a gate re-evaluated in the same phase (Stage 3, validator round r or
+  rework r) reuses that phase's `n`. An unchanged tree with the same parent reuses the existing
+  commit; a changed tree replaces the ref. Only a different phase takes the next `n`. A CHECKPOINT 3
+  rework is the exception once the run has moved past its gate: when a `06-test-verifier` or
+  `07-validator` invocation that started, or a Gate 2 record, exists at or after the time of the
+  rework's snapshot, a resume does not re-run the rework's Stage 3 gate and keeps `stage3-<k>` as
+  it is. Before that, including a kill right after the ref write, the gate is evaluated again as
+  above. Known limit: an invocation is recorded only when it returns, so a crash or API error
+  during the Test Verifier leaves no record, and a resume re-takes the rework snapshot with the
+  Test Verifier's partial writes in it. PR B-2 closes this
+  ([docs/ROADMAP.md](../../docs/ROADMAP.md)).
+- **Local:** refs under `refs/factory/` are not pushed by a normal push (a mirror push would push
+  them). A snapshot holds every non-ignored file, so a stray `.env` that is not in `.gitignore`
+  ends up in a local git object, just as it already appears in the CHECKPOINT 3 change.
+  Snapshots accumulate; nothing deletes them yet.
+- **HEAD must not move.** Before anything is written, HEAD is compared with the HEAD recorded when
+  the run started: the commit, and the branch when one was recorded (a run started before PR B-1,
+  or on a branch with no commit, has none, so only the commit is compared). If it moved (a commit,
+  a branch switch, an operator's commit between a pause and the resume), nothing is written and
+  the run escalates `HEAD_MOVED` (CRITICAL), naming the recorded and the current HEAD. Restore
+  HEAD and `--resume`, or `--close` the run. This check is read-only: it detects a move after the
+  fact and prevents none (sandboxing the builders is planned for PR B-3).
+- **A write that fails** escalates `SNAPSHOT_FAILED` (CRITICAL) with git's error text, and
+  nothing is recorded. Fix the cause and `--resume`: the gate and its snapshot run again. Neither
+  escalation invalidates a builder's PASS.
+- **Outside a git work tree** no snapshot is attempted: `state.json` records a skipped snapshot
+  (`not a git work tree`) and the run goes on. A run recorded without a change base (started
+  before A-2) records a skip too.
+- **At CHECKPOINT 3**, a run with snapshot records shows `## Snapshots (<n>)` between the findings
+  and the change: one line per snapshot or skip, "No snapshot was taken: not a git work tree."
+  when that applies, and a note on the changes that were already in the tree when the run started:
+  "The snapshots and the change include N path(s) that were already changed or untracked when the
+  run started:" with the list, nothing when there were none, or, for a run started before PR B-1,
+  which did not record them, that it is unknown. A run with no snapshot record shows no such
+  section.
 
 ---
 
@@ -179,7 +281,20 @@ MANUAL_STOP. Only SUCCESS and MANUAL_STOP are finished for good.
 
 ### Starting a run
 
-A fresh start first moves every finished run directory (SUCCESS, MANUAL_STOP, and old directories
+Before anything else, a fresh start and a resume alike are refused `FACTORY_DIR_CASE_CONFLICT`
+when the project directory holds an entry, file or directory, whose name differs from `.factory`
+only in letter case (`.Factory`, say). Git's `:(exclude).factory` pathspec does not exclude such
+an entry, even with `core.ignorecase` on (measured on macOS, APFS, git 2.39), so harness state
+would enter the CHECKPOINT 3 change and the snapshots. The refusal names the absolute path of
+every such entry; nothing is read from the run directory and nothing is written. Rename or remove
+the entry, then run again. On a CLI `--resume` it is the first check, before the run is looked
+up. `--close` and `--consolidate` are not checked.
+
+A fresh start needs a feature description: a missing or blank one is refused
+`DESCRIPTION_REQUIRED` ("A new run needs a feature description (--feature).") before anything is
+written.
+
+A fresh start then moves every finished run directory (SUCCESS, MANUAL_STOP, and old directories
 with no `state.json`), contents intact, into `.factory/_archive/<id>/`. It then refuses to start
 while any ACTIVE, PAUSED or ESCALATED run exists, naming each one with its resume and close
 commands; unfinished runs are never moved. A `state.json` that cannot be read or parsed also
@@ -217,7 +332,11 @@ A plain `--resume <id>` of a run that ended on a rejection reopens it and starts
   is) run again, backend first, briefed with the notes, each with its own 3-attempt budget. Their
   outputs are merged with the earlier ones. Then Gate 1, the Stage 3 gate, Gate 1.5, the Test
   Verifier, Gate 2 and the Validator run again (validator rounds are not reset), then the Stage 4
-  gate, then CHECKPOINT 3 is presented again with a new hash.
+  gate, then CHECKPOINT 3 is presented again with a new hash. On a resume of the rework, its
+  Stage 3 gate and snapshot are kept, not re-run, once a Test Verifier or Validator invocation, or
+  a Gate 2 record, exists at or after the snapshot's time; before that (a kill after the ref write,
+  or before the Test Verifier) the gate is evaluated again. A crash or API error during the Test
+  Verifier records nothing, so a resume re-takes the rework snapshot; PR B-2 closes this.
 
 ### Resuming
 
@@ -240,7 +359,11 @@ An archived run cannot be resumed (it is finished), and an unknown id is refused
   flight is spent, and a run killed during its 2nd attempt gets exactly one more. A builder that
   exhausted its attempts is refused a plain resume; `--grant-attempts <n>` (1-3) gives exactly
   that builder `n` more attempts in exactly the phase it ran out in (Stage 3, a validator round or
-  a CHECKPOINT 3 rework). A grant on any other run is refused.
+  a CHECKPOINT 3 rework). A grant on any other run is refused. A builder record written before
+  A-2 names no phase, so its phase is inferred from the escalation: Stage 3 from an escalation in
+  stage 3; validator round r from one in stage 4, where r is the number of validator rounds the
+  run completed, when that is at least 1. When nothing is inferred (stage 4 with no completed
+  round), the run is not treated as out of attempts, as before.
 - An unfinished validator round re-enters at its builder fix, then re-runs its gates.
 - An ESCALATED run is reopened (IN_PROGRESS, the escalation marked resolved). A killed ACTIVE run
   just continues.
@@ -251,13 +374,19 @@ An archived run cannot be resumed (it is finished), and an unknown id is refused
   approved. Restore it, or close the run.
 - A run whose CHECKPOINT 3 was approved writes the baseline and finishes SUCCESS without asking
   again. A resume never re-captures the change base the CHECKPOINT 3 diff starts from.
-- Agents are briefed with the description saved in the run. A run recorded before descriptions
-  were saved cannot be resumed without `--feature` (the resume is refused, with nothing written);
-  given, that description is saved in the run when the resume continues it, so later resumes do
-  not need it (a plain `--resume` of a paused run changes nothing, so it saves nothing either).
+- Agents are briefed with the description saved in the run. The library, not the CLI, makes
+  every description refusal, and only after the run-state refusals (a finished run, a missing
+  grant), which win. A `--feature` that differs from the saved description is refused
+  `DESCRIPTION_MISMATCH` ("--feature "<given>" does not match the description saved in run <id>
+  ("<saved>"). Omit --feature to resume it as it was started."). A run recorded before
+  descriptions were saved cannot be resumed without `--feature`: it is refused
+  `DESCRIPTION_REQUIRED`. A blank `--feature` counts as none. Given, the description is saved in
+  the run when the resume continues it, so later resumes do not need it (a plain `--resume` of a
+  paused run changes nothing, so it saves nothing either).
 
-Every refusal (a finished run, a missing grant, the wrong checkpoint, a changed artifact) is made
-before anything is written, so `state.json` stays byte-identical, and exits 1.
+Every refusal (a `.factory` letter-case look-alike, a finished run, a missing grant, a
+description refusal, the wrong checkpoint, a changed artifact) is made before anything is
+written, so `state.json` stays byte-identical, and exits 1.
 
 ### Closing
 
@@ -338,18 +467,40 @@ output.
 `execution-gates.ts` runs the project's own scripts, one after another: `npm run build`,
 `npm run test`, `npm run dev`.
 - Each command runs in its own process group with a Node-side timeout (test 30 min, build
-  15 min, dev 15 s). On timeout the whole group is killed. POSIX only.
-- Test counts are parsed from **stdout and stderr together** (Jest, Vitest, Mocha summaries).
-  Output with no recognisable counts is "no tests detected" and blocks.
-- **Tests (CRITICAL):** no `test` script, a non-zero exit, a timeout, no counts, any failing
-  test, or no passing test blocks. Pass rate is `passed / (passed + failed)`.
+  15 min, dev 15 s). On timeout the whole group is killed (SIGTERM, then SIGKILL). POSIX only.
+- **The process group is always killed when a command settles,** for whatever reason, so a
+  grandchild it left running (a daemonised server, a watcher) does not outlive it. A command
+  settles when its shell has exited and its output pipes have closed; if a grandchild still holds
+  the pipes, the group is killed at most 2 s after the shell's exit, and any output written after
+  that is lost. A process that calls `setsid()` has left the process group and escapes this kill.
+- **Output is bounded:** each stream (stdout, stderr) keeps at most 256 Ki characters, the first
+  65536 and the last 196608, with a visible marker in between: "[... Gate 2 kept the first 65536
+  and the last 196608 characters of this stream; <k> characters were omitted ...]". The bound
+  only limits what the report shows people. The counts, the failing test names and the dev
+  server's error line come from a scan of every line as it streams, whatever the bound: the last
+  64 summary lines per stream, the first 500 failing test names per stream, and the first dev
+  error line. A line split across two chunks is matched once it is complete; a line longer than
+  16 Ki characters is cut for the scan.
+- **Test counts are parsed per stream and chosen by runner marker.** In each of stdout and stderr,
+  each runner family's last summary is a candidate: Jest `Tests:`, Vitest `Tests … (N)`, Mocha
+  `N passing` / `failing` / `pending`. A candidate is marked when its family's marker is in the
+  same stream (Jest `Test Suites:`, Vitest `Test Files`; Mocha's `passing` line is its own). The
+  marked candidates are used when there are any, otherwise all of them. If they agree, those are
+  the counts. If they disagree, Gate 2 never guesses: it blocks with "ambiguous test summary:
+  <family> on <stream>: <counts>; …". Output with no recognisable counts is "no tests detected"
+  and blocks.
+- **Tests (CRITICAL):** no `test` script, a non-zero exit, a timeout, no counts, an ambiguous
+  summary, any failing test, or no passing test blocks. Pass rate is `passed / (passed + failed)`.
 - **Skipped and todo tests** do not count against the pass rate; when there are any, Gate 2
   warns, and the warning is recorded as an IMPORTANT finding.
 - **Build and dev:** a missing script is skipped with a warning (recorded as a finding). When the
   script exists and fails, it is CRITICAL and blocks. The build fails on a non-zero exit or a
   timeout. The dev server is the opposite: still running cleanly when the 15 s window ends is the
   pass condition (it is then stopped); it fails if it exits non-zero before then or prints an
-  error line.
+  error line, even when it exits 0. A dev script that exits 0 before the window ends, with no
+  error line, is SKIPPED: "the dev script exited with code 0 after <s>, before the <window> window
+  ended; a dev server that is not running was not verified". Like any skip it is a warning,
+  recorded as an IMPORTANT finding; it neither passes the dev check nor blocks.
 - If the orchestrator is interrupted (SIGINT, SIGTERM) or exits while a Gate 2 command is
   running, that command's whole process group is killed, and Ctrl-C still stops the run.
 
@@ -464,8 +615,8 @@ once.
 
 Each run has a directory, `<cwd>/.factory/<id>/`. It holds:
 - `state.json`: the run record, saved atomically after every transition a resume could restart
-  from (each agent invocation and step, attempt, loop-back, approval, pause, rejection, grant and
-  stage advance). A run that cannot save its record stops.
+  from (each agent invocation and step, attempt, loop-back, approval, pause, rejection, grant,
+  snapshot and stage advance). A run that cannot save its record stops.
 - Documents written by read-only agents: they return the text and the harness writes it here:
   `RESEARCHER_REPORT.md`, `USER_STORY.md`, `TECHNICAL_BRIEF.md`, `FILE_LIST.md`,
   `VALIDATION_REPORT.md`; and, after `--consolidate`, `CONSOLIDATION_REPORT.md` and `PATTERNS.md`.
@@ -499,6 +650,28 @@ Each prompt names, by absolute path, the upstream documents that exist in the ru
 every other directory under `.factory/`; it belongs to an unrelated run. The one exception is
 `--consolidate`: 08 may read the directory of the run it consolidates (which may be archived), and
 nothing else under `.factory/`.
+
+### Invisible and direction-control characters
+
+Some characters change how text reads without being visible: a right-to-left override can make a
+line read differently from what it is, and a zero-width character can hide inside a word. The
+shared set is U+061C, U+200B–U+200F, U+2028–U+202E, U+2066–U+2069 and U+FEFF. It is spelled once,
+as numeric ranges, in `factory/harness/direction-characters.ts`; the terminal output, the document
+check and the checkpoint presentation all import it, so they cannot disagree.
+
+**Documents are stored exactly as written,** characters included: the harness never edits an
+agent's words. After every document write (the agents' documents, the harness-rendered ones, a
+pre-supplied spec's documents, and the two `--consolidate` documents) the harness reads the file
+back from disk and records one IMPORTANT finding, source `document-check`, for each document that
+holds a character of the set, naming the document, the line and the code point:
+`<NAME> contains invisible or direction-control characters (stored exactly as written): line 3: U+202E; line 7: U+200B, U+2066`.
+It lists at most 20 occurrences, then `; and <k> more`. A finding already recorded is not
+recorded again, so a resume that renders the same document again adds nothing. A document that
+cannot be read back (missing, a symlink, a directory) is never counted as clean: the check throws,
+and the run escalates (in a run) or `--consolidate` fails with exit 1. The operator-only
+`smoke-researcher` script, which has no run, is not checked. Checkpoints show these characters
+escaped under a warning banner (see [Checkpoints](#checkpoints)), and the terminal shows them as
+`\u{XXXX}`.
 
 ---
 
