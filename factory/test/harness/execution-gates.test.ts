@@ -17,22 +17,46 @@ import * as ts from 'typescript';
 
 import {
   auditExecution,
+  createBoundedOutput,
+  createLineScanner,
   DEFAULT_EXECUTION_TIMEOUTS,
   DEV_SERVER_ERROR_PATTERN,
   ExecutionAudit,
   ExecutionResult,
   killTrackedProcessGroups,
+  OUTPUT_HEAD_CHARS,
+  OUTPUT_TAIL_CHARS,
   parseFailedTestNames,
   parseTestOutput,
   runShellCommand,
+  runTestSuite,
+  selectTestSummary,
   trackedProcessGroups,
-  validateExecutionGate
+  validateExecutionGate,
+  verifyDevServer
 } from '../../harness/execution-gates';
 import { tempProject, TempProject } from '../fixtures/harness-run';
 
 const TEST_TIMEOUT = 20_000;
-/** Short enough to keep the suite fast; long enough for `npm run` to start a node script. */
+/**
+ * The dev window for tests whose dev script only has to be up (or absent) when the window ends.
+ * Nothing in them depends on the script having started inside it, so it can stay short.
+ */
 const DEV_TIMEOUT_MS = 1500;
+/**
+ * The window for a script that must have STARTED and printed or spawned something before the window
+ * ends, and then stays up (so every run pays the whole window). Under CPU load `npm run` alone can
+ * take seconds to start a node script: 1.5 s made these tests flaky (B-1 step 3 FLAKE).
+ */
+const STARTUP_WINDOW_MS = 5_000;
+/**
+ * The window for a script that must EXIT (or print) before the window ends and then exits: the
+ * command settles when it exits, so a long window costs nothing and no start-up delay under load
+ * can reach it.
+ */
+const EXIT_WINDOW_MS = 30_000;
+/** Jest's limit for a test that uses EXIT_WINDOW_MS. */
+const EXIT_TEST_TIMEOUT = 90_000;
 
 let project: TempProject;
 
@@ -252,9 +276,10 @@ describe('execution gate', () => {
     async () => {
       // The dev script starts a grandchild that ignores SIGTERM, so stopping it needs the
       // process-group kill and the SIGKILL escalation, not just a kill of the shell.
+      // No test script: the test check then fails at once without spawning anything, so the
+      // elapsed time below is the dev window plus the kill grace, not also a test run under load.
       writeProject(
         {
-          test: GREEN_TEST,
           dev: [
             `const { spawn } = require('child_process');`,
             `const fs = require('fs');`,
@@ -269,7 +294,7 @@ describe('execution gate', () => {
       );
 
       const started = Date.now();
-      const audit = await auditExecution(project.dir, { devTimeoutMs: DEV_TIMEOUT_MS });
+      const audit = await auditExecution(project.dir, { devTimeoutMs: STARTUP_WINDOW_MS });
       const elapsed = Date.now() - started;
 
       const dev = result(audit, 'dev-server');
@@ -292,7 +317,7 @@ describe('execution gate', () => {
       writeProject({ test: `require('fs').writeFileSync('test.pid', String(process.pid)); setInterval(() => {}, 1000);` });
 
       const started = Date.now();
-      const audit = await auditExecution(project.dir, { testTimeoutMs: DEV_TIMEOUT_MS, devTimeoutMs: DEV_TIMEOUT_MS });
+      const audit = await auditExecution(project.dir, { testTimeoutMs: STARTUP_WINDOW_MS, devTimeoutMs: DEV_TIMEOUT_MS });
       const elapsed = Date.now() - started;
       const decision = validateExecutionGate(audit);
 
@@ -312,7 +337,7 @@ describe('execution gate', () => {
     async () => {
       writeProject({ test: GREEN_TEST, dev: `console.error('Error: listen EADDRINUSE :::3000'); process.exit(1);` });
 
-      const audit = await auditExecution(project.dir, { devTimeoutMs: DEV_TIMEOUT_MS });
+      const audit = await auditExecution(project.dir, { devTimeoutMs: EXIT_WINDOW_MS });
       const decision = validateExecutionGate(audit);
 
       const dev = result(audit, 'dev-server');
@@ -322,7 +347,7 @@ describe('execution gate', () => {
       expect(decision.canAdvance).toBe(false);
       expect(decision.blockers.some(b => /Dev server/.test(b))).toBe(true);
     },
-    TEST_TIMEOUT
+    EXIT_TEST_TIMEOUT
   );
 
   // Added by the Test Verifier. The test above makes BOTH failure conditions true at once (a
@@ -333,7 +358,7 @@ describe('execution gate', () => {
     async () => {
       writeProject({ test: GREEN_TEST, dev: `console.log('starting dev server'); process.exit(3);` });
 
-      const audit = await auditExecution(project.dir, { devTimeoutMs: DEV_TIMEOUT_MS });
+      const audit = await auditExecution(project.dir, { devTimeoutMs: EXIT_WINDOW_MS });
       const decision = validateExecutionGate(audit);
 
       const dev = result(audit, 'dev-server');
@@ -345,7 +370,7 @@ describe('execution gate', () => {
       expect(decision.canAdvance).toBe(false);
       expect(decision.blockers.some(b => /Dev server/.test(b))).toBe(true);
     },
-    TEST_TIMEOUT
+    EXIT_TEST_TIMEOUT
   );
 
   it(
@@ -360,7 +385,7 @@ describe('execution gate', () => {
         ].join('\n')
       });
 
-      const audit = await auditExecution(project.dir, { devTimeoutMs: DEV_TIMEOUT_MS });
+      const audit = await auditExecution(project.dir, { devTimeoutMs: STARTUP_WINDOW_MS });
       const decision = validateExecutionGate(audit);
 
       const dev = result(audit, 'dev-server');
@@ -574,4 +599,372 @@ describe('Gate 2 child processes do not outlive the orchestrator (IMPORTANT-3)',
     },
     TEST_TIMEOUT
   );
+});
+
+/** An audit holding just these results, as auditExecution would assemble it. */
+function auditOf(results: ExecutionResult[]): ExecutionAudit {
+  return {
+    stage: 6,
+    timestamp: new Date(0).toISOString(),
+    projectRoot: project.dir,
+    results,
+    allPassed: results.every(r => r.passed),
+    failedTests: [],
+    buildErrors: [],
+    warnings: [],
+    summary: ''
+  };
+}
+
+/** Feed `text` to a fresh line scanner in `chunkSize`-character chunks and return its scan. */
+function scan(text: string, chunkSize = 7) {
+  const scanner = createLineScanner();
+  for (let i = 0; i < text.length; i += chunkSize) scanner.push(text.slice(i, i + chunkSize));
+  return scanner.end();
+}
+
+/** The summary lines the gate would hand to selectTestSummary for these two streams. */
+const summaryLines = (stdout: string, stderr: string) => ({
+  stdout: scan(stdout).summaryLines,
+  stderr: scan(stderr).summaryLines
+});
+
+/** A node script body that writes `text` to stdout or stderr and lets node flush it before exiting. */
+const writes = (stream: 'stdout' | 'stderr', text: string) => `process.${stream}.write(${JSON.stringify(text)});`;
+
+/** Filler that matches no summary, failure or error pattern. */
+const filler = (chars: number) => ('x'.repeat(99) + '\n').repeat(Math.ceil(chars / 100));
+
+describe('Gate 2 fixes (PR B-1)', () => {
+  it(
+    'AC-92 a dev script that exits 0 before the dev window ends is SKIPPED with a warning (an IMPORTANT finding) and neither passes nor blocks',
+    async () => {
+      writeProject({ test: GREEN_TEST, dev: `console.log('compiled once, nothing left to do');` });
+
+      const audit = await auditExecution(project.dir, { devTimeoutMs: EXIT_WINDOW_MS });
+      const decision = validateExecutionGate(audit);
+
+      const dev = result(audit, 'dev-server');
+      expect(dev.timedOut).toBe(false);
+      expect(dev.exitCode).toBe(0);
+      expect(dev.status).toBe('SKIPPED');
+      expect(dev.failureReason).toBeUndefined();
+      expect(dev.skipReason).toMatch(
+        /^the dev script exited with code 0 after \d+(\.\d)?s, before the 30s window ended; a dev server that is not running was not verified$/
+      );
+      // Neither blocks...
+      expect(decision.canAdvance).toBe(true);
+      expect(decision.blockers).toEqual([]);
+      // ...nor passes silently: it is a warning, which the orchestrator records as an IMPORTANT
+      // finding (recordFindings(4, 'gate-2', decision.warnings)).
+      const warning = decision.warnings.find(w => w.startsWith('dev-server check skipped: the dev script exited with code 0'));
+      expect(warning).toBeDefined();
+      expect(audit.warnings).toContain(warning);
+    },
+    EXIT_TEST_TIMEOUT
+  );
+
+  it(
+    'AC-92 a dev script that exits 0 but printed an error line still FAILS',
+    async () => {
+      writeProject({ test: GREEN_TEST, dev: `console.error('Error: config file not found');` });
+
+      const dev = await verifyDevServer(project.dir, { devTimeoutMs: EXIT_WINDOW_MS });
+
+      expect(dev.exitCode).toBe(0);
+      expect(dev.status).toBe('FAILED');
+      expect(dev.failureReason).toMatch(/reported an error: Error: config file not found/);
+    },
+    EXIT_TEST_TIMEOUT
+  );
+
+  /**
+   * The script starts a grandchild in its own process group (the default for a non-detached
+   * spawn) that would outlive the test (10 minutes), records its pid, and exits normally.
+   */
+  const grandchildScript = (stdio: 'ignore' | 'inherit', ownOutput: string) =>
+    [
+      `const { spawn } = require('child_process');`,
+      `const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 600000)'], { stdio: '${stdio}' });`,
+      `child.unref();`,
+      `require('fs').writeFileSync('grandchild.pid', String(child.pid));`,
+      ownOutput
+    ].join('\n');
+
+  it.each([
+    {
+      kind: 'test',
+      script: grandchildScript('ignore', GREEN_TEST),
+      run: () => runTestSuite(project.dir, { testTimeoutMs: EXIT_WINDOW_MS })
+    },
+    {
+      kind: 'dev',
+      // stdio 'inherit': the grandchild holds the gate's pipes open after the shell has exited.
+      script: grandchildScript('inherit', `console.log('ready');`),
+      run: () => verifyDevServer(project.dir, { devTimeoutMs: EXIT_WINDOW_MS })
+    }
+  ])(
+    'AC-93 a $kind command that exits normally leaves no grandchild of its process group running once it settles',
+    async ({ kind, script, run }) => {
+      writeProject({ [kind]: script });
+
+      const outcome = await run();
+
+      // It settled because the shell exited (a grandchild holding the pipes is waited for at most
+      // the exit grace), not because the window ran out, nor because the grandchild ended.
+      expect(outcome.timedOut).toBe(false);
+      expect(outcome.duration).toBeLessThan(EXIT_WINDOW_MS);
+      expect(outcome.exitCode).toBe(0);
+      const pid = Number(readFileSync(join(project.dir, 'grandchild.pid'), 'utf-8'));
+      expect(pid).toBeGreaterThan(0);
+      // The SIGKILL is sent on settle; poll for the process to be gone, with a generous deadline.
+      expect(await waitUntil(() => !isAlive(pid), 10_000)).toBe(true);
+    },
+    EXIT_TEST_TIMEOUT
+  );
+
+  it('AC-94 createBoundedOutput keeps at most OUTPUT_HEAD_CHARS + OUTPUT_TAIL_CHARS per stream with a visible truncation marker', () => {
+    expect([OUTPUT_HEAD_CHARS, OUTPUT_TAIL_CHARS]).toEqual([65536, 196608]);
+
+    // Small output is kept whole, with no marker.
+    const small = createBoundedOutput();
+    small.push('hello ');
+    small.push('world\n');
+    expect(small.text()).toBe('hello world\n');
+    expect(small.omitted()).toBe(0);
+
+    // Output exactly at the bound is kept whole too.
+    const exact = createBoundedOutput();
+    const exactText = 'a'.repeat(OUTPUT_HEAD_CHARS) + 'b'.repeat(OUTPUT_TAIL_CHARS);
+    exact.push(exactText);
+    expect(exact.text()).toBe(exactText);
+
+    // 1 Mi characters in uneven chunks: the first HEAD and the last TAIL survive, with the marker.
+    const total = 1024 * 1024;
+    const input = Array.from({ length: total }, (_, i) => String.fromCharCode(97 + (i % 26))).join('');
+    const big = createBoundedOutput();
+    let at = 0;
+    for (let size = 1; at < input.length; size = (size * 7 + 13) % 50_000 + 1) {
+      big.push(input.slice(at, at + size));
+      at += size;
+    }
+    const omitted = total - OUTPUT_HEAD_CHARS - OUTPUT_TAIL_CHARS;
+    const marker =
+      `\n[... Gate 2 kept the first ${OUTPUT_HEAD_CHARS} and the last ${OUTPUT_TAIL_CHARS} characters of this stream; ` +
+      `${omitted} characters were omitted ...]\n`;
+    expect(big.omitted()).toBe(omitted);
+    expect(big.text()).toBe(input.slice(0, OUTPUT_HEAD_CHARS) + marker + input.slice(-OUTPUT_TAIL_CHARS));
+    expect(big.text().length).toBe(OUTPUT_HEAD_CHARS + OUTPUT_TAIL_CHARS + marker.length);
+  });
+
+  it(
+    'AC-94 a command\'s stdout and stderr in its result are each bounded, with the marker',
+    async () => {
+      const bound = OUTPUT_HEAD_CHARS + OUTPUT_TAIL_CHARS;
+      writeProject({ build: writes('stdout', filler(bound * 2)) + writes('stderr', filler(bound * 2)) });
+
+      const outcome = await runShellCommand('npm run build', project.dir, EXIT_WINDOW_MS);
+
+      expect(outcome.exitCode).toBe(0);
+      for (const text of [outcome.stdout, outcome.stderr]) {
+        expect(text).toMatch(/\n\[\.\.\. Gate 2 kept the first 65536 and the last 196608 characters of this stream; \d+ characters were omitted \.\.\.\]\n/);
+        expect(text.length).toBeLessThan(bound + 200);
+      }
+    },
+    EXIT_TEST_TIMEOUT
+  );
+
+  const BEYOND_HEAD = filler(OUTPUT_HEAD_CHARS + 1000);
+  const BEYOND_TAIL = filler(OUTPUT_TAIL_CHARS + 1000);
+
+  it.each<{ name: string; scripts: Record<string, string>; check: () => Promise<void> }>([
+    {
+      name: 'Mocha counts printed before more failure detail than the bound are parsed',
+      scripts: {
+        test:
+          writes('stdout', BEYOND_HEAD + '  3 passing (12ms)\n  1 pending\n  2 failing\n\n') +
+          writes('stdout', '  1) parser\n       rejects a bad token:\n     AssertionError: expected 1 to equal 2\n' + BEYOND_TAIL) +
+          `process.exitCode = 2;`
+      },
+      check: async () => {
+        const test = await runTestSuite(project.dir, { testTimeoutMs: EXIT_WINDOW_MS });
+        // The counts are not in the bounded text: the scanner saw them as they streamed past.
+        expect(test.stdout).not.toMatch(/3 passing/);
+        expect(test.testStats).toMatchObject({ total: 6, passed: 3, failed: 2, skipped: 1 });
+        expect(test.failureReason).toBe('test command exited with code 2');
+      }
+    },
+    {
+      name: 'a failing test name printed anywhere is in failedTests',
+      scripts: {
+        test:
+          writes('stderr', BEYOND_HEAD + '    ✕ rejects a reused code (5 ms)\n' + BEYOND_TAIL) +
+          writes('stderr', 'Test Suites: 1 failed, 1 total\nTests:       1 failed, 1 passed, 2 total\n') +
+          `process.exitCode = 1;`
+      },
+      check: async () => {
+        const audit = await auditExecution(project.dir, { testTimeoutMs: EXIT_WINDOW_MS });
+        expect(result(audit, 'test').stderr).not.toMatch(/rejects a reused code/);
+        expect(audit.failedTests).toEqual(['rejects a reused code']);
+      }
+    },
+    {
+      name: 'a dev error line split across two chunks fails the dev check',
+      scripts: {
+        dev:
+          writes('stdout', BEYOND_HEAD + 'Type') +
+          `setTimeout(() => { ${writes('stdout', 'Error: split across two chunks\n' + BEYOND_TAIL)} }, 300);`
+      },
+      check: async () => {
+        const dev = await verifyDevServer(project.dir, { devTimeoutMs: EXIT_WINDOW_MS });
+        expect(dev.stdout).not.toMatch(/split across/);
+        expect(dev.exitCode).toBe(0);
+        expect(dev.status).toBe('FAILED');
+        expect(dev.failureReason).toBe('dev server reported an error: TypeError: split across two chunks');
+      }
+    }
+  ])(
+    'AC-95 with output larger than the bound, $name',
+    async ({ scripts, check }) => {
+      writeProject(scripts);
+      await check();
+    },
+    EXIT_TEST_TIMEOUT
+  );
+
+  it('AC-95 createLineScanner matches a line split across chunks once it is complete, caps a partial line at 16 Ki and flushes the last line on end', () => {
+    // Split error line, one character per chunk.
+    expect(scan('ready\nType' + 'Error: boom\nmore\n', 1).devErrorLine).toBe('TypeError: boom');
+    // Only the FIRST error line is kept.
+    expect(scan('Error: first\nError: second\n').devErrorLine).toBe('Error: first');
+    // A line past 16 Ki characters is cut for scanning: an error at its start is still seen, and
+    // the dropped rest does not leak into the next line.
+    const long = scan('Error: long ' + 'y'.repeat(40_000) + 'Tests:       9 passed, 9 total\nTests:       1 passed, 1 total\n', 4096);
+    expect(long.devErrorLine).toBe('Error: long ' + 'y'.repeat(16 * 1024 - 'Error: long '.length));
+    expect(long.summaryLines).toEqual(['Tests:       1 passed, 1 total']);
+    // The last line without a trailing newline is scanned on end().
+    expect(scan('  ✕ last one').failedTestNames).toEqual(['last one']);
+    // ANSI colour is stripped before matching.
+    expect(scan('\u001b[1mTests:       \u001b[22m3 passed, 3 total\n').summaryLines).toEqual(['Tests:       3 passed, 3 total']);
+  });
+
+  it('AC-95 createLineScanner keeps the last 64 summary lines and the first 500 failed-test names, matching parseFailedTestNames', () => {
+    const lines = Array.from({ length: 100 }, (_, i) => `Tests:       ${i + 1} passed, ${i + 1} total`);
+    const kept = scan(lines.join('\n') + '\n', 333).summaryLines;
+    expect(kept).toHaveLength(64);
+    expect(kept[63]).toBe('Tests:       100 passed, 100 total');
+    expect(kept[0]).toBe('Tests:       37 passed, 37 total');
+
+    const names = Array.from({ length: 600 }, (_, i) => `  ✕ case ${i} (1 ms)`);
+    const failed = scan(names.join('\n') + '\n  ● Console\n  ✕ case 0\n', 500).failedTestNames;
+    expect(failed).toHaveLength(500);
+    expect(failed[0]).toBe('case 0');
+    expect(failed[499]).toBe('case 499');
+
+    // One implementation: the same names as parseFailedTestNames for the A-1 AC-10 output.
+    const ac10 = '    ✓ enables 2FA (3 ms)\n    ✕ rejects a reused code (5 ms)\n\n  ● TotpService › rejects a reused code\n\n  ● Console\n\n  ● TotpService › rejects a reused code\n';
+    expect(scan(ac10).failedTestNames).toEqual(parseFailedTestNames(ac10));
+    expect(parseFailedTestNames(ac10)).toEqual(['rejects a reused code', 'TotpService › rejects a reused code']);
+  });
+
+  const VITEST = ' Test Files  2 passed (2)\n      Tests  5 passed | 1 skipped (6)\n';
+  const JEST = 'Test Suites: 1 passed, 1 total\nTests:       3 passed, 3 total\n';
+
+  it.each([
+    {
+      name: 'Vitest plus a stray unmarked Jest line → Vitest',
+      stdout: 'Tests: 2 passed, 2 total\n' + VITEST,
+      stderr: '',
+      expected: { kind: 'stats', stats: { total: 6, passed: 5, failed: 0, skipped: 1 } }
+    },
+    {
+      name: 'a complete Jest summary on stderr → Jest',
+      stdout: '      Tests  9 passed (9)\n',
+      stderr: JEST,
+      expected: { kind: 'stats', stats: { total: 3, passed: 3, failed: 0, skipped: 0 } }
+    },
+    {
+      name: 'two marked families with different counts → ambiguous',
+      stdout: VITEST,
+      stderr: JEST,
+      expected: { kind: 'ambiguous' }
+    },
+    {
+      name: 'two marked families with equal counts → used',
+      stdout: ' Test Files  1 passed (1)\n      Tests  3 passed (3)\n',
+      stderr: JEST,
+      expected: { kind: 'stats', stats: { total: 3, passed: 3, failed: 0, skipped: 0 } }
+    }
+  ])(
+    'AC-96 counts are parsed per stream and chosen by runner marker: $name',
+    async ({ stdout, stderr, expected }) => {
+      // The pure selection, on the lines the scanners keep.
+      const selected = selectTestSummary(summaryLines(stdout, stderr));
+      expect(selected).toMatchObject(expected);
+
+      // The same through the real gate.
+      writeProject({ test: writes('stdout', stdout) + writes('stderr', stderr) });
+      const test = await runTestSuite(project.dir, { testTimeoutMs: EXIT_WINDOW_MS });
+      const decision = validateExecutionGate(auditOf([test]));
+
+      if (expected.kind === 'stats') {
+        expect(test.status).toBe('PASSED');
+        expect(test.testStats).toMatchObject(expected.stats!);
+        expect(test.summaryProblem).toBeUndefined();
+        expect(decision.canAdvance).toBe(true);
+      } else {
+        expect(selected.kind === 'ambiguous' && selected.detail).toBe(
+          'vitest on stdout: 5 passed, 0 failed, 1 skipped, 0 todo, 6 total; jest on stderr: 3 passed, 0 failed, 0 skipped, 0 todo, 3 total'
+        );
+        expect(test.status).toBe('FAILED');
+        expect(test.testStats).toBeUndefined();
+        expect(test.summaryProblem).toMatch(/^ambiguous test summary: /);
+        expect(test.failureReason).toBe(test.summaryProblem);
+        expect(decision.canAdvance).toBe(false);
+        expect(decision.blockers).toContain(test.summaryProblem);
+        expect(decision.blockers.some(b => /no tests detected/.test(b))).toBe(false);
+      }
+    },
+    EXIT_TEST_TIMEOUT
+  );
+
+  it('AC-96 unmarked families that disagree are ambiguous too, and no summary at all is none', () => {
+    expect(selectTestSummary(summaryLines('Tests: 2 passed, 2 total\n', '      Tests  4 passed (4)\n')).kind).toBe('ambiguous');
+    expect(selectTestSummary(summaryLines('nothing here\n', ''))).toEqual({ kind: 'none' });
+    // The same family on both streams, marked on one: the marked one wins.
+    expect(selectTestSummary(summaryLines('Tests: 7 passed, 7 total\n', JEST))).toMatchObject({ kind: 'stats', stats: { total: 3 } });
+  });
+
+  it('AC-96 AC-8 AC-9 the A-1 Jest, Vitest and Mocha summaries still parse', () => {
+    // AC-8: a Jest summary on stderr only.
+    expect(selectTestSummary(summaryLines('', 'Tests:       2 passed, 2 total\n'))).toEqual({
+      kind: 'stats',
+      stats: { total: 2, passed: 2, failed: 0, skipped: 0, todo: 0, passRate: 1 }
+    });
+    // AC-9: every A-1 input, through parseTestOutput and through selectTestSummary.
+    const cases: Array<[string, Record<string, number> | null]> = [
+      ['Tests:       1 failed, 4 passed, 5 total', { failed: 1, passed: 4, total: 5 }],
+      ['Tests:       4 passed, 1 failed, 5 total', { failed: 1, passed: 4, total: 5 }],
+      [
+        '\u001b[1mTests:       \u001b[22m\u001b[1m\u001b[31m1 failed\u001b[39m\u001b[22m, \u001b[1m\u001b[32m4 passed\u001b[39m\u001b[22m, 5 total',
+        { failed: 1, passed: 4, total: 5 }
+      ],
+      [' Test Files  1 passed (1)\n      Tests  2 failed | 5 passed | 1 skipped (8)', { total: 8, passed: 5, failed: 2, skipped: 1 }],
+      ['  7 passing (30ms)\n  2 pending\n  1 failing', { total: 10, passed: 7, failed: 1, skipped: 2 }],
+      ['Tests:       2 skipped, 1 todo, 3 passed, 6 total', { total: 6, passed: 3, failed: 0, skipped: 2, todo: 1 }],
+      ['nothing to see here', null],
+      ['Tests:       0 total', null]
+    ];
+    for (const [text, expected] of cases) {
+      const selected = selectTestSummary(summaryLines(text, ''));
+      if (expected === null) {
+        expect(parseTestOutput(text)).toBeNull();
+        expect(selected).toEqual({ kind: 'none' });
+      } else {
+        expect(parseTestOutput(text)).toMatchObject(expected);
+        expect(selected).toMatchObject({ kind: 'stats', stats: expected });
+      }
+    }
+    expect(parseTestOutput('Tests:       1 failed, 4 passed, 5 total')!.passRate).toBeCloseTo(0.8);
+  });
 });

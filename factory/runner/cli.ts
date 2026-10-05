@@ -28,13 +28,13 @@ import {
 } from '../feature/workflows/feature-factory-orchestrator';
 import { consolidateRun } from '../feature/workflows/consolidate-run';
 import { ChangeTracker } from '../harness/change-diff';
-import { closeRun, findRun } from '../harness/run-directory';
+import { directionCharacterPattern, escapeCodePoint } from '../harness/direction-characters';
+import { assertNoFactoryCaseVariant, closeRun, findRun } from '../harness/run-directory';
 import {
   classifyRun,
   isSafeRunId,
   nextStepHints,
   parseCheckpointId,
-  resumeDescription,
   ResumeRequest,
   RunRefusedError
 } from '../harness/run-lifecycle';
@@ -104,26 +104,36 @@ export interface CliDependencies {
   error: (message: string) => void;
   /** Passed through to runFeatureFactory. Production leaves it unset: the real gates run. */
   gates?: Partial<OrchestrationGates>;
-  /** Passed through to runFeatureFactory. Production leaves it unset: the real read-only git tracker runs. */
+  /** Passed through to runFeatureFactory. Production leaves it unset: the real git tracker runs (reads, plus snapshots under refs/factory/<id>/). */
   changes?: Partial<ChangeTracker>;
 }
 
 /** C0 controls except \t and \n, DEL, and C1 controls (which include the 8-bit CSI). */
-const TERMINAL_CONTROL = /[\u0000-\u0008\u000a-\u001f\u007f-\u009f]/g;
+const TERMINAL_CONTROL = /[\u0000-\u0008\u000a-\u001f\u007f-\u009f]/;
+
+/** TERMINAL_CONTROL and the shared invisible / direction-control set (AC-105), for one replace. */
+const TERMINAL_UNSAFE = new RegExp(`${TERMINAL_CONTROL.source}|${directionCharacterPattern().source}`, 'gu');
 
 /**
  * Text that is safe to write to a terminal (SEC, D-11). Agent output, documents and diffs reach
  * the screen, and an ESC sequence in them could clear the screen, rewrite what a human is about
  * to approve, or set the window title. Every C0 / C1 control character except `\n` and `\t` —
  * ESC included, which defuses every escape sequence — is shown as a visible `\xNN`; a CRLF line
- * ending is shown as a plain newline. Display only: approvals hash the raw text.
+ * ending is shown as a plain newline. Every character of the shared invisible / direction-control
+ * set (B-1 D-11, AC-102) is shown as its `\u{XXXX}` escape (escapeCodePoint). A backslash is never
+ * escaped, so text that is already escaped passes unchanged. Display only: approvals hash the
+ * text before terminal escaping.
  */
 export function printableForTerminal(text: string): string {
   return String(text)
     .replace(/\r\n/g, '\n')
-    .replace(TERMINAL_CONTROL, char =>
-      char === '\n' ? char : `\\x${char.charCodeAt(0).toString(16).toUpperCase().padStart(2, '0')}`
-    );
+    .replace(TERMINAL_UNSAFE, char => {
+      if (char === '\n') return char;
+      const codePoint = char.codePointAt(0)!;
+      return codePoint <= 0xff
+        ? `\\x${codePoint.toString(16).toUpperCase().padStart(2, '0')}`
+        : escapeCodePoint(codePoint);
+    });
 }
 
 /** D-6: 0 for SUCCESS, 3 for PAUSED, 1 for every other end — including anything unexpected. */
@@ -409,16 +419,6 @@ function liveRunToResume(cwd: string, id: string): FeatureState {
   return found.state;
 }
 
-/** I-18: `--feature` with `--resume` must be the description the run was started with. */
-function assertSameDescription(state: FeatureState, feature: string | undefined): void {
-  if (feature === undefined || state.featureDescription === undefined || feature === state.featureDescription) return;
-  throw new RunRefusedError(
-    'DESCRIPTION_MISMATCH',
-    `--feature ${JSON.stringify(feature)} does not match the description saved in run ${state.featureId} ` +
-      `(${JSON.stringify(state.featureDescription)}). Omit --feature to resume it as it was started.`
-  );
-}
-
 /** Parse, dispatch, report. Returns the exit code (D-6). */
 async function execute(argv: string[], deps: CliDependencies, out: Printer): Promise<number> {
   const command = parseArgs(argv);
@@ -453,15 +453,17 @@ async function execute(argv: string[], deps: CliDependencies, out: Printer): Pro
 
     case 'run':
     case 'resume': {
+      // AC-97 (D-B1-2): the library guard comes first on --resume, so the run lookup below never
+      // reads the run directory through a case-folded `.Factory` path.
+      if (command.kind === 'resume') assertNoFactoryCaseVariant(command.cwd);
       const resumeFromState = command.kind === 'resume' ? liveRunToResume(command.cwd, command.id) : undefined;
-      if (resumeFromState) assertSameDescription(resumeFromState, command.kind === 'resume' ? command.feature : undefined);
 
-      // A run recorded without a description (pre-A-2) is refused without --feature (AC-37).
-      const featureDescription =
-        command.kind === 'run' ? command.feature : resumeDescription(resumeFromState!, command.feature);
+      // Every description decision (DESCRIPTION_MISMATCH, DESCRIPTION_REQUIRED) is the library's
+      // (AC-99, AC-100); the CLI reads the description only for this banner.
+      const banner = resumeFromState ? resumeFromState.featureDescription ?? command.feature ?? '(not recorded)' : command.feature;
 
       out.log(`Feature Factory`);
-      out.log(`  feature: ${featureDescription}`);
+      out.log(`  feature: ${banner}`);
       out.log(`  project: ${command.cwd}\n`);
       if (command.yes) out.log('  ⚠️  --yes: every checkpoint, CP3 included, will be approved automatically.\n');
       if (resumeFromState) {
@@ -471,7 +473,7 @@ async function execute(argv: string[], deps: CliDependencies, out: Printer): Pro
 
       const state = await runFeatureFactory({
         featureName: resumeFromState ? resumeFromState.featureName : (command as Extract<CliCommand, { kind: 'run' }>).name,
-        featureDescription,
+        featureDescription: command.feature,
         cwd: command.cwd,
         resumeFromState,
         resume: command.kind === 'resume' ? command.request : undefined,

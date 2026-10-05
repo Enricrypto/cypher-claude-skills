@@ -11,7 +11,7 @@
  * and a type-only import keeps that from becoming a runtime cycle.
  */
 
-import type { BuilderAgent, BuilderPhase, CheckpointId, FeatureState } from './state-tracker';
+import type { BuilderAgent, BuilderPhase, CheckpointId, EscalationRecord, FeatureState } from './state-tracker';
 import { MAX_BUILDER_ATTEMPTS } from './loop-rules';
 
 export type { CheckpointId } from './state-tracker';
@@ -50,7 +50,8 @@ export type RunRefusalCode =
   | 'APPROVED_ARTIFACT_CHANGED'
   | 'DESCRIPTION_MISMATCH'
   | 'DESCRIPTION_REQUIRED'
-  | 'NOT_SUCCESS';
+  | 'NOT_SUCCESS'
+  | 'FACTORY_DIR_CASE_CONFLICT';
 
 /** A run-lifecycle request the harness will not carry out. Thrown before any write. */
 export class RunRefusedError extends Error {
@@ -88,7 +89,8 @@ export function parseCheckpointId(value: string): CheckpointId | undefined {
   return match ? (Number(match[1]) as CheckpointId) : undefined;
 }
 
-function samePhase(a: BuilderPhase, b: BuilderPhase): boolean {
+/** Whether two builder phases are the same budget: Stage 3, or the same validator round or rework cycle. */
+export function samePhase(a: BuilderPhase, b: BuilderPhase): boolean {
   if (a.phase === 'stage3' || b.phase === 'stage3') return a.phase === b.phase;
   return a.phase === b.phase && a.round === b.round;
 }
@@ -116,9 +118,24 @@ export function allowedAttempts(state: FeatureState, builder: BuilderAgent, at: 
 }
 
 /**
+ * The budget a MAX_LOOPS record from before A-2 (no `builderPhase`) ran out of, from its escalation
+ * stage (MINOR-8, AC-101): stage 3 is Stage 3; stage 4 is the validator round the run had entered,
+ * when that is a whole number of at least 1. Anything else cannot be inferred (I-11): undefined.
+ */
+function inferBuilderPhase(state: FeatureState, escalation: EscalationRecord): BuilderPhase | undefined {
+  if (escalation.stage === 3) return { phase: 'stage3' };
+  const round = state.validatorRoundsCompleted;
+  if (escalation.stage === 4 && typeof round === 'number' && Number.isInteger(round) && round >= 1) {
+    return { phase: 'validator-round', round };
+  }
+  return undefined;
+}
+
+/**
  * The builder (and the budget it ran out of) when the run stopped because a builder exhausted its
- * attempts: the latest unresolved escalation is MAX_LOOPS, by a builder, with `builderPhase`.
- * Only an ACTIVE or ESCALATED run can be in that position; anything else is undefined.
+ * attempts: the latest unresolved escalation is MAX_LOOPS, by a builder, with `builderPhase` (or,
+ * for a pre-A-2 record, a phase inferred from its stage, AC-101). Only an ACTIVE or ESCALATED run
+ * can be in that position; anything else is undefined.
  */
 export function exhaustedBuilder(state: FeatureState): { builder: BuilderAgent; at: BuilderPhase } | undefined {
   const runClass = classifyRun(state);
@@ -129,8 +146,9 @@ export function exhaustedBuilder(state: FeatureState): { builder: BuilderAgent; 
   if (!latest || latest.reason !== 'MAX_LOOPS') return undefined;
 
   const builder = BUILDERS.find(candidate => candidate === latest.agent);
-  const at = latest.context.builderPhase;
-  if (!builder || !at) return undefined;
+  if (!builder) return undefined;
+  const at = latest.context.builderPhase ?? inferBuilderPhase(state, latest);
+  if (!at) return undefined;
   return { builder, at };
 }
 
@@ -226,6 +244,25 @@ export function resumeDescription(state: FeatureState, feature: string | undefin
     `Run ${state.featureId} was recorded without a feature description, so it cannot be resumed without one. ` +
       `Resume it with --feature "<the description it was started with>"; it is then saved in the run.`
   );
+}
+
+/**
+ * The description a resume runs with (AC-99, NEW-MINOR-1). Called by the orchestrator right after
+ * `checkResumeRequest`, so the run-state refusals (RUN_FINISHED, NEEDS_GRANT, ...) win. A supplied
+ * description that differs from the saved one is refused DESCRIPTION_MISMATCH: a resume never
+ * re-briefs a run with another feature. Otherwise `resumeDescription` decides (DESCRIPTION_REQUIRED
+ * for a run recorded without one and given none). A blank `supplied` counts as not supplied (I-10).
+ */
+export function checkResumeDescription(state: FeatureState, supplied: string | undefined): string {
+  const given = typeof supplied === 'string' && supplied.trim() !== '' ? supplied : undefined;
+  if (given !== undefined && state.featureDescription !== undefined && given !== state.featureDescription) {
+    throw new RunRefusedError(
+      'DESCRIPTION_MISMATCH',
+      `--feature ${JSON.stringify(given)} does not match the description saved in run ${state.featureId} ` +
+        `(${JSON.stringify(state.featureDescription)}). Omit --feature to resume it as it was started.`
+    );
+  }
+  return resumeDescription(state, given);
 }
 
 /**

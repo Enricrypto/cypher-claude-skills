@@ -29,10 +29,12 @@ import { join } from 'path';
 
 import { consolidatorPrompt, PromptContext } from '../../harness/agent-prompts';
 import { FeatureFactoryAgentOutput, validateOutputSchema } from '../../harness/agent-output-schema';
+import { DOCUMENT_CHECK_SOURCE } from '../../harness/direction-characters';
+import { documentFindings, writtenDocuments } from '../../harness/document-check';
 import { ARCHIVE_DIRNAME, findRun } from '../../harness/run-directory';
 import { classifyRun, RunRefusedError } from '../../harness/run-lifecycle';
 import { rebuildOutputs } from '../../harness/run-progress';
-import { buildStageContext, persistArtifacts, UnsafeArtifactPathError } from '../../harness/stage-context';
+import { buildStageContext, PersistedArtifact, persistArtifacts, UnsafeArtifactPathError } from '../../harness/stage-context';
 import { canAdvanceStage, StageAdvancementDecision, stageContracts } from '../../harness/stage-gates';
 import { saveStateIn, stateFilePathIn } from '../../harness/state-store';
 import {
@@ -40,7 +42,8 @@ import {
   FeatureState,
   recordAgentInvocation,
   recordAgentStep,
-  recordImportantFindings
+  recordImportantFindings,
+  addImportantFindingsOnce
 } from '../../harness/state-tracker';
 import { AgentInvoker } from '../../runner/invoke-agent';
 
@@ -146,17 +149,30 @@ export async function consolidateRun(options: ConsolidationOptions): Promise<Con
   );
 
   let refused = rejection(output);
+  let written: PersistedArtifact[] = [];
   if (refused === undefined) {
     try {
       // Into that run's directory only, through the no-follow writer; checked before any write.
-      for (const { agent, path } of persistArtifacts({ consolidator: output }, cwd, artifactDir)) {
-        log(`  📄 ${agent} → ${path}`);
-      }
+      written = persistArtifacts({ consolidator: output }, cwd, artifactDir);
     } catch (error) {
       if (!(error instanceof UnsafeArtifactPathError)) throw error;
       refused = error.message;
     }
   }
+
+  // The document check (AC-107, D-12): read back what was just written, before anything else runs;
+  // a message the run already holds is not recorded twice. A refused output wrote nothing.
+  const { next: checked, added } = addImportantFindingsOnce(
+    state,
+    STAGE,
+    DOCUMENT_CHECK_SOURCE,
+    documentFindings(writtenDocuments(cwd, written.map(({ path }) => path)))
+  );
+  if (added.length > 0) {
+    for (const message of added) log(`  ⚠️  [${DOCUMENT_CHECK_SOURCE}] ${message}`);
+    state = save(checked);
+  }
+  for (const { agent, path } of written) log(`  📄 ${agent} → ${path}`);
 
   if (refused !== undefined) {
     log(`  ❌ ${refused}`);

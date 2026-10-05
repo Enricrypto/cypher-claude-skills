@@ -31,12 +31,11 @@ import {
 import {
   CheckpointPresentation,
   CheckpointPresentationError,
-  presentationFor,
-  presentBrief,
-  presentStory
+  NOT_GIT_SNAPSHOT_REASON,
+  presentationFor
 } from '../../harness/checkpoint-presentation';
 
-import { ChangeSet, ChangeTracker, DEFAULT_CHANGE_TRACKER } from '../../harness/change-diff';
+import { ChangeSet, ChangeTracker, DEFAULT_CHANGE_TRACKER, HeadState } from '../../harness/change-diff';
 import {
   activeRework,
   checkpointApproval,
@@ -54,11 +53,11 @@ import {
 } from '../../harness/run-progress';
 import {
   allowedAttempts,
+  checkResumeDescription,
   checkResumeRequest,
   classifyRun,
   exhaustedBuilder,
   ResumeRequest,
-  resumeDescription,
   RunRefusedError,
   shellArg,
   usedAttempts
@@ -132,6 +131,8 @@ import {
   StageOutputs
 } from '../../harness/stage-context';
 import { acceptFeatureSpec, FeatureSpec } from '../../contracts/feature-spec';
+import { DOCUMENT_CHECK_SOURCE } from '../../harness/direction-characters';
+import { DocumentFile, documentFindings, writtenDocuments } from '../../harness/document-check';
 
 import {
   FeatureState,
@@ -143,6 +144,7 @@ import {
   recordCheckpointRejection,
   recordPause,
   recordImportantFindings,
+  addImportantFindingsOnce,
   recordExecutionGate,
   recordBuilderAttempt,
   recordValidatorRound,
@@ -151,6 +153,9 @@ import {
   recordChangeBase,
   recordFeatureDescription,
   recordReworkStart,
+  recordStage3Snapshot,
+  stage3SnapshotNumber,
+  stage3SnapshotPassedBy,
   clearPause,
   invalidateAgentSteps,
   reopenFeature,
@@ -181,7 +186,7 @@ export { LOOP_BACK_RULES, MAX_BUILDER_ATTEMPTS, MAX_VALIDATOR_ROUNDS };
 export type { LoopBackRule, LoopBackSituation } from '../../harness/loop-rules';
 
 import { saveState, stateFilePath, StatePersistenceError } from '../../harness/state-store';
-import { prepareNewRunDirectory, supersedeArtifacts } from '../../harness/run-directory';
+import { assertNoFactoryCaseVariant, prepareNewRunDirectory, supersedeArtifacts } from '../../harness/run-directory';
 
 /**
  * The two audits that run real commands in the target project: Gate 1.5 (infrastructure) and
@@ -217,8 +222,9 @@ export interface CheckpointDefinition {
 /**
  * Every checkpoint the orchestrator asks a human to approve: the story and the brief before any
  * code is written, and the validated change once the Stage 4 gate has passed (AC-44). A run is
- * SUCCESS only when CP3 is approved. The factory never opens a PR, commits or pushes (AC-45):
- * what happens to an approved change is the human's step, outside the program.
+ * SUCCESS only when CP3 is approved. The factory never touches your branch, index or working tree,
+ * never pushes, and writes git objects only under `refs/factory/<id>/` (AC-45 revised: its Stage 3
+ * snapshots). What happens to an approved change next is the human's step.
  */
 export const CHECKPOINTS = {
   STORY: { id: 1, name: 'CHECKPOINT 1: Approve the story', stage: 2 },
@@ -334,7 +340,14 @@ function agentDeclaredBlocked(output: FeatureFactoryAgentOutput): boolean {
 
 export interface OrchestrationOptions {
   featureName: string;
-  featureDescription: string;
+
+  /**
+   * What to build. Required for a fresh run (a missing or blank one is refused DESCRIPTION_REQUIRED
+   * before anything is written). On a resume it may be left out: the run's saved description is
+   * used, and a different one is refused DESCRIPTION_MISMATCH after the run-state refusals (AC-99).
+   * A blank one counts as not supplied (I-10).
+   */
+  featureDescription?: string;
 
   /**
    * Resume this run instead of starting a fresh one (D-2). Completed agents and approved
@@ -394,11 +407,21 @@ export interface OrchestrationOptions {
   gates?: Partial<OrchestrationGates>;
 
   /**
-   * How the CP3 change is captured and collected (D-8). Omitted entries fall back to
-   * DEFAULT_CHANGE_TRACKER, the real read-only git one. Tests pass a fake, so only the change-diff
+   * How the CP3 change is captured and collected, and how the Stage 3 snapshots are written (D-8,
+   * B-1 D-3). Omitted entries fall back to DEFAULT_CHANGE_TRACKER, the real git one: it reads, and
+   * writes only under refs/factory/<id>/. Tests pass a fake, so only the change-diff and snapshot
    * tests run git.
    */
   changes?: Partial<ChangeTracker>;
+
+  /**
+   * How the run's state is saved (AC-104). TESTS ONLY; omitted = the durable saveState
+   * (state-store.ts: temp file, fsync, rename, fsync the directory), which is what production
+   * always uses. Tests that never kill the machine pass a writer without the fsyncs
+   * (test/fixtures/state-writer.ts), which writes the same path and bytes. A repo-hygiene test
+   * checks that no production code passes this.
+   */
+  stateWriter?: (cwd: string, state: FeatureState) => void;
 
   logger?: (message: string) => void;
 }
@@ -412,10 +435,14 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
   /** The CP3 change is captured and collected ONLY through this object, so an injected tracker can never be bypassed. */
   const changes: ChangeTracker = {
     captureBase: options.changes?.captureBase ?? DEFAULT_CHANGE_TRACKER.captureBase,
-    collect: options.changes?.collect ?? DEFAULT_CHANGE_TRACKER.collect
+    collect: options.changes?.collect ?? DEFAULT_CHANGE_TRACKER.collect,
+    snapshot: options.changes?.snapshot ?? DEFAULT_CHANGE_TRACKER.snapshot
   };
 
   const log = options.logger ?? ((message: string) => console.log(`[FF] ${message}`));
+
+  /** Every state save of this run goes through here: the durable store unless a test injected a writer (AC-104). */
+  const save = options.stateWriter ?? saveState;
   const phase = (title: string) => log(`\n=== ${title} ===`);
 
   // Pre-flight (§4), OUTSIDE the try: a refusal is a thrown RunRefusedError with nothing of this
@@ -426,14 +453,23 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
   if (options.resume && !resumed) {
     throw new TypeError('A resume request needs resumeFromState: there is no run to resume.');
   }
+
+  // AC-97: the FIRST check, for a fresh start and a resume alike, before anything reads the run
+  // directory through a path the file system could case-fold, and before any write. `.Factory`
+  // escapes git's exact `:(exclude).factory` (AC-98), so a case variant is refused, never guessed.
+  assertNoFactoryCaseVariant(cwd);
   const resumeRequest: ResumeRequest | undefined = resumed ? (options.resume ?? { action: { kind: 'continue' } }) : undefined;
+
+  /** The description this run is briefed with; decided here, before any write (AC-99). */
+  let featureDescription: string;
 
   if (resumed && resumeRequest) {
     // D-3: refused before anything is written, so a refusal leaves state.json byte-identical.
     checkResumeRequest(resumed, resumeRequest);
 
-    // AC-37: a run recorded without a description (pre-A-2) needs one supplied; never a guess.
-    resumeDescription(resumed, options.featureDescription);
+    // AC-99, after the run-state refusals: a different description is refused (DESCRIPTION_MISMATCH),
+    // and a run recorded without one (pre-A-2) needs one supplied, never a guess (AC-37).
+    featureDescription = checkResumeDescription(resumed, options.featureDescription);
 
     // A paused run waits for a decision; a plain continue is not one (I-2). Nothing is written.
     if (classifyRun(resumed) === 'PAUSED' && resumeRequest.action.kind === 'continue') {
@@ -453,16 +489,23 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
 
     // I-7: nothing may run on a story, brief or change that differs from what a human approved.
     await assertApprovedArtifactsUnchanged(resumed, representCheckpoint, resumedRunDir, cwd);
+  } else {
+    // AC-99: a new run needs something to build, refused before the run directory is prepared.
+    const supplied = options.featureDescription;
+    if (typeof supplied !== 'string' || supplied.trim() === '') {
+      throw new RunRefusedError('DESCRIPTION_REQUIRED', 'A new run needs a feature description (--feature).');
+    }
+    featureDescription = supplied;
   }
 
   const archivedRuns = resumed ? [] : prepareNewRunDirectory(cwd).archived;
-  let state = resumed || createFeatureState(options.featureName, undefined, options.featureDescription);
+  let state = resumed || createFeatureState(options.featureName, undefined, featureDescription);
 
   // A resumed run recorded without a description saves the supplied one, committed before any
   // agent runs, so every later resume briefs its agents with it (AC-37). Checked in the pre-flight.
   if (resumed && resumed.featureDescription === undefined) {
-    state = recordFeatureDescription(state, resumeDescription(resumed, options.featureDescription));
-    saveState(cwd, state);
+    state = recordFeatureDescription(state, featureDescription);
+    save(cwd, state);
   }
 
   // A fresh run records where its change starts — HEAD now, before any agent writes anything — so
@@ -470,7 +513,7 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
   // A resume never captures a new base: the change is always measured from the run's start.
   if (!resumed) {
     state = recordChangeBase(state, await changes.captureBase(cwd));
-    saveState(cwd, state);
+    save(cwd, state);
   }
 
   const invokeAgent = options.invoke;
@@ -509,7 +552,7 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
    * halfway through has to be re-run from the beginning regardless, since its partial work
    * never reached the harness.
    *
-   * FAILS CLOSED. saveState throws StatePersistenceError and this does not catch it.
+   * FAILS CLOSED. The save (saveState, or a test's stateWriter) throws StatePersistenceError and this does not catch it.
    *
    * An earlier version warned and continued, reasoning that losing resumability was cheaper than
    * discarding completed agent work. That traded the wrong thing away. Everything this harness
@@ -523,7 +566,7 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
    * exits non-zero. That is the correct end state: loud, and impossible to mistake for success.
    */
   const commit = (next: FeatureState): FeatureState => {
-    saveState(cwd, next);
+    save(cwd, next);
     return next;
   };
 
@@ -551,7 +594,10 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
    * USER_STORY.md to translate.
    */
   const persist = (partial: StageOutputs) => {
-    for (const { agent, path } of persistArtifacts(partial, cwd, artifactDir)) {
+    const written = persistArtifacts(partial, cwd, artifactDir);
+    // Read back right after the write, before anything else can run (D-12).
+    checkDocuments(state.currentStage, writtenDocuments(cwd, written.map(({ path }) => path)));
+    for (const { agent, path } of written) {
       log(`  📄 ${agent} → ${path}`);
     }
   };
@@ -608,8 +654,33 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
    */
   const recordFindings = (stage: number, source: string, messages: string[]) => {
     if (messages.length === 0) return;
-    for (const message of messages) log(`  ⚠️  [${source}] ${message}`);
+    logFindings(source, messages);
     state = commit(recordImportantFindings(state, stage, source, messages));
+  };
+
+  const logFindings = (source: string, messages: readonly string[]) => {
+    for (const message of messages) log(`  ⚠️  [${source}] ${message}`);
+  };
+
+  /**
+   * Like recordFindings, but a message the run already holds from `source` is skipped (D-12):
+   * re-checking the same evidence adds nothing. Logs and commits only what is new.
+   */
+  const recordFindingsOnce = (stage: number, source: string, messages: string[]) => {
+    const { next, added } = addImportantFindingsOnce(state, stage, source, messages);
+    if (added.length === 0) return;
+    logFindings(source, added);
+    state = commit(next);
+  };
+
+  /**
+   * The document check (AC-107, D-12): read back documents the harness just wrote and record one
+   * IMPORTANT finding per document that holds an invisible or direction-control character. Every
+   * harness write of an agent's or a harness-rendered document is followed by this. A resume that
+   * re-renders identical content gives identical messages, so nothing is added twice.
+   */
+  const checkDocuments = (stage: number, files: DocumentFile[]) => {
+    recordFindingsOnce(stage, DOCUMENT_CHECK_SOURCE, documentFindings(files));
   };
 
   /** Evaluate a stage gate against this run's evidence, and keep its IMPORTANT findings. */
@@ -632,7 +703,7 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
     cwd,
     artifactDir,
     // A resume briefs agents with the description the run was started with (AC-37).
-    featureDescription: state.featureDescription ?? options.featureDescription
+    featureDescription: state.featureDescription ?? featureDescription
   };
 
   /**
@@ -665,7 +736,9 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
 
   /** Render a harness document into the run dir (only) and log where it went. */
   const writeDocument = (name: HarnessRenderedArtifact, content: string) => {
-    log(`  📄 harness → ${writeHarnessDocument(cwd, artifactDir, name, content)}`);
+    const path = writeHarnessDocument(cwd, artifactDir, name, content);
+    checkDocuments(state.currentStage, writtenDocuments(cwd, [path]));
+    log(`  📄 harness → ${path}`);
   };
 
   /**
@@ -795,7 +868,7 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
     }
     log(`✅ Story gate passed`);
 
-    return checkpoint(CHECKPOINTS.STORY, () => presentStory(runDirAbs));
+    return checkpoint(CHECKPOINTS.STORY, () => presentCheckpoint(1, state, outputs, runDirAbs, cwd, changes));
   };
 
   /**
@@ -818,7 +891,7 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
     }
     log(`✅ Spec gate passed`);
 
-    const stopped = await checkpoint(CHECKPOINTS.BRIEF, () => presentBrief(runDirAbs));
+    const stopped = await checkpoint(CHECKPOINTS.BRIEF, () => presentCheckpoint(2, state, outputs, runDirAbs, cwd, changes));
     if (stopped) return stopped;
 
     state = commit(advanceToStage(state, 3));
@@ -1077,10 +1150,80 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
     return undefined;
   };
 
-  /** The Stage 3 gate, on whatever the builders' outputs now are (merged, in a round — I-8). */
-  const stage3Gate = async (escalationStage: 3 | 4): Promise<FeatureState | undefined> => {
+  /**
+   * The snapshot after a passing Stage 3 gate in phase `at` (PR B-1, D-5; AC-81, AC-85 to AC-88).
+   * Committed before anything else runs, so the next agent is only ever invoked with the snapshot
+   * on record. Never touches the branch, the index or the working tree (the tracker writes only
+   * under refs/factory/<id>/).
+   *
+   *  - No git base (outside git, or a run recorded before A-2): a `skipped` record; the run goes on.
+   *  - `n` is the phase's own number when it has one, so a gate re-evaluated on resume rewrites the
+   *    same `stage3-<n>` (an unchanged tree reuses its commit); otherwise the next one.
+   *  - HEAD moved since the run started: HEAD_MOVED, nothing written. Git could not write it:
+   *    SNAPSHOT_FAILED with git's text, nothing recorded. Both finish the run ESCALATED, resumable;
+   *    no builder's PASS is invalidated, and the gate (with its snapshot) runs again on resume.
+   */
+  const takeSnapshot = async (escalationStage: 3 | 4, at: BuilderPhase): Promise<FeatureState | undefined> => {
+    const base = state.changeBase;
+    if (base === undefined || base.kind === 'none') {
+      const reason = base === undefined ? 'the run recorded no change base' : NOT_GIT_SNAPSHOT_REASON;
+      log(`  📸 No snapshot after the Stage 3 gate: ${reason}`);
+      state = commit(recordStage3Snapshot(state, { status: 'skipped', reason, at, takenAt: new Date().toISOString() }));
+      return undefined;
+    }
+
+    const n = stage3SnapshotNumber(state, at);
+    const result = await changes.snapshot(cwd, base, state.featureId, n);
+    switch (result.kind) {
+      case 'written':
+        state = commit(
+          recordStage3Snapshot(state, {
+            status: 'written',
+            n,
+            ref: result.ref,
+            commit: result.commit,
+            tree: result.tree,
+            at,
+            takenAt: new Date().toISOString(),
+            ...(result.reused ? { reused: true as const } : {})
+          })
+        );
+        log(`  📸 Snapshot stage3-${n} → ${result.ref} (${result.reused ? 'unchanged tree, existing ' : ''}commit ${result.commit})`);
+        return undefined;
+
+      case 'head-moved':
+        state = recordEscalation(
+          state,
+          escalationStage,
+          'harness',
+          'HEAD_MOVED',
+          `HEAD moved since the run started: recorded ${describeHead(result.recorded)}, now ${describeHead(result.current)}. ` +
+            `No snapshot was written. Restore HEAD to the recorded branch and commit, then ` +
+            `\`npm run factory -- --resume ${state.featureId} --cwd ${shellArg(cwd)}\`; ` +
+            `or close the run: \`npm run factory -- --close ${state.featureId} --cwd ${shellArg(cwd)}\`.`,
+          { head: { recorded: { ...result.recorded }, current: { ...result.current } } }
+        );
+        return finish(state, 'ESCALATED', 'HEAD moved since the run started; no snapshot was written');
+
+      case 'failed':
+        state = recordEscalation(
+          state,
+          escalationStage,
+          'harness',
+          'SNAPSHOT_FAILED',
+          `Snapshot stage3-${n} could not be written: ${result.error}. Nothing was recorded. Fix the cause, then resume.`
+        );
+        return finish(state, 'ESCALATED', `Snapshot stage3-${n} could not be written`);
+    }
+  };
+
+  /**
+   * The Stage 3 gate, on whatever the builders' outputs now are (merged, in a round — I-8), for
+   * the builder phase `at`. Every pass is snapshotted before the run moves on (D-5).
+   */
+  const stage3Gate = async (escalationStage: 3 | 4, at: BuilderPhase): Promise<FeatureState | undefined> => {
     const decision = await stageGate(3, { loops: { ...lastAttempts, max: { ...lastAllowed } } });
-    if (decision.canAdvance) return undefined;
+    if (decision.canAdvance) return takeSnapshot(escalationStage, at);
 
     state = recordEscalation(
       state,
@@ -1260,6 +1403,20 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
       );
       return finish(state, 'ESCALATED', 'Pre-supplied spec did not pass the gates');
     }
+
+    // The supplied documents were written by the acceptance, and their paths rewritten in place to
+    // the run directory: read them back (D-12). Only artifacts with content were written.
+    checkDocuments(
+      2,
+      writtenDocuments(
+        cwd,
+        [preSuppliedSpec.researcher, preSuppliedSpec.story, preSuppliedSpec.spec].flatMap(output =>
+          (output?.details?.artifacts ?? [])
+            .filter(artifact => typeof artifact.content === 'string' && artifact.content.length > 0)
+            .map(artifact => artifact.path)
+        )
+      )
+    );
 
     // One tier-1 PASS step per supplied output, keyed by the output's own agent (D-4), so the record
     // says exactly what stood in for which planning agent.
@@ -1508,7 +1665,7 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
     const stage3Materialization = await materializationGate(3);
     if (stage3Materialization) return stage3Materialization;
 
-    const stage3Failure = await stage3Gate(3);
+    const stage3Failure = await stage3Gate(3, { phase: 'stage3' });
     if (stage3Failure) return stage3Failure;
 
     log(`✅ Stage 3 passed: Implementation complete`);
@@ -1663,7 +1820,7 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
     const roundMaterialization = await materializationGate(4);
     if (roundMaterialization) return roundMaterialization;
 
-    const roundStage3 = await stage3Gate(4);
+    const roundStage3 = await stage3Gate(4, at);
     if (roundStage3) return roundStage3;
 
     return infrastructureGate();
@@ -1671,16 +1828,10 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
 
   /** Record the Validator's IMPORTANT issues as findings, skipping any the run already holds (MINOR-9). */
   const recordValidatorFindings = (issues: ValidatorIssue[]) => {
-    const known = new Set((state.importantFindings ?? []).filter(f => f.source === '07-validator').map(f => f.message));
-    const fresh: string[] = [];
-    for (const issue of issues) {
-      if (issue?.severity !== 'IMPORTANT') continue;
-      const message = `${issue.file ? `[${issue.file}${issue.line !== undefined ? `:${issue.line}` : ''}] ` : ''}${issue.message}`;
-      if (known.has(message)) continue;
-      known.add(message);
-      fresh.push(message);
-    }
-    recordFindings(4, '07-validator', fresh);
+    const messages = issues
+      .filter(issue => issue?.severity === 'IMPORTANT')
+      .map(issue => `${issue.file ? `[${issue.file}${issue.line !== undefined ? `:${issue.line}` : ''}] ` : ''}${issue.message}`);
+    recordFindingsOnce(4, '07-validator', messages);
   };
 
   /**
@@ -2020,7 +2171,15 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
 
     const reworkMaterialization = await materializationGate(4);
     if (reworkMaterialization) return reworkMaterialization;
-    return stage3Gate(4);
+
+    // Resume by recorded completion (IMPORTANT-1): once a later step of this cycle is on record
+    // (the Test Verifier, the Validator or Gate 2 ran after the snapshot), this gate pass is done,
+    // and stage3-<k> stays the tree it judged. A kill before the next agent still re-evaluates it (AC-85).
+    if (stage3SnapshotPassedBy(state, at)) {
+      log(`  📸 The rework's Stage 3 gate passed earlier in cycle ${cycle}, and the run has moved past it: its snapshot is kept`);
+      return undefined;
+    }
+    return stage3Gate(4, at);
   };
 
   /** CHECKPOINT 3: a human approves the validated change, after the Stage 4 gate (AC-44). */
@@ -2177,17 +2336,61 @@ async function presentCheckpoint(
       []
     );
   }
-  return presentationFor(3, runDirAbs, { findings: state.importantFindings ?? [], change });
+  // PR B-1 (D-13, I-5): the snapshot section only for a run that has snapshot records, so a run
+  // paused or approved before B-1 re-builds exactly the text it presented.
+  const snapshots =
+    state.stage3Snapshots !== undefined
+      ? { entries: state.stage3Snapshots, ...(state.changeBase ? { base: state.changeBase } : {}) }
+      : undefined;
+  return presentationFor(3, runDirAbs, { findings: state.importantFindings ?? [], change, ...(snapshots ? { snapshots } : {}) });
 }
 
-/** The current hash of checkpoint `id`'s presentation, or undefined when it can no longer be presented. */
-async function currentHash(represent: (id: CheckpointId) => Promise<CheckpointPresentation>, id: CheckpointId): Promise<string | undefined> {
+/** HEAD for the HEAD_MOVED message (D-8): `<branch | detached | unborn> at <commit | no commit>`. */
+function describeHead(head: HeadState): string {
+  const where =
+    head.branch === undefined
+      ? head.commit === undefined
+        ? 'unborn'
+        : 'a branch not recorded'
+      : head.branch === 'HEAD'
+        ? 'detached'
+        : head.branch;
+  return `${where} at ${head.commit ?? 'no commit'}`;
+}
+
+/**
+ * Checkpoint `id`'s presentation re-built now, or undefined when it can no longer be presented.
+ * The whole presentation, not just its hash: `unescapedSha256` tells a pre-B-1 hash apart (AC-110).
+ */
+async function currentPresentation(
+  represent: (id: CheckpointId) => Promise<CheckpointPresentation>,
+  id: CheckpointId
+): Promise<CheckpointPresentation | undefined> {
   try {
-    return (await represent(id)).sha256;
+    return await represent(id);
   } catch (error) {
     if (!(error instanceof CheckpointPresentationError)) throw error;
     return undefined;
   }
+}
+
+/**
+ * AC-110: the recorded hash is the hash of the RAW text of what is presented now. The documents are
+ * unchanged, but the hash was taken before PR B-1, over text this version shows escaped under a
+ * warning banner. Such a hash can never match again, and the run cannot be re-presented, so it is
+ * closed, never approved on a hash that no longer describes what is shown.
+ */
+function recordedBeforeEscaping(current: CheckpointPresentation | undefined, recorded: string): boolean {
+  return current !== undefined && current.sha256 !== recorded && current.unescapedSha256 === recorded;
+}
+
+/** The AC-110 refusal text: the same for `--approve` (ARTIFACT_CHANGED) and the I-7 re-check (APPROVED_ARTIFACT_CHANGED). */
+function presentationChangedInThisVersion(name: string, runId: string, cwd: string): string {
+  return (
+    `${name}: the presentation changed in this version: invisible or direction-control characters are now shown ` +
+    `escaped under a warning banner, so the hash recorded before this version no longer matches. ` +
+    `Close the run: npm run factory -- --close ${runId} --cwd ${shellArg(cwd)}`
+  );
 }
 
 /**
@@ -2202,9 +2405,12 @@ async function assertPendingUnchanged(
   cwd: string
 ): Promise<void> {
   const pending = state.pendingCheckpoint!;
-  const current = await currentHash(represent, pending.checkpointId);
-  if (current === pending.sha256) return;
+  const current = await currentPresentation(represent, pending.checkpointId);
+  if (current?.sha256 === pending.sha256) return;
 
+  if (recordedBeforeEscaping(current, pending.sha256)) {
+    throw new RunRefusedError('ARTIFACT_CHANGED', presentationChangedInThisVersion(pending.name, state.featureId, cwd));
+  }
   throw new RunRefusedError(
     'ARTIFACT_CHANGED',
     `${pending.name}: artifact changed since it was presented ` +
@@ -2234,9 +2440,12 @@ async function assertApprovedArtifactsUnchanged(
     const approval = checkpointApproval(state, definition.id);
     if (!approval?.sha256) continue;
 
-    const current = await currentHash(represent, definition.id);
-    if (current === approval.sha256) continue;
+    const current = await currentPresentation(represent, definition.id);
+    if (current?.sha256 === approval.sha256) continue;
 
+    if (recordedBeforeEscaping(current, approval.sha256)) {
+      throw new RunRefusedError('APPROVED_ARTIFACT_CHANGED', presentationChangedInThisVersion(definition.name, state.featureId, cwd));
+    }
     throw new RunRefusedError(
       'APPROVED_ARTIFACT_CHANGED',
       `${definition.name} was approved, but what it presented has ${current === undefined ? 'gone missing' : 'changed'} since ` +

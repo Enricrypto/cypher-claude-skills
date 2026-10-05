@@ -1,3 +1,5 @@
+Superseded as the plan of record by [ROADMAP.md](ROADMAP.md).
+
 # Harness Gap Analysis
 
 **Date:** 2026-09-20 · **Branch:** `feat/phase-0a-harness-ci` · **Method:** read the code, not the docs.

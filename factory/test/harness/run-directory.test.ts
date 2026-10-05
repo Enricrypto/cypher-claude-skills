@@ -13,6 +13,7 @@ import { join } from 'path';
 
 import {
   ARCHIVE_DIRNAME,
+  assertNoFactoryCaseVariant,
   closeRun,
   findRun,
   isSafeRunId,
@@ -29,6 +30,7 @@ import { runFeatureFactory } from '../../feature/workflows/feature-factory-orche
 import { researcher, story } from '../fixtures/agent-outputs';
 import { scriptedInvoker, SEEDED_DOCUMENT, seedRun, tempProject, TempProject } from '../fixtures/harness-run';
 import { fakeChangeTracker } from '../fixtures/changes';
+import { plantFactoryCaseVariant, tempFileSystemIsCaseInsensitive, treeSnapshot } from '../fixtures/factory-case-variant';
 
 let project: TempProject;
 let cwd: string;
@@ -560,4 +562,92 @@ describe('D-5 supersedeArtifacts: a rejected document is moved aside, never dele
     symlinkSync(join(runDir, 'USER_STORY.md'), join(runDir, 'FILE_LIST.md'));
     expect(() => supersedeArtifacts(runDir, 1, ['FILE_LIST.md'])).toThrow(UnsafeArtifactPathError);
   });
+});
+
+describe('AC-97 a .factory case variant is refused before any write', () => {
+  const caseInsensitive = tempFileSystemIsCaseInsensitive();
+
+  it('AC-97 assertNoFactoryCaseVariant passes an exact .factory, a missing cwd, and unrelated .factoryx or factory entries', () => {
+    mkdirSync(join(cwd, '.factory'));
+    expect(() => assertNoFactoryCaseVariant(cwd)).not.toThrow();
+    expect(() => assertNoFactoryCaseVariant(join(cwd, 'does-not-exist'))).not.toThrow();
+
+    mkdirSync(join(cwd, '.factoryx'));
+    writeFileSync(join(cwd, 'factory'), '');
+    writeFileSync(join(cwd, '.factory.bak'), '');
+    expect(() => assertNoFactoryCaseVariant(cwd)).not.toThrow();
+  });
+
+  it.each(['.FACTORY', '.Factory', '.fACTORY'])(
+    'AC-97 assertNoFactoryCaseVariant refuses a %s directory with FACTORY_DIR_CASE_CONFLICT, naming its absolute path',
+    name => {
+      mkdirSync(join(cwd, name));
+      const error = refusal(() => assertNoFactoryCaseVariant(cwd));
+      expect(error.code).toBe('FACTORY_DIR_CASE_CONFLICT');
+      expect(error.message).toBe(
+        `${join(cwd, name)} differs from the harness directory .factory only in letter case; ` +
+          "git's `:(exclude).factory` would not exclude it. Rename or remove it, then run again."
+      );
+    }
+  );
+
+  it('AC-97 assertNoFactoryCaseVariant refuses a .Factory regular file as well as a directory', () => {
+    writeFileSync(join(cwd, '.Factory'), 'a file');
+    const error = refusal(() => assertNoFactoryCaseVariant(cwd));
+    expect(error.code).toBe('FACTORY_DIR_CASE_CONFLICT');
+    expect(error.message).toContain(join(cwd, '.Factory'));
+  });
+
+  (caseInsensitive ? it.skip : it)('AC-97 assertNoFactoryCaseVariant names every variant when there are several (case-sensitive file system only)', () => {
+    mkdirSync(join(cwd, '.factory'));
+    mkdirSync(join(cwd, '.Factory'));
+    writeFileSync(join(cwd, '.FACTORY'), '');
+    const error = refusal(() => assertNoFactoryCaseVariant(cwd));
+    expect(error.code).toBe('FACTORY_DIR_CASE_CONFLICT');
+    expect(error.message).toContain(join(cwd, '.Factory'));
+    expect(error.message).toContain(join(cwd, '.FACTORY'));
+    expect(error.message).not.toContain(`${join(cwd, '.factory')} differs`);
+  });
+
+  it('AC-97 assertNoFactoryCaseVariant fails closed: a cwd that cannot be listed (not ENOENT) propagates its error', () => {
+    const notADirectory = join(cwd, 'plain-file');
+    writeFileSync(notADirectory, '');
+    expect(() => assertNoFactoryCaseVariant(notADirectory)).toThrow(expect.objectContaining({ code: 'ENOTDIR' }));
+  });
+
+  type Start = 'fresh run' | 'fresh run (a .Factory file)' | 'resume';
+
+  it.each<Start>(['fresh run', 'fresh run (a .Factory file)', 'resume'])(
+    'AC-97 a %s next to a .Factory entry is refused FACTORY_DIR_CASE_CONFLICT before any write, naming the entry',
+    async start => {
+      const resumeFromState = start === 'resume' ? seedRun(cwd, 'ESCALATED') : undefined;
+      const variant = plantFactoryCaseVariant(cwd, start === 'fresh run (a .Factory file)' ? 'file' : 'directory');
+      const before = treeSnapshot(cwd);
+      const tracker = fakeChangeTracker();
+      const seen: string[] = [];
+
+      await expect(
+        runFeatureFactory({
+          featureName: resumeFromState ? resumeFromState.featureName : 'case-variant',
+          featureDescription: 'add 2FA',
+          cwd,
+          resumeFromState,
+          changes: tracker,
+          invoke: async call => {
+            seen.push(call.agent);
+            return researcher();
+          },
+          logger: () => {}
+        })
+      ).rejects.toMatchObject({
+        name: 'RunRefusedError',
+        code: 'FACTORY_DIR_CASE_CONFLICT',
+        message: expect.stringContaining(`${variant} differs from the harness directory .factory only in letter case`)
+      });
+
+      expect(seen).toEqual([]);
+      expect(tracker.calls).toEqual([]);
+      expect(treeSnapshot(cwd)).toEqual(before);
+    }
+  );
 });

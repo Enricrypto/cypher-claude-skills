@@ -13,7 +13,18 @@
  *  - CP3: `<runDir>/VALIDATION_REPORT.md`, then every IMPORTANT finding the run recorded, then the
  *    change itself (change-diff.ts: the git diff since the run started, or a labelled manifest of
  *    the claimed files). CP3's text is built from files, state and the change, never from what an
- *    agent says about them.
+ *    agent says about them. From PR B-1 a run with snapshot records also shows them, with the
+ *    pre-existing-changes note, between the findings and the change (D-13, D-6).
+ *
+ * INVISIBLE AND DIRECTION-CONTROL CHARACTERS (PR B-1, D-13, AC-108). The text is built as an ordered
+ * list of parts, some labelled with what they show (a document, the findings, the snapshot notes,
+ * the change). The parts joined are the raw text, exactly the text built before PR B-1. When no
+ * labelled part holds a character of the shared set, the raw text is what is presented, byte for
+ * byte (AC-110). Otherwise the presentation starts with a warning banner, one entry per occurrence
+ * (part, line within that part, code point), and every such character is shown as its visible
+ * escape. The approval hash is over this escaped text, what the approver was actually shown; the
+ * hash of the raw text is kept as `unescapedSha256` only so that a run paused before PR B-1 can be
+ * recognised and told why it cannot be approved (AC-110).
  *
  * FAILS CLOSED. A document that is absent, empty, not a regular file, or a symlink cannot be
  * presented, so it throws CheckpointPresentationError and the orchestrator escalates without
@@ -25,7 +36,8 @@ import { lstatSync, readFileSync } from 'fs';
 import { join } from 'path';
 
 import type { ChangeSet } from './change-diff';
-import type { CheckpointId, ImportantFinding } from './state-tracker';
+import { escapeDirectionCharacters, findDirectionCharacters, formatCodePoint } from './direction-characters';
+import type { BuilderPhase, ChangeBase, CheckpointId, ImportantFinding, Stage3Snapshot } from './state-tracker';
 
 /**
  * Lowercase hex SHA-256 of the UTF-8 bytes of `text`, exactly as given: no newline, whitespace or
@@ -43,6 +55,12 @@ export interface CheckpointPresentation {
   /** The exact text presented. Approvals bind to sha256(text). */
   text: string;
   sha256: string;
+  /**
+   * sha256 of the raw text, before any escaping (D-13). Equal to `sha256` when the text holds no
+   * set character. Used only to recognise a hash recorded before PR B-1 (AC-110); never put into a
+   * CheckpointRequest and never recorded as an approval.
+   */
+  unescapedSha256: string;
   /** Absolute paths of the documents the text was built from, in presentation order. */
   artifactPaths: string[];
   /** CP3 only: the files in the presented change (ChangeSet.files). */
@@ -77,13 +95,20 @@ export const CP3_SECTION_SEPARATOR = '\n\n---\n\n';
 /** The full USER_STORY.md of the run in `runDirAbs` (CP1). */
 export function presentStory(runDirAbs: string): CheckpointPresentation {
   const [story] = readDocuments(runDirAbs, CHECKPOINT_DOCUMENTS[1], 'CHECKPOINT 1');
-  return presentation(story.content, [story.path]);
+  return presentation([{ label: 'USER_STORY.md', text: story.content }], [story.path]);
 }
 
 /** The full TECHNICAL_BRIEF.md and FILE_LIST.md of the run in `runDirAbs` (CP2, I-5). */
 export function presentBrief(runDirAbs: string): CheckpointPresentation {
   const [brief, fileList] = readDocuments(runDirAbs, CHECKPOINT_DOCUMENTS[2], 'CHECKPOINT 2');
-  return presentation(`${brief.content}${CP2_FILE_LIST_SEPARATOR}${fileList.content}`, [brief.path, fileList.path]);
+  return presentation(
+    [
+      { label: 'TECHNICAL_BRIEF.md', text: brief.content },
+      { text: CP2_FILE_LIST_SEPARATOR },
+      { label: 'FILE_LIST.md', text: fileList.content }
+    ],
+    [brief.path, fileList.path]
+  );
 }
 
 /**
@@ -99,7 +124,8 @@ export function presentBrief(runDirAbs: string): CheckpointPresentation {
 export function presentChange(
   runDirAbs: string,
   findings: readonly ImportantFinding[],
-  change: ChangeSet
+  change: ChangeSet,
+  snapshots?: SnapshotPresentationInput
 ): CheckpointPresentation {
   const problem = changeSetProblem(change);
   if (problem) {
@@ -108,13 +134,22 @@ export function presentChange(
   const [report] = readDocuments(runDirAbs, CHECKPOINT_DOCUMENTS[3], 'CHECKPOINT 3');
 
   const lines = findings.map(f => `- [Stage ${f.stage} · ${f.source}] ${String(f.message).replace(/\r?\n/g, ' ')}`);
-  const text =
-    `${report.content}${CP3_SECTION_SEPARATOR}` +
-    `## IMPORTANT findings (${findings.length})\n\n${lines.length > 0 ? lines.join('\n') : 'None.'}\n` +
-    `${CP3_SECTION_SEPARATOR.slice(1)}` +
-    `## Change (source: ${change.source})\n\n${change.text}`;
+  // The parts joined are exactly the CP3 text before PR B-1 (plus the snapshot section when given).
+  // The change is a labelled part like any document: builder source can hold these characters too,
+  // and the banner is the warning for it (N-16).
+  const parts: PresentationPart[] = [
+    { label: 'VALIDATION_REPORT.md', text: report.content },
+    { text: `${CP3_SECTION_SEPARATOR}## IMPORTANT findings (${findings.length})\n\n` },
+    { label: 'the IMPORTANT findings', text: lines.length > 0 ? lines.join('\n') : 'None.' },
+    { text: CP3_SECTION_SEPARATOR },
+    ...(snapshots
+      ? [{ label: 'the snapshot notes', text: snapshotSection(snapshots) }, { text: CP3_SECTION_SEPARATOR.slice(1) }]
+      : []),
+    { text: `## Change (source: ${change.source})\n\n` },
+    { label: 'the change', text: change.text }
+  ];
 
-  return { ...presentation(text, [report.path]), changedFiles: [...change.files] };
+  return { ...presentation(parts, [report.path]), changedFiles: [...change.files] };
 }
 
 /** Why `change` is not a ChangeSet that can be presented, or undefined when it is one. */
@@ -127,10 +162,76 @@ function changeSetProblem(change: unknown): string | undefined {
   return undefined;
 }
 
-/** What CP3 is built from besides VALIDATION_REPORT.md: the run's IMPORTANT findings and the collected change. */
+/**
+ * The run's snapshot records and its change base (PR B-1, D-13). Given only when the run has
+ * snapshot records (`state.stage3Snapshots !== undefined`, I-5), so a run without any presents
+ * exactly the pre-B-1 text.
+ */
+export interface SnapshotPresentationInput {
+  entries: readonly Stage3Snapshot[];
+  base?: ChangeBase;
+}
+
+/** What CP3 is built from besides VALIDATION_REPORT.md: the run's IMPORTANT findings, the collected change and, from PR B-1, the snapshots. */
 export interface ChangePresentationInput {
   findings: readonly ImportantFinding[];
   change: ChangeSet;
+  snapshots?: SnapshotPresentationInput;
+}
+
+/** The reason a snapshot is skipped outside git (D-5); the section then says no snapshot was taken (AC-87). */
+export const NOT_GIT_SNAPSHOT_REASON = 'not a git work tree';
+
+/** How a snapshot's phase reads at CP3. */
+function snapshotPhase(at: BuilderPhase): string {
+  switch (at.phase) {
+    case 'stage3':
+      return 'Stage 3';
+    case 'validator-round':
+      return `validator round ${at.round}`;
+    case 'rework':
+      return `CHECKPOINT 3 rework ${at.round}`;
+  }
+}
+
+/**
+ * The D-6 note on changes already in the tree when the run started (AC-84): listed when there are
+ * some, nothing when there are none, "unknown" for a git base recorded before PR B-1. A run with no
+ * git base (or none recorded) gets no note.
+ */
+function preExistingNote(base: ChangeBase | undefined): string | undefined {
+  if (base?.kind !== 'git') return undefined;
+  if (base.preExisting === undefined) {
+    return (
+      'Whether the snapshots and the change include changes that were already in the working tree when the run started ' +
+      'is unknown: this run started before the factory recorded them.\n'
+    );
+  }
+  if (base.preExisting.length === 0) return undefined;
+  return (
+    `The snapshots and the change include ${base.preExisting.length} path(s) that were already changed or untracked when the run started:\n` +
+    `${base.preExisting.map(path => `- ${path}`).join('\n')}\n`
+  );
+}
+
+/**
+ * `## Snapshots (<written>)`, one line per record (no timestamps, so the text depends only on what
+ * was recorded), then the not-git sentence and the pre-existing note when they apply (D-13).
+ */
+function snapshotSection({ entries, base }: SnapshotPresentationInput): string {
+  const written = entries.filter(entry => entry.status === 'written').length;
+  const lines = entries.map(entry =>
+    entry.status === 'written'
+      ? `- stage3-${entry.n} · ${snapshotPhase(entry.at)} · ${entry.ref} · commit ${entry.commit} · tree ${entry.tree}`
+      : `- skipped · ${snapshotPhase(entry.at)} · ${entry.reason}`
+  );
+  const notGit = entries.some(entry => entry.status === 'skipped' && entry.reason === NOT_GIT_SNAPSHOT_REASON);
+  const note = preExistingNote(base);
+  return (
+    `## Snapshots (${written})\n\n${lines.length > 0 ? lines.join('\n') : 'None.'}\n` +
+    (notGit ? `\nNo snapshot was taken: ${NOT_GIT_SNAPSHOT_REASON}.\n` : '') +
+    (note ? `\n${note}` : '')
+  );
 }
 
 /**
@@ -142,15 +243,50 @@ export interface ChangePresentationInput {
 export function presentationFor(id: CheckpointId, runDirAbs: string, change?: ChangePresentationInput): CheckpointPresentation {
   if (id === 1) return presentStory(runDirAbs);
   if (id === 2) return presentBrief(runDirAbs);
-  if (id === 3 && change) return presentChange(runDirAbs, change.findings, change.change);
+  if (id === 3 && change) return presentChange(runDirAbs, change.findings, change.change, change.snapshots);
   throw new CheckpointPresentationError(
     `CHECKPOINT ${String(id)} cannot be re-built without the findings and the change it presented.`,
     []
   );
 }
 
-function presentation(text: string, artifactPaths: string[]): CheckpointPresentation {
-  return { text, sha256: sha256Hex(text), artifactPaths };
+/**
+ * One part of a checkpoint's text. A labelled part is content (a document, the findings, the
+ * snapshot notes, the change), and a banner entry names it with a line counted within it; an
+ * unlabelled part is the harness's own separator or heading.
+ */
+interface PresentationPart {
+  label?: string;
+  text: string;
+}
+
+/** The first line of the warning banner (D-13). Part of what is hashed. */
+function bannerHead(count: number): string {
+  return (
+    `WARNING: this presentation contains ${count} invisible or direction-control character(s). ` +
+    'Each is shown below as \\u{XXXX}; the stored documents are unchanged.\n'
+  );
+}
+
+/** Closes the banner, before the escaped text. Part of what is hashed. */
+const BANNER_END = '\n---\n\n';
+
+/**
+ * The single place checkpoint text is assembled (D-13). Raw = the parts joined. No occurrence in
+ * any labelled part: the raw text, unchanged. Otherwise: the banner, one line per occurrence in
+ * order (`- <label>, line <L>: U+XXXX`), then the raw text with every set character escaped. The
+ * hash is over what is presented; the raw text's hash is kept for the pre-B-1 check (AC-110).
+ */
+function presentation(parts: readonly PresentationPart[], artifactPaths: string[]): CheckpointPresentation {
+  const raw = parts.map(part => part.text).join('');
+  const entries = parts.flatMap(({ label, text }) =>
+    label === undefined
+      ? []
+      : findDirectionCharacters(text).map(({ line, codePoint }) => `- ${label}, line ${line}: ${formatCodePoint(codePoint)}\n`)
+  );
+  const text =
+    entries.length === 0 ? raw : `${bannerHead(entries.length)}${entries.join('')}${BANNER_END}${escapeDirectionCharacters(raw)}`;
+  return { text, sha256: sha256Hex(text), unescapedSha256: sha256Hex(raw), artifactPaths };
 }
 
 /** Read every document, or throw naming ALL the ones that cannot be presented. */

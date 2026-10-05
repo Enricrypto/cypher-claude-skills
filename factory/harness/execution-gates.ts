@@ -10,13 +10,21 @@
  * Prevents hallucinations where agents claim "tests passing" without running them.
  *
  * FAILS CLOSED. Output with no recognisable test counts is "no tests detected", never a pass;
- * a missing test script is a failure, not a skip.
+ * a missing test script is a failure, not a skip; two runner summaries that disagree are an
+ * "ambiguous test summary", never a guess (B-1 D-9).
  *
  * Process handling (D-3): one primitive, `runShellCommand`, runs each command detached in its own
  * process group, and on timeout kills the whole GROUP (SIGTERM, then SIGKILL). Killing only the
  * shell leaves the npm → node grandchild holding the output pipes, which is the hang GNU
  * `timeout` used to paper over. POSIX only (I-14). Groups still running when the orchestrator is
  * interrupted (SIGINT/SIGTERM) or exits are killed too: see killTrackedProcessGroups.
+ * Settling ALWAYS kills the group (AC-93), and a command settles at most EXITED_PIPE_GRACE_MS
+ * after its shell exits, even if a grandchild still holds the pipes (I-8). A process that calls
+ * setsid() has left the group and escapes the kill.
+ *
+ * Output (D-9): each stream is kept bounded (createBoundedOutput: head + tail + a marker) for
+ * humans, and scanned line by line as it streams (createLineScanner) for the machine: test
+ * summaries, failed-test names and the first dev-server error line never depend on the bound.
  *
  * Adapted from: e2e-loop/harness/phase-gates.ts
  * Specialized for: Feature Factory execution verification
@@ -50,12 +58,18 @@ export interface ExecutionResult {
   /** null when the command never exited on its own (killed, or never started). */
   exitCode: number | null;
   timedOut: boolean;
+  /** Bounded: see createBoundedOutput. */
   stdout: string;
+  /** Bounded: see createBoundedOutput. */
   stderr: string;
   duration: number; // milliseconds
   failureReason?: string;
   skipReason?: string;
   testStats?: TestStats;
+  /** Test check only: why no counts could be trusted, e.g. "ambiguous test summary: …" (AC-96). */
+  summaryProblem?: string;
+  /** Test check only: failing test names seen anywhere in either stream (AC-95). */
+  failedTests?: string[];
 }
 
 export interface ExecutionAudit {
@@ -94,17 +108,37 @@ export const DEFAULT_EXECUTION_TIMEOUTS: Readonly<Required<ExecutionGateOptions>
   devTimeoutMs: 15_000
 });
 
+/** What the line scanner found in one stream. */
+export interface StreamScan {
+  /** Test-summary and runner-marker lines, ANSI stripped; the last SUMMARY_LINES_KEPT. */
+  summaryLines: string[];
+  /** Failing test names, deduplicated, in order of first appearance; the first FAILED_NAMES_KEPT. */
+  failedTestNames: string[];
+  /** The first line matching DEV_SERVER_ERROR_PATTERN, ANSI stripped. */
+  devErrorLine?: string;
+}
+
 /** What one command did. */
 export interface CommandOutcome {
+  /** From the shell's 'exit' event; null when it was killed or never started. */
   exitCode: number | null;
   signal: NodeJS.Signals | null;
   timedOut: boolean;
+  /** Bounded: see createBoundedOutput. */
   stdout: string;
+  /** Bounded: see createBoundedOutput. */
   stderr: string;
+  /** Every chunk of each stream, scanned line by line, whatever the bound dropped. */
+  scan: { stdout: StreamScan; stderr: StreamScan };
   duration: number;
   /** Set when the command could not be started at all. */
   error?: string;
 }
+
+/** Characters kept from the START of each stream (UTF-16 code units). */
+export const OUTPUT_HEAD_CHARS = 64 * 1024;
+/** Characters kept from the END of each stream (UTF-16 code units). */
+export const OUTPUT_TAIL_CHARS = 192 * 1024;
 
 /**
  * Output that means a dev server is broken. Deliberately specific: the old
@@ -117,6 +151,18 @@ export const DEV_SERVER_ERROR_PATTERN =
 const KILL_GRACE_MS = 2_000;
 /** After SIGKILL, how long to wait for the pipes to close before giving up on them. */
 const PIPE_CLOSE_GRACE_MS = 1_000;
+/**
+ * After the shell exits, how long a grandchild may keep the pipes open before the group is killed
+ * (I-8). Output written after that is lost; runners print their summaries before they exit.
+ */
+const EXITED_PIPE_GRACE_MS = 2_000;
+
+/** A partial line is kept up to this many characters; the rest of it is dropped until '\n'. */
+const SCAN_LINE_CHARS = 16 * 1024;
+/** Summary/marker lines kept per stream (the last ones). */
+const SUMMARY_LINES_KEPT = 64;
+/** Failed-test names kept per stream (the first ones). */
+const FAILED_NAMES_KEPT = 500;
 
 const TEST_COMMAND = 'npm run test';
 const BUILD_COMMAND = 'npm run build';
@@ -212,17 +258,22 @@ function installCleanupHandlers(): void {
 /**
  * Run `command` through the shell in `cwd`, in its own process group, for at most `timeoutMs`.
  *
- * Never rejects. stdout and stderr are collected separately. On timeout the whole group gets
- * SIGTERM, then SIGKILL after a grace period, so an npm → node grandchild cannot outlive it.
+ * Never rejects. stdout and stderr are kept separately, bounded, and scanned as they stream. On
+ * timeout the whole group gets SIGTERM, then SIGKILL after a grace period, so an npm → node
+ * grandchild cannot outlive it. When the shell exits on its own, the command settles as soon as
+ * the pipes close; a grandchild still holding them gets EXITED_PIPE_GRACE_MS, then the group is
+ * killed. Settling always SIGKILLs the group, so nothing it started is left running (AC-93).
  */
 export function runShellCommand(command: string, cwd: string, timeoutMs: number): Promise<CommandOutcome> {
   const started = Date.now();
 
   return new Promise<CommandOutcome>(resolve => {
-    let stdout = '';
-    let stderr = '';
+    const output = { stdout: createBoundedOutput(), stderr: createBoundedOutput() };
+    const scanners = { stdout: createLineScanner(), stderr: createLineScanner() };
     let timedOut = false;
     let settled = false;
+    /** The shell's own exit, from the 'exit' event; 'close' may come much later, or never. */
+    let exited: { code: number | null; signal: NodeJS.Signals | null } | undefined;
     const timers: NodeJS.Timeout[] = [];
 
     installCleanupHandlers();
@@ -235,46 +286,191 @@ export function runShellCommand(command: string, cwd: string, timeoutMs: number)
     const pgid = child.pid;
     if (pgid !== undefined) liveGroups.add(pgid);
 
-    child.stdout?.setEncoding('utf-8');
-    child.stderr?.setEncoding('utf-8');
-    child.stdout?.on('data', (chunk: string) => (stdout += chunk));
-    child.stderr?.on('data', (chunk: string) => (stderr += chunk));
+    for (const name of ['stdout', 'stderr'] as const) {
+      const stream = child[name];
+      stream?.setEncoding('utf-8');
+      stream?.on('data', (chunk: string) => {
+        if (settled) return;
+        output[name].push(chunk);
+        scanners[name].push(chunk);
+      });
+    }
 
-    const settle = (outcome: Omit<CommandOutcome, 'stdout' | 'stderr' | 'duration' | 'timedOut'>) => {
+    const settle = (outcome: { exitCode: number | null; signal: NodeJS.Signals | null; error?: string }) => {
       if (settled) return;
       settled = true;
       if (pgid !== undefined) liveGroups.delete(pgid);
       timers.forEach(clearTimeout);
-      // Anything still in the group after the shell is gone is an orphan; never leave it running.
-      if (timedOut || outcome.error) killGroup(child.pid, 'SIGKILL');
+      // Anything still in the group once the command has settled is an orphan: never leave it
+      // running (AC-93). The group may already be empty; ESRCH is ignored.
+      killGroup(pgid, 'SIGKILL');
       child.stdout?.destroy();
       child.stderr?.destroy();
-      resolve({ ...outcome, stdout, stderr, timedOut, duration: Date.now() - started });
+      resolve({
+        ...outcome,
+        stdout: output.stdout.text(),
+        stderr: output.stderr.text(),
+        scan: { stdout: scanners.stdout.end(), stderr: scanners.stderr.end() },
+        timedOut,
+        duration: Date.now() - started
+      });
+    };
+
+    /** SIGKILL the group, then settle when the pipes close, or after PIPE_CLOSE_GRACE_MS at most. */
+    const killThenSettle = (outcome: { exitCode: number | null; signal: NodeJS.Signals | null }) => {
+      killGroup(pgid, 'SIGKILL');
+      // A process outside the group could still hold the pipes; do not wait for it forever.
+      timers.push(setTimeout(() => settle(outcome), PIPE_CLOSE_GRACE_MS));
     };
 
     timers.push(
       setTimeout(() => {
+        // The shell already exited on its own: that is an early exit, not a timeout (I-8). The
+        // exit grace below ends the command.
+        if (exited) return;
         timedOut = true;
-        killGroup(child.pid, 'SIGTERM');
-        timers.push(
-          setTimeout(() => {
-            killGroup(child.pid, 'SIGKILL');
-            // A process outside the group could still hold the pipes; do not wait for it forever.
-            timers.push(setTimeout(() => settle({ exitCode: null, signal: 'SIGKILL' }), PIPE_CLOSE_GRACE_MS));
-          }, KILL_GRACE_MS)
-        );
+        killGroup(pgid, 'SIGTERM');
+        timers.push(setTimeout(() => killThenSettle({ exitCode: null, signal: 'SIGKILL' }), KILL_GRACE_MS));
       }, timeoutMs)
     );
 
+    child.on('exit', (code, signal) => {
+      exited = { code, signal };
+      if (timedOut) return;
+      // Normally 'close' follows at once. If a grandchild holds the pipes, stop waiting for it.
+      timers.push(setTimeout(() => killThenSettle({ exitCode: code, signal }), EXITED_PIPE_GRACE_MS));
+    });
     child.on('error', err => settle({ exitCode: null, signal: null, error: err.message }));
-    child.on('close', (code, signal) => settle({ exitCode: timedOut ? null : code, signal }));
+    child.on('close', (code, signal) =>
+      settle(
+        timedOut
+          ? { exitCode: null, signal: exited?.signal ?? signal }
+          : { exitCode: exited ? exited.code : code, signal: exited ? exited.signal : signal }
+      )
+    );
   });
+}
+
+/**
+ * One stream's output, bounded (AC-94): the first OUTPUT_HEAD_CHARS and the last OUTPUT_TAIL_CHARS
+ * characters, with a marker saying how many were dropped between them. The tail buffer is trimmed
+ * only once it passes twice its size, so the cost of trimming stays amortised.
+ */
+export function createBoundedOutput(): { push(chunk: string): void; text(): string; omitted(): number } {
+  let head = '';
+  let tail = '';
+  let total = 0;
+
+  const keptTail = () => (tail.length > OUTPUT_TAIL_CHARS ? tail.slice(-OUTPUT_TAIL_CHARS) : tail);
+  const omitted = () => total - head.length - keptTail().length;
+
+  return {
+    push(chunk: string) {
+      total += chunk.length;
+      let rest = chunk;
+      if (head.length < OUTPUT_HEAD_CHARS) {
+        const room = OUTPUT_HEAD_CHARS - head.length;
+        head += rest.slice(0, room);
+        rest = rest.slice(room);
+      }
+      if (rest.length === 0) return;
+      tail += rest;
+      if (tail.length > 2 * OUTPUT_TAIL_CHARS) tail = tail.slice(-OUTPUT_TAIL_CHARS);
+    },
+    text() {
+      const dropped = omitted();
+      if (dropped === 0) return head + tail;
+      return (
+        head +
+        `\n[... Gate 2 kept the first ${OUTPUT_HEAD_CHARS} and the last ${OUTPUT_TAIL_CHARS} characters of this stream; ` +
+        `${dropped} characters were omitted ...]\n` +
+        keptTail()
+      );
+    },
+    omitted
+  };
+}
+
+/** Jest: "Tests:       1 failed, 4 passed, 5 total"; its marker is "Test Suites:". */
+const JEST_SUMMARY = /^\s*Tests:\s+.*$/;
+const JEST_MARKER = /^\s*Test Suites:/;
+/** Vitest: "      Tests  2 failed | 5 passed | 1 skipped (8)"; its marker is "Test Files". */
+const VITEST_SUMMARY = /^\s*Tests\s+\d+\s+\w+.*\(\d+\)\s*$/;
+const VITEST_MARKER = /^\s*Test Files\s/;
+/** Mocha: "7 passing (30ms)", "2 pending", "1 failing" on separate lines; "passing" is its marker. */
+const MOCHA_COUNT = /^\s*(\d+)\s+(passing|failing|pending)\b/;
+
+const SUMMARY_PATTERNS = [JEST_SUMMARY, JEST_MARKER, VITEST_SUMMARY, VITEST_MARKER, MOCHA_COUNT];
+
+/**
+ * A line scanner for one stream (AC-95), fed every chunk as it arrives. A line split across chunks
+ * is matched once it is complete; a partial line is kept up to SCAN_LINE_CHARS, and the rest of an
+ * over-long line is dropped until its '\n'. `end()` scans the last, unterminated line.
+ */
+export function createLineScanner(): { push(chunk: string): void; end(): StreamScan } {
+  let partial = '';
+  const summaryLines: string[] = [];
+  const failedTestNames: string[] = [];
+  const seenNames = new Set<string>();
+  let devErrorLine: string | undefined;
+
+  const scanLine = (raw: string) => {
+    const line = stripAnsi(raw);
+    if (SUMMARY_PATTERNS.some(pattern => pattern.test(line))) {
+      summaryLines.push(line);
+      if (summaryLines.length > SUMMARY_LINES_KEPT) summaryLines.shift();
+    }
+    const name = failedTestNameOf(line);
+    if (name !== undefined && !seenNames.has(name) && failedTestNames.length < FAILED_NAMES_KEPT) {
+      seenNames.add(name);
+      failedTestNames.push(name);
+    }
+    if (devErrorLine === undefined && DEV_SERVER_ERROR_PATTERN.test(line)) devErrorLine = line;
+  };
+
+  const append = (text: string) => {
+    const room = SCAN_LINE_CHARS - partial.length;
+    if (room > 0) partial += text.length > room ? text.slice(0, room) : text;
+  };
+
+  return {
+    push(chunk: string) {
+      let start = 0;
+      for (;;) {
+        const newline = chunk.indexOf('\n', start);
+        if (newline === -1) {
+          append(chunk.slice(start));
+          return;
+        }
+        append(chunk.slice(start, newline));
+        scanLine(partial);
+        partial = '';
+        start = newline + 1;
+      }
+    },
+    end() {
+      if (partial.length > 0) scanLine(partial);
+      partial = '';
+      return {
+        summaryLines: [...summaryLines],
+        failedTestNames: [...failedTestNames],
+        ...(devErrorLine !== undefined ? { devErrorLine } : {})
+      };
+    }
+  };
 }
 
 /** Remove ANSI colour and cursor sequences, so coloured runner output parses like plain text. */
 function stripAnsi(text: string): string {
   // eslint-disable-next-line no-control-regex
   return text.replace(/\u001b\[[0-9;?]*[ -/]*[@-~]|\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)/g, '');
+}
+
+/** Scan a whole text as one stream. */
+function scanText(text: string): StreamScan {
+  const scanner = createLineScanner();
+  scanner.push(text);
+  return scanner.end();
 }
 
 /** The scripts in `<projectRoot>/package.json`; empty when it is missing or unreadable. */
@@ -307,70 +503,147 @@ function stats(counts: { passed?: number; failed?: number; skipped?: number; tod
   return { total, passed, failed, skipped, todo, passRate: ran > 0 ? passed / ran : 0 };
 }
 
+type RunnerFamily = 'jest' | 'vitest' | 'mocha';
+type Counts = { passed: number; failed: number; skipped: number; todo: number; total: number };
+
+/** One family's summary in one stream. */
+interface SummaryCandidate {
+  family: RunnerFamily;
+  stream: 'stdout' | 'stderr';
+  /** The family's own marker line is in the same stream. */
+  marked: boolean;
+  counts: Counts;
+}
+
+function countsOf(counts: { passed?: number; failed?: number; skipped?: number; todo?: number; total?: number }): Counts {
+  const passed = counts.passed ?? 0;
+  const failed = counts.failed ?? 0;
+  const skipped = counts.skipped ?? 0;
+  const todo = counts.todo ?? 0;
+  return { passed, failed, skipped, todo, total: counts.total ?? passed + failed + skipped + todo };
+}
+
+/** Every family's summary in one stream's summary lines: for each family, its last summary. */
+function summaryCandidates(lines: string[], stream: SummaryCandidate['stream']): SummaryCandidate[] {
+  const candidates: SummaryCandidate[] = [];
+  const last = (pattern: RegExp) => [...lines].reverse().find(line => pattern.test(line));
+
+  const jest = last(JEST_SUMMARY);
+  if (jest !== undefined) {
+    candidates.push({
+      family: 'jest',
+      stream,
+      marked: lines.some(line => JEST_MARKER.test(line)),
+      counts: countsOf({
+        passed: countOf(jest, 'passed'),
+        failed: countOf(jest, 'failed'),
+        skipped: countOf(jest, 'skipped'),
+        todo: countOf(jest, 'todo'),
+        total: countOf(jest, 'total')
+      })
+    });
+  }
+
+  const vitest = last(VITEST_SUMMARY);
+  if (vitest !== undefined) {
+    const total = vitest.match(/\((\d+)\)\s*$/);
+    candidates.push({
+      family: 'vitest',
+      stream,
+      marked: lines.some(line => VITEST_MARKER.test(line)),
+      counts: countsOf({
+        passed: countOf(vitest, 'passed'),
+        failed: countOf(vitest, 'failed'),
+        skipped: countOf(vitest, 'skipped'),
+        todo: countOf(vitest, 'todo'),
+        total: total ? parseInt(total[1], 10) : undefined
+      })
+    });
+  }
+
+  // Mocha prints "N passing" first, then "N pending" / "N failing". Its summary is the block that
+  // starts at the last "passing" line (or, with none, the last pending/failing lines).
+  const mocha = lines.map(line => line.match(MOCHA_COUNT)).filter((m): m is RegExpMatchArray => m !== null);
+  if (mocha.length > 0) {
+    const lastPassing = mocha.map(m => m[2]).lastIndexOf('passing');
+    const block = lastPassing === -1 ? mocha : mocha.slice(lastPassing);
+    const word = (w: string) => {
+      const found = (lastPassing === -1 ? [...block].reverse() : block).find(m => m[2] === w);
+      return found ? parseInt(found[1], 10) : 0;
+    };
+    candidates.push({
+      family: 'mocha',
+      stream,
+      marked: lastPassing !== -1,
+      counts: countsOf({ passed: word('passing'), failed: word('failing'), skipped: word('pending') })
+    });
+  }
+
+  return candidates;
+}
+
+const countsKey = (c: Counts) => `${c.passed}/${c.failed}/${c.skipped}/${c.todo}/${c.total}`;
+const describeCandidate = (c: SummaryCandidate) =>
+  `${c.family} on ${c.stream}: ${c.counts.passed} passed, ${c.counts.failed} failed, ${c.counts.skipped} skipped, ` +
+  `${c.counts.todo} todo, ${c.counts.total} total`;
+
 /**
- * Parse a test runner's summary (Jest, Vitest, Mocha). Counts are read in any order.
+ * Choose the test counts from each stream's summary lines (AC-96). Pure.
  *
- * Returns null when no summary is found or it reports 0 tests. There is no fallback that counts
- * PASS/✓ tokens: a guess is how "0/0" became a pass. Strip ANSI first if the text may be coloured
- * (`auditExecution` does); this function also strips it, so callers need not.
+ * Each runner family's last summary in each stream is a candidate; it is MARKED when that family's
+ * marker line (Jest "Test Suites:", Vitest "Test Files", Mocha's own "passing" line) is in the
+ * same stream. The marked candidates are used when there are any, otherwise all of them. If they
+ * all agree, those counts are used; if they disagree it is ambiguous (fail closed, I-9); with none
+ * there are no counts. Counts of 0 tests are no counts.
  */
-export function parseTestOutput(output: string): TestStats | null {
-  const text = stripAnsi(output);
+export function selectTestSummary(lines: { stdout: string[]; stderr: string[] }):
+  | { kind: 'stats'; stats: TestStats }
+  | { kind: 'ambiguous'; detail: string }
+  | { kind: 'none' } {
+  const candidates = [...summaryCandidates(lines.stdout, 'stdout'), ...summaryCandidates(lines.stderr, 'stderr')];
+  const marked = candidates.filter(c => c.marked);
+  const pool = marked.length > 0 ? marked : candidates;
+  if (pool.length === 0) return { kind: 'none' };
 
-  // Jest: "Tests:       1 failed, 2 skipped, 4 passed, 7 total". The summary is the last one.
-  const jestLines = text.match(/^\s*Tests:\s+.*$/gm);
-  if (jestLines) {
-    const line = jestLines[jestLines.length - 1];
-    return stats({
-      passed: countOf(line, 'passed'),
-      failed: countOf(line, 'failed'),
-      skipped: countOf(line, 'skipped'),
-      todo: countOf(line, 'todo'),
-      total: countOf(line, 'total')
-    });
+  if (new Set(pool.map(c => countsKey(c.counts))).size > 1) {
+    return { kind: 'ambiguous', detail: pool.map(describeCandidate).join('; ') };
   }
-
-  // Vitest: "      Tests  2 failed | 5 passed | 1 skipped (8)".
-  const vitestLines = text.match(/^\s*Tests\s+\d+\s+\w+.*\(\d+\)\s*$/gm);
-  if (vitestLines) {
-    const line = vitestLines[vitestLines.length - 1];
-    const total = line.match(/\((\d+)\)\s*$/);
-    return stats({
-      passed: countOf(line, 'passed'),
-      failed: countOf(line, 'failed'),
-      skipped: countOf(line, 'skipped'),
-      todo: countOf(line, 'todo'),
-      total: total ? parseInt(total[1], 10) : undefined
-    });
-  }
-
-  // Mocha: "7 passing (30ms)", "2 pending", "1 failing" on separate lines.
-  const passing = text.match(/^\s*(\d+)\s+passing\b/m);
-  const failing = text.match(/^\s*(\d+)\s+failing\b/m);
-  const pending = text.match(/^\s*(\d+)\s+pending\b/m);
-  if (passing || failing || pending) {
-    return stats({
-      passed: passing ? parseInt(passing[1], 10) : 0,
-      failed: failing ? parseInt(failing[1], 10) : 0,
-      skipped: pending ? parseInt(pending[1], 10) : 0
-    });
-  }
-
-  return null;
+  const chosen = stats(pool[0].counts);
+  return chosen ? { kind: 'stats', stats: chosen } : { kind: 'none' };
 }
 
 /**
- * The names of failing tests: Jest's `● <name>` failure headers (not `● Console`) and `✕ <name>`
- * result lines, without the duration suffix. Deduplicated, in order of first appearance.
+ * Parse a test runner's summary (Jest, Vitest, Mocha) in ONE stream. Counts are read in any order.
+ *
+ * Returns null when no summary is found, it reports 0 tests, or the summaries in it disagree
+ * (selectTestSummary). There is no fallback that counts PASS/✓ tokens: a guess is how "0/0"
+ * became a pass. ANSI colour is stripped first.
+ */
+export function parseTestOutput(output: string): TestStats | null {
+  const selected = selectTestSummary({ stdout: scanText(output).summaryLines, stderr: [] });
+  return selected.kind === 'stats' ? selected.stats : null;
+}
+
+/**
+ * The failing test named on one line, if any: Jest's `● <name>` failure header (not `● Console`)
+ * or a `✕ <name>` result line, without the duration suffix. Strip ANSI first.
+ */
+function failedTestNameOf(line: string): string | undefined {
+  const header = line.match(/^\s*●\s+(.+?)\s*$/);
+  const cross = line.match(/^\s*✕\s+(.+?)(?:\s+\(\d+(?:\.\d+)?\s*m?s\))?\s*$/);
+  const name = header ? header[1] : cross ? cross[1] : undefined;
+  return name && name !== 'Console' ? name : undefined;
+}
+
+/**
+ * The names of failing tests (see failedTestNameOf). Deduplicated, in order of first appearance.
+ * The line scanner uses the same per-line helper.
  */
 export function parseFailedTestNames(output: string): string[] {
   const names: string[] = [];
-  for (const raw of stripAnsi(output).split('\n')) {
-    const header = raw.match(/^\s*●\s+(.+?)\s*$/);
-    const cross = raw.match(/^\s*✕\s+(.+?)(?:\s+\(\d+(?:\.\d+)?\s*m?s\))?\s*$/);
-    const name = header ? header[1] : cross ? cross[1] : undefined;
-    if (!name || name === 'Console') continue;
-    if (!names.includes(name)) names.push(name);
+  for (const line of stripAnsi(output).split('\n')) {
+    const name = failedTestNameOf(line);
+    if (name !== undefined && !names.includes(name)) names.push(name);
   }
   return names;
 }
@@ -434,7 +707,11 @@ export async function runTestSuite(projectRoot: string, options: ExecutionGateOp
 
   const timeoutMs = options.testTimeoutMs ?? DEFAULT_EXECUTION_TIMEOUTS.testTimeoutMs;
   const outcome = await runShellCommand(TEST_COMMAND, projectRoot, timeoutMs);
-  const testStats = parseTestOutput(stripAnsi(outcome.stdout + '\n' + outcome.stderr));
+  // Per stream, by runner marker (AC-96), from the scanned lines, never the bounded text (AC-95).
+  const selected = selectTestSummary({ stdout: outcome.scan.stdout.summaryLines, stderr: outcome.scan.stderr.summaryLines });
+  const testStats = selected.kind === 'stats' ? selected.stats : null;
+  const summaryProblem = selected.kind === 'ambiguous' ? `ambiguous test summary: ${selected.detail}` : undefined;
+  const failedTests = unique([...outcome.scan.stdout.failedTestNames, ...outcome.scan.stderr.failedTestNames]);
 
   const failureReason = outcome.error
     ? `could not run "${TEST_COMMAND}": ${outcome.error}`
@@ -442,15 +719,22 @@ export async function runTestSuite(projectRoot: string, options: ExecutionGateOp
       ? `test command timed out after ${seconds(timeoutMs)}`
       : outcome.exitCode !== 0
         ? `test command exited with code ${outcome.exitCode}`
-        : testStats === null
-          ? 'no tests detected in the test output'
-          : testStats.failed > 0
-            ? `${testStats.failed} test(s) failing`
-            : testStats.passed === 0
-              ? 'no test passed'
-              : undefined;
+        : summaryProblem !== undefined
+          ? summaryProblem
+          : testStats === null
+            ? 'no tests detected in the test output'
+            : testStats.failed > 0
+              ? `${testStats.failed} test(s) failing`
+              : testStats.passed === 0
+                ? 'no test passed'
+                : undefined;
 
-  return { ...fromOutcome('test', TEST_COMMAND, outcome, failureReason), ...(testStats ? { testStats } : {}) };
+  return {
+    ...fromOutcome('test', TEST_COMMAND, outcome, failureReason),
+    ...(testStats ? { testStats } : {}),
+    ...(summaryProblem !== undefined ? { summaryProblem } : {}),
+    failedTests
+  };
 }
 
 /** Run the build. A missing build script is SKIPPED (with a warning), not failed. */
@@ -473,17 +757,17 @@ export async function runBuild(projectRoot: string, options: ExecutionGateOption
 
 /**
  * Start the dev server and let it run for `devTimeoutMs`. Still up and clean at the timeout →
- * stopped, PASSED. Exits non-zero before then, or prints an error → FAILED. A missing dev script
- * is SKIPPED (with a warning).
+ * stopped, PASSED. Exits non-zero before then, or prints an error → FAILED. Exits 0 before then,
+ * cleanly → SKIPPED with a warning (AC-92): a server that is not running was not verified, and an
+ * exit 0 is not a failure either. A missing dev script is SKIPPED (with a warning).
  */
 export async function verifyDevServer(projectRoot: string, options: ExecutionGateOptions = {}): Promise<ExecutionResult> {
   if (!hasScript(projectRoot, 'dev')) return skipped('dev-server', DEV_COMMAND, 'dev');
 
   const timeoutMs = options.devTimeoutMs ?? DEFAULT_EXECUTION_TIMEOUTS.devTimeoutMs;
   const outcome = await runShellCommand(DEV_COMMAND, projectRoot, timeoutMs);
-  const errorLine = stripAnsi(outcome.stdout + '\n' + outcome.stderr)
-    .split('\n')
-    .find(line => DEV_SERVER_ERROR_PATTERN.test(line));
+  // The first error line anywhere in either stream (stdout first), from the scan (AC-95).
+  const errorLine = outcome.scan.stdout.devErrorLine ?? outcome.scan.stderr.devErrorLine;
 
   const failureReason = outcome.error
     ? `could not run "${DEV_COMMAND}": ${outcome.error}`
@@ -492,6 +776,16 @@ export async function verifyDevServer(projectRoot: string, options: ExecutionGat
       : errorLine !== undefined
         ? `dev server reported an error: ${errorLine.trim().substring(0, 200)}`
         : undefined;
+
+  if (failureReason === undefined && !outcome.timedOut && outcome.exitCode === 0) {
+    return {
+      ...fromOutcome('dev-server', DEV_COMMAND, outcome, undefined),
+      status: 'SKIPPED',
+      skipReason:
+        `the dev script exited with code 0 after ${seconds(outcome.duration)}, before the ${seconds(timeoutMs)} window ended; ` +
+        `a dev server that is not running was not verified`
+    };
+  }
 
   return fromOutcome('dev-server', DEV_COMMAND, outcome, failureReason);
 }
@@ -545,7 +839,10 @@ export function validateExecutionGate(audit: ExecutionAudit): ExecutionGateDecis
       else if (testResult.exitCode !== 0) testBlockers.push(`Test command exited with code ${testResult.exitCode}`);
 
       if (!testStats) {
-        testBlockers.push('no tests detected in the test output — a run that reports no counts cannot pass');
+        // Counts that disagree are not "no counts": say which (AC-96).
+        testBlockers.push(
+          testResult.summaryProblem ?? 'no tests detected in the test output — a run that reports no counts cannot pass'
+        );
       } else if (testStats.failed > 0) {
         testBlockers.push(
           `Test pass rate ${(testStats.passRate * 100).toFixed(1)}% — ${testStats.failed} failing (CRITICAL: 100% required)`
@@ -666,7 +963,8 @@ export async function auditExecution(projectRoot: string, options: ExecutionGate
 
   const results = [buildResult, testResult, devResult];
   const allPassed = results.every(r => r.passed);
-  const failedTests = parseFailedTestNames(testResult.stdout + '\n' + testResult.stderr);
+  // Scanned from every chunk of both streams, not the bounded text (AC-95).
+  const failedTests = testResult.failedTests ?? [];
   const buildErrors =
     buildResult.status === 'FAILED'
       ? [(buildResult.stderr || buildResult.stdout || buildResult.failureReason || '').slice(-500)]
