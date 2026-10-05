@@ -2,7 +2,7 @@
 
 Two things live here:
 
-1. **Feature Factory** — a deterministic, gate-driven engine that runs a feature through five stages with ten specialist agents. Hard gates, enforced in code.
+1. **Feature Factory** — a deterministic, gate-driven engine that runs a feature through five stages with eight specialist agents. Hard gates, enforced in code.
 2. **A library of Claude Code skills** — activated by `Read`-ing them in a session. Catalogued at the bottom of this file.
 
 Not an npm package. Not a CLI you install. You clone this repo and run it.
@@ -22,7 +22,7 @@ Not an npm package. Not a CLI you install. You clone this repo and run it.
 
 **Earlier versions of this README claimed things that were not true** — "PRODUCTION READY", "92% faster", "$0.08 per feature by feature #10". Those numbers were invented. The harness had never been compiled, its test suite had never run, and the orchestrator's agent calls were a mock that returned a hardcoded `status: 'PASS'`. That is all fixed now, but the claims are worth remembering as a caution: measure, then write it down.
 
-**Real measured cost:** one read-only agent, on an 8-file repo, took ~15 turns / 2–4 minutes and reported $0.45–$0.75. A full ten-agent feature is meaningfully more. On a Claude subscription you pay in usage limits rather than dollars, but plan accordingly.
+**Real measured cost:** one read-only agent, on an 8-file repo, took ~15 turns / 2–4 minutes and reported $0.45–$0.75. A full eight-agent feature is meaningfully more. On a Claude subscription you pay in usage limits rather than dollars, but plan accordingly.
 
 ---
 
@@ -30,7 +30,7 @@ Not an npm package. Not a CLI you install. You clone this repo and run it.
 
 A single AI session cannot reliably be product analyst, architect, backend engineer, frontend engineer, QA and reviewer at once. Mistakes compound silently when those roles collapse into one context.
 
-So the work is split across ten agents, each with one job, a clean context, and **only the tools it needs** — and between them sit gates that are *code*, not prose.
+So the work is split across eight agents, each with one job, a clean context, and **only the tools it needs** — and between them sit gates that are *code*, not prose.
 
 That last part is the whole point. A "gate" that is an instruction in a prompt is a suggestion; the model can talk itself past it. A gate that is a function returning `false` cannot be talked past. Everything in `factory/harness/` exists to make the gates unbypassable.
 
@@ -45,6 +45,18 @@ The gates never read an agent's self-reported status to decide whether it succee
 - "No tests written" scores a pass rate of **0**, not a vacuous 100%.
 
 Those are tested, offline, in CI, with no model and no tokens ([`stage-context.test.ts`](factory/test/harness/stage-context.test.ts)) — because the model's job is to *produce* output and the gate's job is to *judge* it, and judging is testable by handing the gate known-bad output directly.
+
+### How it works: the loop
+
+![The Feature Factory loop: Discover, Plan, Build, Verify, Approve and Success, with bounded retry loops, rework on rejection, resume after any stop, and a record that feeds the next run](docs/assets/factory-loop.svg)
+
+- **Forward:** each stage hands its documents to the next, and a gate written in code judges it before the run moves on.
+- **Three human stops:** CHECKPOINT 1 (the story), 2 (the technical brief) and 3 (the validated change, with the diff). Each approval is bound to a SHA-256 hash of exactly what was shown.
+- **Bounded loops:** a builder that fails retries up to 3 times and is told the exact gap. A CRITICAL Validator finding on a builder's file goes back to that builder for up to 2 rounds. Anything else escalates to a human.
+- **Rework and resume:** a rejection sends the work back to the agent that produced it, with your notes. Any stop — escalation, pause, crash — continues with `--resume`, which skips finished work and checks every gate again.
+- **Every run leaves a record:** `state.json`, archived runs, `baseline.json` (so the test bar only rises), and `--consolidate` patterns. Lessons become tests, gates or contract changes; the code is the source of truth.
+
+The diagram is drawn from [`factory/feature/SKILL.md`](factory/feature/SKILL.md), which a drift test keeps in line with the code.
 
 ---
 
