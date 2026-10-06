@@ -27,7 +27,7 @@ import {
   readArtifactContents,
   UnsafeArtifactPathError
 } from '../../harness/stage-context';
-import { ALL_SURFACES_PRESENT, backend, frontend, spec, story, testVerifier, validator } from '../fixtures/agent-outputs';
+import { ALL_SURFACES_PRESENT, backend, followup, frontend, skeptic, spec, story, testVerifier, validator } from '../fixtures/agent-outputs';
 import { canAdvanceStage, stageContracts } from '../../harness/stage-gates';
 import {
   ResearcherOutput,
@@ -527,6 +527,29 @@ describe('Stage 4 context — derived from the agents, never defaulted to a pass
     expect(ctx.metadata.regressionReferenceCount).toBe(10);
   });
 
+  it('AC-131 carries the harness\'s typed verdict as counts, and never a count from the raw issue list', () => {
+    const raw = validator({
+      status: 'FAIL',
+      issues: [{ severity: 'CRITICAL', file: 'src/a.ts', message: 'disproved later', suggestion: 'none', canFix: true }]
+    });
+    const ctx = buildStageContext({
+      stage: 4,
+      cwd: projectDir,
+      outputs: { test: testVerifier(), validator: raw },
+      harness: { validation: { passed: true, standing: [], disproved: ['0123456789ab'], recordedAt: '2026-10-05T00:00:00.000Z' } }
+    });
+
+    expect(ctx.metadata.validationVerdict).toEqual({ passed: true, standing: 0, disproved: 1 });
+    expect(ctx.metadata).not.toHaveProperty('criticalIssuesCount');
+  });
+
+  it('AC-131 without a harness verdict there is none, even with a clean Validator output, so the criterion fails closed', () => {
+    const ctx = buildStageContext({ stage: 4, cwd: projectDir, outputs: { test: testVerifier(), validator: validator() } });
+
+    expect(ctx.metadata).not.toHaveProperty('validationVerdict');
+    expect(ctx.metadata).not.toHaveProperty('criticalIssuesCount');
+  });
+
   it('AC-22 never reads the Validator\'s details.regressions', () => {
     const ctx = buildStageContext({
       stage: 4,
@@ -884,5 +907,27 @@ describe('persistArtifacts never writes through a symlink (NEW-MINOR-1)', () => 
 
     expect(() => persistArtifacts({ validator: output }, projectDir, RUN_DIR)).toThrow(UnsafeArtifactPathError);
     expect(existsSync(join(elsewhere, 'VALIDATION_REPORT.md'))).toBe(false);
+  });
+});
+
+describe('the follow-up and skeptic documents are persisted by the harness (AC-127, D-6)', () => {
+  it('AC-127 persistArtifacts writes VALIDATION_FOLLOWUP.md and a skeptic document into the run directory, beside the Validator report', () => {
+    const RUN_DIR = '.factory/run-1';
+    const review = skeptic()({ stage: 4, agent: '07c-validator-skeptic', prompt: 'Echo issueKey `0123456789ab`.' });
+
+    const written = persistArtifacts(
+      { validator: validator(), validatorFollowup: followup({ files: ['test/a.test.ts'] }), skeptic: review },
+      projectDir,
+      RUN_DIR
+    );
+
+    expect(written).toEqual([
+      { agent: '07-validator', path: join(RUN_DIR, 'VALIDATION_REPORT.md') },
+      { agent: '07b-validator-followup', path: join(RUN_DIR, 'VALIDATION_FOLLOWUP.md') },
+      { agent: '07c-validator-skeptic', path: join(RUN_DIR, 'SKEPTIC_REVIEW.md') }
+    ]);
+    expect(readFileSync(join(projectDir, RUN_DIR, 'VALIDATION_REPORT.md'), 'utf-8')).toBe('# Validation Report\n\nNo critical issues.');
+    expect(readFileSync(join(projectDir, RUN_DIR, 'VALIDATION_FOLLOWUP.md'), 'utf-8')).toMatch(/^# Validation Follow-up/);
+    expect(readFileSync(join(projectDir, RUN_DIR, 'SKEPTIC_REVIEW.md'), 'utf-8')).toMatch(/^# Skeptic Review/);
   });
 });

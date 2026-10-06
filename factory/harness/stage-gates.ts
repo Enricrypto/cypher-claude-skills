@@ -86,7 +86,8 @@ export interface ExecutionMeasurement {
  * metadata turns a wrong key into a compile error; the criteria below fail closed on a missing
  * input, so an empty context can no longer pass.
  *
- * Built by stage-context.ts from the Test Verifier, the story, the Validator and the brief.
+ * Built by stage-context.ts from the Test Verifier, the story, the Validator, the brief, and what
+ * the harness itself measured and decided.
  */
 export interface Stage4Metadata {
   acceptanceCriteriaTotalCount?: number;
@@ -94,7 +95,12 @@ export interface Stage4Metadata {
   acceptanceCriteriaNotCoverableCount?: number;
   /** From the approved story itself, so the Test Verifier cannot shrink the denominator. */
   storyAcceptanceCriteriaCount?: number;
-  criticalIssuesCount?: number;
+  /**
+   * PR B-2 (D-12, AC-131): the harness's typed verdict, as counts: CRITICAL issues still standing
+   * after the skeptics, and those both skeptics disproved. Harness-side, never the raw issue list
+   * (which still holds a disproved CRITICAL). Replaces `criticalIssuesCount`.
+   */
+  validationVerdict?: { passed: boolean; standing: number; disproved: number };
   securityIssuesCount?: number;
   securityBlockers?: string[];
   /** The latest Gate 2 measurement. Harness-side: passed by the orchestrator, never by an agent. */
@@ -293,7 +299,7 @@ export const stageContracts: Record<number, StageContract> = {
         },
         {
           name: 'Validation Passed',
-          description: 'No Critical issues in VALIDATION_REPORT.md',
+          description: 'The typed validation verdict passed: no CRITICAL issue standing after the skeptics',
           validator: async (ctx) => validateValidationPassed(ctx),
           severity: 'CRITICAL'
         },
@@ -717,25 +723,45 @@ async function validateAcceptanceTestsComplete(ctx: StageContext): Promise<Crite
   };
 }
 
+/**
+ * "Validation Passed" judges the harness's typed verdict (D-12, AC-131), never the raw issue list:
+ * a CRITICAL both skeptics disproved is still in the list, and must not block. Fails closed when
+ * there is no verdict (or a malformed one), and fails when it did not pass or anything stands.
+ */
 async function validateValidationPassed(ctx: StageContext): Promise<CriterionResult> {
-  const criticalIssues = (ctx.metadata as Stage4Metadata).criticalIssuesCount;
-  if (typeof criticalIssues !== 'number') {
+  const verdict = (ctx.metadata as Stage4Metadata).validationVerdict;
+  if (
+    typeof verdict !== 'object' ||
+    verdict === null ||
+    typeof verdict.passed !== 'boolean' ||
+    !Number.isSafeInteger(verdict.standing) ||
+    !Number.isSafeInteger(verdict.disproved)
+  ) {
     return {
       passed: false,
       score: 0,
-      details: 'No Validator result to judge',
-      blockers: ['Run 07-Validator; an absent validation is not a clean one']
+      details: 'No validation verdict to judge',
+      blockers: ['Run the Stage 4 verification; an absent verdict is not a clean one']
     };
   }
-  if (criticalIssues > 0) {
+  const disproved = verdict.disproved > 0 ? ` (${verdict.disproved} disproved by both skeptics)` : '';
+  if (verdict.standing > 0) {
     return {
       passed: false,
       score: 0,
-      details: `${criticalIssues} Critical validation issues found`,
+      details: `${verdict.standing} CRITICAL issue(s) standing${disproved}`,
       blockers: ['Fix all Critical issues before advancing']
     };
   }
-  return { passed: true, score: 100, details: 'Validation report clean - no Critical issues' };
+  if (!verdict.passed) {
+    return {
+      passed: false,
+      score: 0,
+      details: `The validation verdict did not pass${disproved}`,
+      blockers: ['Fix all Critical issues before advancing']
+    };
+  }
+  return { passed: true, score: 100, details: `Validation verdict passed: no CRITICAL issue standing${disproved}` };
 }
 
 async function validateSecurityPassed(ctx: StageContext): Promise<CriterionResult> {

@@ -52,6 +52,7 @@ describe('a finished run leaves a record', () => {
       featureName: 'escalating-run',
       featureDescription: 'add 2FA',
       cwd: projectDir,
+      reviewRoot: `${projectDir}-review`,
       changes: fakeChangeTracker(),
       invoke: planningInvoker()
       // No approver → fails closed at Checkpoint 1.
@@ -68,6 +69,7 @@ describe('a finished run leaves a record', () => {
       featureName: 'why-it-stopped',
       featureDescription: 'add 2FA',
       cwd: projectDir,
+      reviewRoot: `${projectDir}-review`,
       changes: fakeChangeTracker(),
       invoke: planningInvoker()
     });
@@ -84,6 +86,7 @@ describe('a finished run leaves a record', () => {
       featureName: 'history',
       featureDescription: 'add 2FA',
       cwd: projectDir,
+      reviewRoot: `${projectDir}-review`,
       changes: fakeChangeTracker(),
       invoke: planningInvoker(),
       approveCheckpoint: async () => true
@@ -106,6 +109,7 @@ describe('a finished run leaves a record', () => {
       featureName: 'colocated',
       featureDescription: 'add 2FA',
       cwd: projectDir,
+      reviewRoot: `${projectDir}-review`,
       changes: fakeChangeTracker(),
       invoke: planningInvoker(),
       approveCheckpoint: async () => true
@@ -137,6 +141,7 @@ describe('a finished run leaves a record', () => {
       featureName: 'mid-run',
       featureDescription: 'add 2FA',
       cwd: projectDir,
+      reviewRoot: `${projectDir}-review`,
       changes: fakeChangeTracker(),
       invoke,
       approveCheckpoint: async () => true
@@ -163,6 +168,7 @@ describe('a finished run leaves a record', () => {
         featureName: 'unsaveable',
         featureDescription: 'add 2FA',
         cwd: projectDir,
+        reviewRoot: `${projectDir}-review`,
         resumeFromState: pinned,
         invoke: planningInvoker(),
         approveCheckpoint: async () => true,
@@ -185,6 +191,7 @@ describe('a finished run leaves a record', () => {
         featureName: 'no-phantom-verdict',
         featureDescription: 'add 2FA',
         cwd: projectDir,
+        reviewRoot: `${projectDir}-review`,
         resumeFromState: pinned,
         invoke: planningInvoker(),
         approveCheckpoint: async () => true,

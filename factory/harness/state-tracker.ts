@@ -15,7 +15,9 @@
  * record now lands at <project>/.factory/<featureId>/state.json, beside that run's documents.)
  */
 
-import { FeatureFactoryAgentOutput } from './agent-output-schema';
+import { isAbsolute } from 'path';
+
+import { FeatureFactoryAgentOutput, ValidatorFollowupOutput, ValidatorOutput } from './agent-output-schema';
 import { classifyRun, samePhase } from './run-lifecycle';
 
 /**
@@ -139,6 +141,114 @@ export interface HeadMove {
   current: { commit?: string; branch?: string };
 }
 
+// ─── PR B-2 verification records (D-7) ─────────────────────────────────────────────────────────
+
+/** What a review copy was made from (D-3): a recorded Stage 3 snapshot, or the AC-126 fallback. */
+export type ReviewSource =
+  | { kind: 'snapshot'; n: number; ref: string; commit: string; tree: string }
+  | { kind: 'working-tree'; reason: string };
+
+/**
+ * One review copy (D-3, D-B2-2): its directory, its source, and the leaf count and leaf digest
+ * taken when it was made (review-copy.ts `leafDigest`). A resume reuses the copy only while
+ * `copyIntact(dir, {entries, digest})` holds.
+ */
+export interface ReviewCopyRecord {
+  dir: string;
+  source: ReviewSource;
+  entries: number;
+  /** sha256 (64 lowercase hex) of the copy's sorted leaf paths and types (D-B2-2). */
+  digest: string;
+  madeAt: string;
+}
+
+/** The review that reported an issue (D-10). */
+export type IssueOrigin = '07-validator' | '07b-validator-followup';
+export const ISSUE_ORIGINS: readonly IssueOrigin[] = ['07-validator', '07b-validator-followup'];
+
+/** The two blind skeptic invocations per CRITICAL issue (D-11). */
+export type SkepticInstance = 'A' | 'B';
+export const SKEPTIC_INSTANCES: readonly SkepticInstance[] = ['A', 'B'];
+
+/** One skeptic's recorded verdict on one issue (D-11, AC-133). */
+export interface SkepticVerdictRecord {
+  issueKey: string;
+  origin: IssueOrigin;
+  instance: SkepticInstance;
+  verdict: 'DISPROVED' | 'UPHELD';
+  reason: string;
+  /** The document it was persisted as (`SKEPTIC_E<e>_<issueKey>_<A|B>.md`). */
+  document: string;
+  recordedAt: string;
+}
+
+/**
+ * The tree the Test Verifier's changes are measured against (D-2, IMPORTANT-1): recorded on a
+ * first-pass evaluation, and committed, BEFORE the Test Verifier is invoked in it.
+ * - `tree`: the working tree's git tree id at that moment (`ChangeTracker.workingTreeId`), for an
+ *   evaluation whose copy is a snapshot's;
+ * - `copy`: the evaluation's own fallback copy of the working tree (AC-126), made before the Test
+ *   Verifier started, with the leaf count and digest it must still have when measured against.
+ * An evaluation that follows one whose baseline was not cleared (its measurement failed, or found a
+ * change outside a test path) records THAT baseline again, so the earlier Test Verifier's writes are
+ * still measured until they are reverted (verification.ts earlierBaseline).
+ */
+export type MeasurementBaseline =
+  | { kind: 'tree'; tree: string; recordedAt: string }
+  | { kind: 'copy'; dir: string; entries: number; digest: string; recordedAt: string };
+
+/** What the harness measured the Test Verifier to have changed against the evaluation's baseline (D-2). */
+export type TestVerifierChanges =
+  | { kind: 'none' }
+  | { kind: 'tests'; files: string[] }
+  | { kind: 'outside-tests'; files: string[]; outside: string[] };
+
+/**
+ * The typed verdict the Stage 4 gate reads (D-12, AC-131): the keys of the CRITICAL issues still
+ * standing and of those both skeptics disproved. `passed` is true exactly when nothing stands.
+ */
+export interface ValidationVerdict {
+  passed: boolean;
+  standing: string[];
+  disproved: string[];
+  recordedAt: string;
+}
+
+/** A recorded agent timing. */
+export interface StepTiming {
+  startedAt: string;
+  completedAt: string;
+}
+
+/**
+ * One evaluation (D-7): one main-Validator review with everything that hangs off it. Keyed by
+ * `(cycle, round)`, plus the run-wide `e` (1-based). Every slot except `copy` (replaceable from
+ * the same source only) and `testVerifierChanges` (re-measured on resume) is write-once, and a
+ * closed evaluation takes no further record; the recorders below throw otherwise.
+ */
+export interface ValidatorEvaluation {
+  e: number;
+  /** The active CHECKPOINT 3 rework cycle, else 0. */
+  cycle: number;
+  /** validatorRoundsCompleted at the evaluation's Gate 2. */
+  round: number;
+  kind: 'first-pass' | 'validator-round';
+  /** The verification-start marker (D-14, AC-157). */
+  startedAt: string;
+  copy?: ReviewCopyRecord;
+  /** The directories of copies `copy` replaced (re-extracted), oldest first (MINOR-2). */
+  previousCopyDirs?: string[];
+  /** What the Test Verifier's changes are measured against (IMPORTANT-1). Write-once. */
+  baseline?: MeasurementBaseline;
+  validator?: { output: ValidatorOutput; timing: StepTiming };
+  testVerifierChanges?: TestVerifierChanges;
+  followup?:
+    | { status: 'skipped'; reason: string }
+    | { status: 'reviewed'; files: string[]; output: ValidatorFollowupOutput; timing: StepTiming };
+  skeptics?: SkepticVerdictRecord[];
+  closed?: { outcome: 'decided'; verdict: ValidationVerdict } | { outcome: 'escalated'; at: string };
+}
+
 /** One agent invocation, timed by the harness around the call (A-2, D-13). */
 export interface AgentInvocationRecord {
   stage: number;
@@ -149,6 +259,14 @@ export interface AgentInvocationRecord {
   phase?: StepPhase['phase'];
   round?: number;
   attempt?: number;
+  /** PR B-2 (D-8): the evaluation (`e`) a Stage 4 verification invocation belonged to. */
+  evaluation?: number;
+  /** PR B-2 (D-11): which skeptic instance this invocation was. */
+  instance?: SkepticInstance;
+  /** PR B-2 (I-16): set when the invoker threw; the record is still written, then the error is rethrown. */
+  outcome?: 'threw';
+  /** PR B-2 (I-16): the first line of what the invoker threw, at most 500 characters. */
+  error?: string;
 }
 
 export interface AgentStepRecord {
@@ -213,7 +331,10 @@ export interface EscalationRecord {
     // written (AC-86).
     | 'HEAD_MOVED'
     // PR B-1 (D-8): git could not write the snapshot; nothing was recorded (AC-88).
-    | 'SNAPSHOT_FAILED';
+    | 'SNAPSHOT_FAILED'
+    // PR B-2 (I-18): the review copy could not be extracted, copied or re-made, or the Test
+    // Verifier's changes could not be measured.
+    | 'REVIEW_COPY_FAILED';
   severity: 'CRITICAL' | 'IMPORTANT';
   context: {
     failingTests?: string[];
@@ -348,6 +469,12 @@ export interface FeatureState {
    * CP3 shows no snapshot section, I-5).
    */
   stage3Snapshots?: Stage3Snapshot[];
+
+  /**
+   * PR B-2 (D-7): one record per Stage 4 verification evaluation, in order (`e` = index + 1).
+   * NOT initialised by createFeatureState: absent means the run has no B-2 evaluation.
+   */
+  validatorEvaluations?: ValidatorEvaluation[];
 
   // Metrics
   metrics: {
@@ -485,7 +612,9 @@ export function recordEscalation(
     stage,
     agent,
     reason,
-    severity: ['MAX_LOOPS', 'CRITICAL_ISSUE', 'TIMEOUT', 'HEAD_MOVED', 'SNAPSHOT_FAILED'].includes(reason) ? 'CRITICAL' : 'IMPORTANT',
+    severity: ['MAX_LOOPS', 'CRITICAL_ISSUE', 'TIMEOUT', 'HEAD_MOVED', 'SNAPSHOT_FAILED', 'REVIEW_COPY_FAILED'].includes(reason)
+      ? 'CRITICAL'
+      : 'IMPORTANT',
     context: {
       message: context,
       ...details
@@ -1109,16 +1238,17 @@ export function stage3SnapshotNumber(state: FeatureState, at: BuilderPhase): num
   return written.reduce((highest, entry) => Math.max(highest, entry.n), 0) + 1;
 }
 
-/** The agents that run after a Stage 3 gate passed: Stage 4's verification (IMPORTANT-1). */
-const VERIFYING_AGENTS: readonly string[] = ['06-test-verifier', '07-validator'];
+/** The agents that run after a Stage 3 gate passed: Stage 4's verification (IMPORTANT-1, B-2 D-14). */
+const VERIFYING_AGENTS: readonly string[] = ['06-test-verifier', '07-validator', '07b-validator-followup', '07c-validator-skeptic'];
 
 /**
  * Whether the run has moved past the Stage 3 snapshot of phase `at` (IMPORTANT-1, resume by
- * recorded completion): a `written` entry for `at` exists, AND a later step is on record — a Test
- * Verifier or Validator invocation that started, or a Gate 2 evaluation recorded, at or after the
+ * recorded completion): a `written` entry for `at` exists, AND a later step is on record — a
+ * verifying agent's invocation that started, a Gate 2 evaluation recorded, or (PR B-2, D-14,
+ * AC-157) a verification evaluation that started (open, decided or escalated), at or after the
  * snapshot was taken. Then that gate pass is complete, and a resume must not re-evaluate it (the
  * tree now holds later agents' work). Without a later step — a kill after the ref write and before
- * the next agent (AC-85) — it is false, and the gate is evaluated again.
+ * verification starts (AC-85) — it is false, and the gate is evaluated again.
  */
 export function stage3SnapshotPassedBy(state: FeatureState, at: BuilderPhase): boolean {
   const entry = (state.stage3Snapshots ?? []).find(
@@ -1129,7 +1259,8 @@ export function stage3SnapshotPassedBy(state: FeatureState, at: BuilderPhase): b
   const after = (time: string) => Date.parse(time) >= taken;
   return (
     (state.agentInvocations ?? []).some(invocation => VERIFYING_AGENTS.includes(invocation.agent) && after(invocation.startedAt)) ||
-    (state.executionGateHistory ?? []).some(record => after(record.recordedAt))
+    (state.executionGateHistory ?? []).some(record => after(record.recordedAt)) ||
+    (state.validatorEvaluations ?? []).some(evaluation => after(evaluation.startedAt))
   );
 }
 
@@ -1140,4 +1271,278 @@ export function latestStage3Snapshot(state: FeatureState): WrittenStage3Snapshot
     if (entry.status === 'written' && (latest === undefined || entry.n > latest.n)) latest = entry;
   }
   return latest;
+}
+
+// ─── PR B-2 verification evaluation recorders (D-7) ──────────────────────────────────────────
+//
+// Pure, like the rest: each takes the state, records one fact on one evaluation, and returns it;
+// the orchestrator commits before the next invocation. Write-once slots are enforced here, by
+// throwing (AC-133): a resume that would overwrite a recorded slot is a bug, never a silent
+// replacement. A closed evaluation takes no further record.
+
+const SHA256_DIGEST = /^[0-9a-f]{64}$/;
+const EVALUATION_KINDS: ReadonlyArray<ValidatorEvaluation['kind']> = ['first-pass', 'validator-round'];
+
+function assertCount(value: unknown, what: string): asserts value is number {
+  if (!Number.isSafeInteger(value) || (value as number) < 0) {
+    throw new RangeError(`${what} must be a whole number, at least 0; got ${String(value)}.`);
+  }
+}
+
+function assertStringList(value: unknown, what: string): asserts value is string[] {
+  if (!Array.isArray(value) || !value.every(item => typeof item === 'string')) {
+    throw new TypeError(`${what} must be a list of strings; got ${JSON.stringify(value)}.`);
+  }
+}
+
+function assertTiming(timing: unknown): asserts timing is StepTiming {
+  const t = timing as StepTiming | undefined;
+  if (typeof t !== 'object' || t === null) throw new TypeError('A recorded step needs its timing.');
+  durationBetween(t.startedAt, t.completedAt);
+}
+
+/** The evaluation numbered `e`, if it is still open; throws for an unknown or closed one. */
+function openRecord(state: FeatureState, e: number): ValidatorEvaluation {
+  const evaluation = (state.validatorEvaluations ?? []).find(ev => ev.e === e);
+  if (!evaluation) throw new RangeError(`No verification evaluation ${String(e)} is recorded.`);
+  if (evaluation.closed) throw new Error(`Verification evaluation ${e} is closed (${evaluation.closed.outcome}); it takes no further record.`);
+  return evaluation;
+}
+
+function sameSource(a: ReviewSource, b: ReviewSource): boolean {
+  if (a.kind === 'snapshot' && b.kind === 'snapshot') return a.n === b.n && a.ref === b.ref && a.commit === b.commit && a.tree === b.tree;
+  if (a.kind === 'working-tree' && b.kind === 'working-tree') return a.reason === b.reason;
+  return false;
+}
+
+function copyOfSource(source: ReviewSource): ReviewSource {
+  const s = source as ReviewSource | undefined;
+  if (s?.kind === 'snapshot') {
+    if (!Number.isInteger(s.n) || s.n < 1) throw new RangeError(`A review copy's snapshot number must be a positive integer; got ${String(s.n)}.`);
+    assertNonBlank(s.ref, "A review copy's snapshot ref");
+    assertObjectId(s.commit, "A review copy's snapshot commit");
+    assertObjectId(s.tree, "A review copy's snapshot tree");
+    return { kind: 'snapshot', n: s.n, ref: s.ref, commit: s.commit, tree: s.tree };
+  }
+  if (s?.kind === 'working-tree') {
+    assertNonBlank(s.reason, "A working-tree review copy's reason");
+    return { kind: 'working-tree', reason: s.reason };
+  }
+  throw new TypeError(`A review copy's source must be a snapshot or the working tree; got ${JSON.stringify(source)}.`);
+}
+
+function copyOfVerdict(verdict: ValidationVerdict): ValidationVerdict {
+  const v = verdict as ValidationVerdict | undefined;
+  if (typeof v !== 'object' || v === null || typeof v.passed !== 'boolean') throw new TypeError('A decided evaluation needs a verdict with a boolean `passed`.');
+  assertStringList(v.standing, "A verdict's standing issue keys");
+  assertStringList(v.disproved, "A verdict's disproved issue keys");
+  assertNonBlank(v.recordedAt, "A verdict's time");
+  if (v.passed !== (v.standing.length === 0)) {
+    throw new Error(`A verdict passes exactly when no issue stands; got passed ${v.passed} with ${v.standing.length} standing.`);
+  }
+  return { passed: v.passed, standing: [...v.standing], disproved: [...v.disproved], recordedAt: v.recordedAt };
+}
+
+/**
+ * Open evaluation `e = count + 1` at `(cycle, round)` (D-7), stamped now: the verification-start
+ * marker (D-14, AC-157). Commit it before the copy is made and before any agent of the evaluation
+ * is invoked. Throws while another evaluation is open: an open one is continued (openEvaluation),
+ * never doubled.
+ */
+export function recordEvaluationStart(
+  state: FeatureState,
+  at: { cycle: number; round: number; kind: ValidatorEvaluation['kind'] }
+): FeatureState {
+  assertCount(at?.cycle, 'An evaluation cycle');
+  assertCount(at.round, 'An evaluation round');
+  if (!EVALUATION_KINDS.includes(at.kind)) throw new TypeError(`An evaluation kind must be first-pass or validator-round; got ${JSON.stringify(at.kind)}.`);
+  const evaluations = state.validatorEvaluations ?? [];
+  const open = evaluations.find(ev => !ev.closed);
+  if (open) throw new Error(`Verification evaluation ${open.e} is still open; continue it or close it before starting another.`);
+  state.validatorEvaluations = [
+    ...evaluations,
+    { e: evaluations.length + 1, cycle: at.cycle, round: at.round, kind: at.kind, startedAt: new Date().toISOString() }
+  ];
+  return state;
+}
+
+/** The open evaluation of `(cycle, round)`, which a resume continues (AC-123); else undefined. */
+export function openEvaluation(state: FeatureState, cycle: number, round: number): ValidatorEvaluation | undefined {
+  return (state.validatorEvaluations ?? []).find(ev => !ev.closed && ev.cycle === cycle && ev.round === round);
+}
+
+/**
+ * Record evaluation `e`'s review copy (D-3, D-B2-2). A recorded copy may be replaced (a
+ * re-extraction into a new directory after copyIntact failed) only with the SAME source.
+ */
+export function recordReviewCopy(state: FeatureState, e: number, copy: ReviewCopyRecord): FeatureState {
+  const evaluation = openRecord(state, e);
+  if (typeof copy?.dir !== 'string' || !isAbsolute(copy.dir)) throw new TypeError(`A review copy directory must be an absolute path; got ${JSON.stringify(copy?.dir)}.`);
+  const source = copyOfSource(copy.source);
+  assertCount(copy.entries, "A review copy's leaf count");
+  if (typeof copy.digest !== 'string' || !SHA256_DIGEST.test(copy.digest)) {
+    throw new TypeError(`A review copy's leaf digest must be 64 lowercase hex; got ${JSON.stringify(copy.digest)}.`);
+  }
+  assertNonBlank(copy.madeAt, "A review copy's time");
+  if (evaluation.copy && !sameSource(evaluation.copy.source, source)) {
+    throw new Error(`Evaluation ${e}'s review copy can only be re-made from its recorded source, never from another one.`);
+  }
+  // MINOR-2: a replaced copy's directory is kept, so paths the Validator reported from it still map.
+  if (evaluation.copy && evaluation.copy.dir !== copy.dir) {
+    evaluation.previousCopyDirs = [...(evaluation.previousCopyDirs ?? []), evaluation.copy.dir];
+  }
+  evaluation.copy = { dir: copy.dir, source, entries: copy.entries, digest: copy.digest, madeAt: copy.madeAt };
+  return state;
+}
+
+/** Every directory evaluation `evaluation`'s review copy has had: the current one, then those it replaced (MINOR-2). */
+export function reviewCopyDirs(evaluation: ValidatorEvaluation): string[] {
+  return evaluation.copy ? [evaluation.copy.dir, ...(evaluation.previousCopyDirs ?? [])] : [...(evaluation.previousCopyDirs ?? [])];
+}
+
+/**
+ * Record what evaluation `e` measures the Test Verifier's changes against (IMPORTANT-1), before the
+ * Test Verifier is invoked in it. First-pass evaluations only. Write-once: a resume that invokes
+ * the Test Verifier again in the same evaluation keeps the first baseline, so both runs' writes are
+ * measured.
+ */
+export function recordMeasurementBaseline(state: FeatureState, e: number, baseline: MeasurementBaseline): FeatureState {
+  const evaluation = openRecord(state, e);
+  if (evaluation.kind !== 'first-pass') throw new Error(`Evaluation ${e} is a ${evaluation.kind}; only a first pass measures the Test Verifier.`);
+  if (evaluation.baseline) throw new Error(`Evaluation ${e} already has its measurement baseline; it is never overwritten.`);
+  const b = baseline as MeasurementBaseline | undefined;
+  if (b?.kind === 'tree') {
+    assertObjectId(b.tree, 'A measurement baseline tree');
+    assertNonBlank(b.recordedAt, "A measurement baseline's time");
+    evaluation.baseline = { kind: 'tree', tree: b.tree, recordedAt: b.recordedAt };
+  } else if (b?.kind === 'copy') {
+    if (typeof b.dir !== 'string' || !isAbsolute(b.dir)) throw new TypeError(`A measurement baseline copy must be an absolute path; got ${JSON.stringify(b.dir)}.`);
+    assertCount(b.entries, "A measurement baseline copy's leaf count");
+    if (typeof b.digest !== 'string' || !SHA256_DIGEST.test(b.digest)) {
+      throw new TypeError(`A measurement baseline copy's leaf digest must be 64 lowercase hex; got ${JSON.stringify(b.digest)}.`);
+    }
+    assertNonBlank(b.recordedAt, "A measurement baseline's time");
+    evaluation.baseline = { kind: 'copy', dir: b.dir, entries: b.entries, digest: b.digest, recordedAt: b.recordedAt };
+  } else {
+    throw new TypeError(`A measurement baseline must be a tree or a copy; got ${JSON.stringify(baseline)}.`);
+  }
+  return state;
+}
+
+/** Record evaluation `e`'s main Validator output and its timing (D-7, I-7). Write-once. */
+export function recordEvaluationValidator(state: FeatureState, e: number, output: ValidatorOutput, timing: StepTiming): FeatureState {
+  const evaluation = openRecord(state, e);
+  if (evaluation.validator) throw new Error(`Evaluation ${e} already has the main Validator's output; it is never overwritten.`);
+  if (output?.agent !== '07-validator') throw new TypeError(`The main Validator's output must come from 07-validator; got ${JSON.stringify(output?.agent)}.`);
+  assertTiming(timing);
+  evaluation.validator = { output, timing: { startedAt: timing.startedAt, completedAt: timing.completedAt } };
+  return state;
+}
+
+/** Record what the Test Verifier changed (D-2). Replaceable: a resume measures again, and the latest counts. */
+export function recordTestVerifierChanges(state: FeatureState, e: number, changes: TestVerifierChanges): FeatureState {
+  const evaluation = openRecord(state, e);
+  let record: TestVerifierChanges;
+  if (changes?.kind === 'none') {
+    record = { kind: 'none' };
+  } else if (changes?.kind === 'tests') {
+    assertStringList(changes.files, "The Test Verifier's changed files");
+    record = { kind: 'tests', files: [...changes.files] };
+  } else if (changes?.kind === 'outside-tests') {
+    assertStringList(changes.files, "The Test Verifier's changed files");
+    assertStringList(changes.outside, "The Test Verifier's files outside a test path");
+    record = { kind: 'outside-tests', files: [...changes.files], outside: [...changes.outside] };
+  } else {
+    throw new TypeError(`A Test Verifier measurement must be none, tests or outside-tests; got ${JSON.stringify(changes)}.`);
+  }
+  evaluation.testVerifierChanges = record;
+  return state;
+}
+
+/** Record evaluation `e`'s follow-up (D-9): skipped with a reason, or reviewed. Write-once. */
+export function recordFollowup(state: FeatureState, e: number, followup: NonNullable<ValidatorEvaluation['followup']>): FeatureState {
+  const evaluation = openRecord(state, e);
+  if (evaluation.followup) throw new Error(`Evaluation ${e} already has its follow-up recorded; it is never overwritten.`);
+  if (followup?.status === 'skipped') {
+    assertNonBlank(followup.reason, 'A skipped follow-up reason');
+    evaluation.followup = { status: 'skipped', reason: followup.reason };
+  } else if (followup?.status === 'reviewed') {
+    assertStringList(followup.files, "The follow-up's files");
+    if (followup.output?.agent !== '07b-validator-followup') throw new TypeError(`A follow-up output must come from 07b-validator-followup; got ${JSON.stringify(followup.output?.agent)}.`);
+    assertTiming(followup.timing);
+    evaluation.followup = {
+      status: 'reviewed',
+      files: [...followup.files],
+      output: followup.output,
+      timing: { startedAt: followup.timing.startedAt, completedAt: followup.timing.completedAt }
+    };
+  } else {
+    throw new TypeError(`A follow-up must be skipped or reviewed; got ${JSON.stringify((followup as { status?: unknown })?.status)}.`);
+  }
+  return state;
+}
+
+/** Record one skeptic verdict on evaluation `e` (D-11, AC-133): one per (issueKey, instance), stamped now. */
+export function recordSkepticVerdict(state: FeatureState, e: number, verdict: Omit<SkepticVerdictRecord, 'recordedAt'>): FeatureState {
+  const evaluation = openRecord(state, e);
+  assertNonBlank(verdict?.issueKey, 'A skeptic verdict issue key');
+  if (!ISSUE_ORIGINS.includes(verdict.origin)) throw new TypeError(`A skeptic verdict's origin must be 07-validator or 07b-validator-followup; got ${JSON.stringify(verdict.origin)}.`);
+  if (!SKEPTIC_INSTANCES.includes(verdict.instance)) throw new TypeError(`A skeptic instance must be A or B; got ${JSON.stringify(verdict.instance)}.`);
+  if (verdict.verdict !== 'DISPROVED' && verdict.verdict !== 'UPHELD') throw new TypeError(`A skeptic verdict must be DISPROVED or UPHELD; got ${JSON.stringify(verdict.verdict)}.`);
+  assertNonBlank(verdict.reason, 'A skeptic verdict reason');
+  assertNonBlank(verdict.document, 'A skeptic verdict document');
+  const skeptics = evaluation.skeptics ?? [];
+  if (skeptics.some(s => s.issueKey === verdict.issueKey && s.instance === verdict.instance)) {
+    throw new Error(`Evaluation ${e} already has skeptic ${verdict.instance}'s verdict on issue ${verdict.issueKey}; it is never overwritten.`);
+  }
+  evaluation.skeptics = [
+    ...skeptics,
+    {
+      issueKey: verdict.issueKey,
+      origin: verdict.origin,
+      instance: verdict.instance,
+      verdict: verdict.verdict,
+      reason: verdict.reason,
+      document: verdict.document,
+      recordedAt: new Date().toISOString()
+    }
+  ];
+  return state;
+}
+
+/** Close evaluation `e` (D-7): decided with its verdict, or escalated. Write-once. */
+export function closeEvaluation(state: FeatureState, e: number, closed: NonNullable<ValidatorEvaluation['closed']>): FeatureState {
+  const evaluation = (state.validatorEvaluations ?? []).find(ev => ev.e === e);
+  if (!evaluation) throw new RangeError(`No verification evaluation ${String(e)} is recorded.`);
+  if (evaluation.closed) throw new Error(`Evaluation ${e} is already closed (${evaluation.closed.outcome}); it is never closed again.`);
+  if (closed?.outcome === 'decided') {
+    evaluation.closed = { outcome: 'decided', verdict: copyOfVerdict(closed.verdict) };
+  } else if (closed?.outcome === 'escalated') {
+    assertNonBlank(closed.at, 'An escalated evaluation time');
+    evaluation.closed = { outcome: 'escalated', at: closed.at };
+  } else {
+    throw new TypeError(`An evaluation closes decided or escalated; got ${JSON.stringify((closed as { outcome?: unknown })?.outcome)}.`);
+  }
+  return state;
+}
+
+/**
+ * Close every open evaluation as escalated at `at` (D-7, I-6). `finish(ESCALATED)` calls it, so a
+ * resume after an escalation starts a new evaluation; a kill never reaches it and leaves one open.
+ */
+export function closeOpenEvaluations(state: FeatureState, at: string): FeatureState {
+  assertNonBlank(at, 'An escalated evaluation time');
+  for (const evaluation of state.validatorEvaluations ?? []) {
+    if (!evaluation.closed) evaluation.closed = { outcome: 'escalated', at };
+  }
+  return state;
+}
+
+/** The verdict of rework cycle `cycle`'s latest decided evaluation (D-12), or undefined. */
+export function currentValidationVerdict(state: FeatureState, cycle: number): ValidationVerdict | undefined {
+  let verdict: ValidationVerdict | undefined;
+  for (const evaluation of state.validatorEvaluations ?? []) {
+    if (evaluation.cycle === cycle && evaluation.closed?.outcome === 'decided') verdict = evaluation.closed.verdict;
+  }
+  return verdict;
 }

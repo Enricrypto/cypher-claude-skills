@@ -2,7 +2,7 @@
 
 Two things live here:
 
-1. **Feature Factory** — a deterministic, gate-driven engine that runs a feature through four stages and three human checkpoints, with eight specialist agents. Hard gates, enforced in code.
+1. **Feature Factory** — a deterministic, gate-driven engine that runs a feature through four stages and three human checkpoints, with eight specialist agents, plus a follow-up reviewer and a skeptic in Stage 4. Hard gates, enforced in code.
 2. **A library of Claude Code skills** — activated by `Read`-ing them in a session. Catalogued at the bottom of this file.
 
 Not an npm package. Not a CLI you install. You clone this repo and run it.
@@ -52,7 +52,7 @@ Those are tested, offline, in CI, with no model and no tokens ([`stage-context.t
 
 - **Forward:** each stage hands its documents to the next, and a gate written in code judges it before the run moves on.
 - **Three human stops:** CHECKPOINT 1 (the story), 2 (the technical brief) and 3 (the validated change, with the diff). Each approval is bound to a SHA-256 hash of exactly what was shown.
-- **Bounded loops:** a builder that fails retries up to 3 times and is told the exact gap. A CRITICAL Validator finding on a builder's file goes back to that builder for up to 2 rounds. Anything else escalates to a human.
+- **Bounded loops:** a builder that fails retries up to 3 times and is told the exact gap. A CRITICAL Validator finding on a builder's file goes back to that builder for up to 2 rounds, unless two blind skeptics, started together, both disprove it. Anything else escalates to a human.
 - **Rework and resume:** a rejection sends the work back to the agent that produced it, with your notes. Any stop — escalation, pause, crash — continues with `--resume`, which skips finished work and checks every gate again.
 - **Every run leaves a record:** `state.json`, archived runs, `baseline.json` (so the test bar only rises), and `--consolidate` patterns. Lessons become tests, gates or contract changes; the code is the source of truth.
 
@@ -98,8 +98,12 @@ Stage 2  PLAN       02-story-writer                        → User Story
                     ⏸ CHECKPOINT 2 (the brief)
 Stage 3  EXECUTE    04-backend-builder → 05-frontend-builder   (max 3 attempts each)
                     Gate 1 (claimed files exist) → snapshot under refs/factory/<id>/
-Stage 4  VERIFY     Gate 1.5 (infrastructure) → 06-test-verifier → Gate 2 (build, test, dev)
-                    → 07-validator → regression + security check
+Stage 4  VERIFY     Gate 1.5 (infrastructure)
+                    → 06-test-verifier (live tree) ∥ 07-validator (read-only copy of the snapshot)
+                    → Gate 2 (build, test, dev)
+                    → 07b-validator-followup (only the test files 06 changed)
+                    → 07c-validator-skeptic A and B on each CRITICAL issue
+                    → regression + security check
                     ⏸ CHECKPOINT 3 (the validated change, with the diff)
 SUCCESS             .factory/baseline.json written
 
@@ -123,6 +127,8 @@ Each stage has a contract in [`harness/stage-gates.ts`](factory/harness/stage-ga
 | 05-frontend-builder | Read, Write, Edit, Bash | Yes |
 | 06-test-verifier | Read, Write, Edit, Bash | Yes |
 | 07-validator | Read, Grep, Glob | No |
+| 07b-validator-followup | Read, Grep, Glob | No |
+| 07c-validator-skeptic | Read, Grep, Glob | No |
 | 08-feature-consolidator | Read, Grep | No |
 
 If an agent reaches for a tool it wasn't granted, the SDK denies it **and reports the attempt** — it isn't silently swallowed.
@@ -133,7 +139,7 @@ If an agent reaches for a tool it wasn't granted, the SDK denies it **and report
 
 ## What the agents are told
 
-Each agent's system prompt is its contract file in [`factory/feature/agents/`](factory/feature/agents/), loaded verbatim. Nothing else is loaded — no `CLAUDE.md`, no user skills, no project settings (`settingSources: []`). Without that, the same agent would behave differently depending on whose machine it ran on, and the determinism the gates exist to provide would be gone.
+Each agent's system prompt is its contract file in [`factory/feature/agents/`](factory/feature/agents/), loaded verbatim, followed by the output contract. The program adds a per-run prompt ([`harness/agent-prompts.ts`](factory/harness/agent-prompts.ts)) with the feature, this run's document paths and the rules that hold only in the program; the contract files stay true for a by-hand run too. Nothing else is loaded — no `CLAUDE.md`, no user skills, no project settings (`settingSources: []`). Without that, the same agent would behave differently depending on whose machine it ran on, and the determinism the gates exist to provide would be gone.
 
 Output is **schema-forced**: each agent gets a full JSON Schema ([`runner/output-schemas.ts`](factory/runner/output-schemas.ts)) with the gate-relevant fields marked required, and the SDK retries the model internally until it conforms. This matters more than it sounds. In the first live run the schema only required a summary, so the Researcher put all its findings in **prose** and returned `filesIdentified: []` — the gate then failed it on evidence it had genuinely gathered. **An agent fills the shape you give it.** Give it the right shape.
 

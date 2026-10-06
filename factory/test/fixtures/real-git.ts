@@ -11,15 +11,23 @@ import { join } from 'path';
 /**
  * Run git in `cwd` for test SETUP, isolated from the user's and the caller's git configuration,
  * with a fixed test identity. `env` is applied last (fixed GIT_*_DATE values, for example).
+ * `input`, when given, is written to git's stdin (`mktree`, `hash-object --stdin`); otherwise stdin
+ * is closed.
  */
-export function setupGit(cwd: string, args: string[], env: Record<string, string> = {}): string {
+export function setupGit(cwd: string, args: string[], env: Record<string, string> = {}, input?: string): string {
   const full: NodeJS.ProcessEnv = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' };
   for (const name of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE']) delete full[name];
   Object.assign(full, env);
   return execFileSync(
     'git',
     ['-c', 'user.name=Factory Test', '-c', 'user.email=factory@test.invalid', '-c', 'commit.gpgsign=false', ...args],
-    { cwd, env: full, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }
+    {
+      cwd,
+      env: full,
+      encoding: 'utf8',
+      ...(input !== undefined ? { input } : {}),
+      stdio: [input !== undefined ? 'pipe' : 'ignore', 'pipe', 'pipe']
+    }
   );
 }
 

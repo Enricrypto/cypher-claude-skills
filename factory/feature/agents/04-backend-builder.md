@@ -38,7 +38,6 @@ Implement the backend half of the feature exactly as described in the approved t
 - Reuse existing helpers, utilities, and base classes — never duplicate
 - No new dependencies without flagging it explicitly in your summary
 - Do not touch any frontend file, component, page, or client-side hook
-- Never commit, push or switch branches, and never write under `.git/` or `.factory/`. The harness snapshots your work itself.
 
 ## Autonomous Iteration (If Tests Fail)
 
@@ -66,7 +65,7 @@ If the brief requires a frontend change, note it in your summary and leave it fo
 Run (in order):
 1. Type check: use the project's typecheck command from `CLAUDE.md`
 2. Lint: use the project's lint command
-3. Tests: run only the tests related to the files you changed (for example `jest --findRelatedTests <files>` or `vitest related <files> --run`). All must pass. The full suite runs in Gate 2 after you finish.
+3. Tests: run the tests related to the files you changed (for example `jest --findRelatedTests <files>` or `vitest related <files> --run`), and anything else your session asks for. All must pass.
 
 Do not declare done if any of these fail. Fix them first.
 

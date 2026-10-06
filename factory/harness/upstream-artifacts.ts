@@ -33,7 +33,12 @@ const AFTER_BACKEND: readonly UpstreamArtifact[] = [...PLAN, 'BACKEND_SUMMARY.md
 const AFTER_BUILD: readonly UpstreamArtifact[] = [...AFTER_BACKEND, 'FRONTEND_SUMMARY.md'];
 const AFTER_TESTS: readonly UpstreamArtifact[] = [...AFTER_BUILD, 'TEST_REPORT.md'];
 
-/** What each agent reads: everything upstream of it (I-7: FILE_LIST.md from 04, VALIDATION_REPORT.md for 08). */
+/**
+ * What each agent reads: everything upstream of it (I-7: FILE_LIST.md from 04, VALIDATION_REPORT.md
+ * for 08). PR B-2 (D-5): the Validator runs alongside the Test Verifier, so it never gets
+ * TEST_REPORT.md (AC-120); the follow-up runs after it and does; a skeptic judges one issue against
+ * the story and the brief only.
+ */
 export const UPSTREAM_FOR_AGENT: Readonly<Record<FeatureFactoryAgent, readonly UpstreamArtifact[]>> = Object.freeze({
   '01-researcher': [],
   '02-story-writer': ['RESEARCHER_REPORT.md'],
@@ -41,7 +46,9 @@ export const UPSTREAM_FOR_AGENT: Readonly<Record<FeatureFactoryAgent, readonly U
   '04-backend-builder': PLAN,
   '05-frontend-builder': AFTER_BACKEND,
   '06-test-verifier': AFTER_BUILD,
-  '07-validator': AFTER_TESTS,
+  '07-validator': AFTER_BUILD,
+  '07b-validator-followup': AFTER_TESTS,
+  '07c-validator-skeptic': ['USER_STORY.md', 'TECHNICAL_BRIEF.md'],
   '08-feature-consolidator': [...AFTER_TESTS, 'VALIDATION_REPORT.md']
 });
 

@@ -115,3 +115,70 @@ Origin: the Researcher's hand-back contained a literal U+202E, which was copied 
 - **Why B-2 must fix it:** B-2's Validator copy is extracted from that ref (AC-123, AC-125), so it must never contain the Test Verifier's work.
 - **What B-2's story must include:** an AC that closes this. The preferred direction is to record a "verification started" marker (or the Test Verifier's start) **before** invoking it, mirroring how builder attempts are counted before they start; the existing `stage3SnapshotPassedBy` then picks it up. The alternative is to treat a recorded `written` rework entry as final.
 - Source: `B1_VALIDATION_RECHECK.md`, "Residual".
+
+## CHECKPOINT 2 (PR B-2) — approved
+
+- Approved by the operator on 2026-10-05 at 18:09:
+  - `B2_TECHNICAL_BRIEF.md`, SHA-256 `2bbd0b79360eee2229194d7900f005e08508635f1184682aa98f538a6452143d`;
+  - `B2_FILE_LIST.md`, SHA-256 `b2b571088e9997dcbb36b1b5646366bb796177859110329af43aca2198ddf402`.
+- **I-1: AC-157 approved** as written in brief §12. It is added to the Phase B story scope for B-2: a "verification started" record is committed before the Test Verifier is invoked.
+- **I-2: the review copy lives in `os.tmpdir()`** (mkdtemp, 0700, path recorded, re-extracted when missing). This replaces the N-4 default; S-0 confirms the reason.
+- **I-20 to I-23: the 14 existing-assertion changes in brief §6 rows 1–14 are approved.**
+- **I-25: session steps S-0 and S-1 approved.** S-1 is one live Validator call, about $1–2.
+- **All other issues** (I-3 to I-19, I-24, I-26 to I-30) are accepted with the brief's recommendations.
+- **Backlog addition:** cleanup of review copies left in the temp folder, together with the `refs/factory/*` cleanup.
+
+## PR B-2 mid-build decision D-B2-1 (operator, 2026-10-05 18:27)
+
+- **Approved:** `upstream-artifacts.test.ts:201` (AC-28, brief §6 row 8) is applied in step 1 instead of step 7, because registering 07b and 07c breaks it immediately.
+- **Approved:** `agent-prompts.test.ts:162` changes from `toContain(abs('TEST_REPORT.md'))` to `not.toContain('TEST_REPORT.md')` (AC-120). The brief's §6 had missed this test (P-20 gap).
+
+## PR B-2 mid-build decision D-B2-2 (operator, 2026-10-05 19:18)
+
+- **The gap:** `copyIntact`'s leaf count cannot see a deletion that leaves its directory empty.
+- **Approved fix:** the review copy record also stores a digest (sha256) of the sorted list of leaf paths and their entry types, taken when the copy is made. `copyIntact` checks both the count and the digest. It hashes paths only, not contents.
+- **Ownership:** step 4 (record type) adds it, together with the matching check in `review-copy.ts`. The step-3 "known limit" test is inverted to prove the gap is closed.
+
+## PR B-2 mid-build decision D-B2-3 (operator, 2026-10-05)
+
+- **Approved:** `checkpoint-lifecycle.test.ts:961-962` (CP3 rework order) changes to Test Verifier ∥ Validator → Gate 2. It is the same change as row 4, in a test the brief's §6 missed (a second P-20 gap).
+
+## PR B-2 decision D-B2-4 (operator, 2026-10-05 22:08): shared agent contracts stay mode-neutral
+
+- **Finding:** `~/.claude/agents/01..08` are symlinks into this repo's working tree, and by-hand Feature Factory flows in other projects (Aurora: builders commit per step) read them. Program-only rules leaked into those flows:
+  - the B-1 builder line "Never commit … The harness snapshots your work itself.";
+  - B-2's 06 test-path rule;
+  - B-2's 07 "review the copy named in your prompt / no test report".
+  
+  Aurora's #513 build was stopped by the operator before its Validator step. Nothing in Aurora was changed.
+- **Decision:**
+  - Program-only rules move out of the shared contract files (04, 05, 06, 07) and live only in the program's prompts (`agent-prompts.ts`), which the program already sends. The contracts keep only rules that are true both by hand and in the program.
+  - The repo-hygiene checks that pinned the contract wording (AC-90, AC-91, and any B-2 equivalents) move onto the prompts. This assertion change is approved.
+  - The change applies from now on only; nothing earlier is affected.
+- **Phase E backlog:** link `~/.claude/agents` and skills to a stable copy (a clone on `main`, or a release tag), so unmerged work never reaches other projects.
+
+## CHECKPOINT 3 (PR B-2): approved with a fix round (10:33, 2026-10-06)
+
+- **Reports:**
+  - `B2_VALIDATION_REPORT.md`: FAIL, 1 CRITICAL / 4 IMPORTANT / 8 MINOR;
+  - `B2_TEST_VERIFIER_REPORT.md`: PASS, 0 defects, 17 gap tests;
+  - `B2_VALIDATION_FOLLOWUP.md`: PASS, 3 IMPORTANT / 8 MINOR.
+- **Fix 1 (code):**
+  - CRITICAL-1: owner-only seal, folders and executables 0500, files 0400, plus a no-group/other-bits test, and fix SKILL.md;
+  - IMPORTANT-1 and -2: record a pre-Test-Verifier baseline per evaluation, measure against it, and also measure when the Test Verifier fails;
+  - IMPORTANT-3: skeptics A and B start together, and the prompt and contract forbid reading `state.json` and `SKEPTIC_*`;
+  - IMPORTANT-4: `-c diff.relative=false` instead of `--no-relative`; no git floor;
+  - MINOR-2 (map through all earlier copies), -3 (the import cycle), -4 (pure rules into `verification.ts`), -5 (findings on early escalation), -6 (refuse a review root inside the project).
+- **Fix 2 (tests and docs):** FOLLOWUP-IMPORTANT-1 to -3, FOLLOWUP-MINOR-1 to -8, and MINOR-1 and -8 (SKILL.md).
+- **Approved assertion changes:**
+  - the seal-mode tests (0555/0444 → 0500/0400);
+  - tests pinning skeptic A before B;
+  - the test pinning `--no-relative` (the behaviour test stays).
+- **Backlog (Phase E):** MINOR-7, program-only wording from before Phase B in contracts 06 and 07.
+
+## PR B-2 decision D-B2-5 (operator, 2026-10-06, after the fix-round re-check)
+
+- **Ratified (NEW-MINOR-3):** `agent-prompts.test.ts:400` now pins the follow-up prompt's new sentence ("in this verification cycle, measured against the project as it was before the Test Verifier ran"). The approved IMPORTANT-1 fix forced it.
+- **NEW-MINOR-1 and -2** were fixed by the session, text only:
+  - `testPathRule` now says the project is compared "with how it was just before you started";
+  - the `MeasurementBaseline` comment describes carry-over as "not cleared (measurement failed, or found a change outside a test path)".

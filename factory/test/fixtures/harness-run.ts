@@ -6,7 +6,7 @@
  * all five stages with no network and no child process.
  */
 
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { dirname, isAbsolute, join, resolve } from 'path';
 
@@ -23,16 +23,20 @@ import {
   createFeatureState,
   FeatureState,
   recordEscalation,
-  recordPause
+  recordPause,
+  ValidatorEvaluation
 } from '../../harness/state-tracker';
 import { RunClass } from '../../harness/run-lifecycle';
 import { loadState, saveState } from '../../harness/state-store';
 import { ARCHIVE_DIRNAME } from '../../harness/run-directory';
+import { REVIEW_DIR_PREFIX } from '../../harness/review-copy';
 import {
   backend,
   consolidator,
+  followup,
   placeholder,
   researcher,
+  skeptic,
   spec,
   story,
   testVerifier,
@@ -47,10 +51,69 @@ export interface TempProject {
   cleanup: () => void;
 }
 
-/** A fresh, empty project directory under the OS temp dir. Call `cleanup` in afterEach. */
+/**
+ * Remove `path` and everything below it, also when it holds a sealed (read-only) review copy
+ * (PR B-2 D-3): every directory below it is made writable first. Symlinks are never followed.
+ */
+export function removeTree(path: string): void {
+  const unseal = (dir: string): void => {
+    const stat = lstatSync(dir, { throwIfNoEntry: false });
+    if (!stat?.isDirectory()) return;
+    chmodSync(dir, 0o700);
+    for (const name of readdirSync(dir)) unseal(join(dir, name));
+  };
+  unseal(path);
+  rmSync(path, { recursive: true, force: true });
+}
+
+/** The names in `dir`, or none when it is not a real directory (a test may make `.factory` a file). */
+function namesInDirectory(dir: string): string[] {
+  try {
+    return lstatSync(dir).isDirectory() ? readdirSync(dir) : [];
+  } catch {
+    return [];
+  }
+}
+
+/** The ids of every run recorded in `dir`'s `.factory/` (archived runs included). */
+function runIdsIn(dir: string): string[] {
+  const factory = join(dir, '.factory');
+  const ids = namesInDirectory(factory).filter(name => name !== ARCHIVE_DIRNAME);
+  return [...ids, ...namesInDirectory(join(factory, ARCHIVE_DIRNAME))];
+}
+
+/**
+ * Remove the review copies the runs of `dir` made under the OS temp directory (the production
+ * review root, used by a run that was not given one, e.g. through the CLI). A test that deletes
+ * `<dir>/.factory` itself calls this first: the copies are found by the run ids recorded there.
+ */
+export function removeTmpReviewCopies(dir: string): void {
+  const root = realpathSync(tmpdir());
+  const prefixes = runIdsIn(dir).map(id => `${REVIEW_DIR_PREFIX}${id}-e`);
+  if (prefixes.length === 0) return;
+  for (const name of readdirSync(root)) {
+    if (prefixes.some(prefix => name.startsWith(prefix))) removeTree(join(root, name));
+  }
+}
+
+/**
+ * A fresh, empty project directory under the OS temp dir. Call `cleanup` in afterEach: it removes
+ * the project, its sibling review root `<dir>-review` (runToEnd's default, PR B-2 D-20), and any
+ * review copy one of its runs made under the OS temp directory.
+ */
 export function tempProject(prefix = 'ff-test-'): TempProject {
   const dir = mkdtempSync(join(tmpdir(), prefix));
-  return { dir, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+  return {
+    dir,
+    cleanup: () => {
+      try {
+        removeTmpReviewCopies(dir);
+      } finally {
+        removeTree(`${dir}-review`);
+        removeTree(dir);
+      }
+    }
+  };
 }
 
 /**
@@ -123,7 +186,10 @@ export function scriptedInvoker(script: InvokerScript = {}, options: { cwd?: str
   };
 }
 
-/** A script under which every agent passes, so a run with passing gates reaches SUCCESS. */
+/**
+ * A script under which every agent passes, so a run with passing gates reaches SUCCESS. The
+ * skeptic UPHOLDS by default, so a CRITICAL Validator issue keeps its Phase A route.
+ */
 export function passingScript(): InvokerScript {
   return {
     '01-researcher': researcher(),
@@ -132,6 +198,8 @@ export function passingScript(): InvokerScript {
     '04-backend-builder': backend(),
     '06-test-verifier': testVerifier(),
     '07-validator': validator(),
+    '07b-validator-followup': followup(),
+    '07c-validator-skeptic': skeptic({ verdict: 'UPHELD' }),
     '08-feature-consolidator': consolidator()
   };
 }
@@ -139,7 +207,8 @@ export function passingScript(): InvokerScript {
 /**
  * Run the orchestrator with test defaults: silent logger, an approver that approves every
  * checkpoint, passing recorded gates, a fake change tracker (so no test but change-diff's runs
- * git) and the non-durable state writer (AC-104: same file and bytes, no fsync). Anything in
+ * git), the non-durable state writer (AC-104: same file and bytes, no fsync) and the review root
+ * `<cwd>-review` (PR B-2 D-20). Anything in
  * `overrides` wins, `stateWriter` included. Tests that call runFeatureFactory directly stay durable.
  */
 export function runToEnd(
@@ -153,6 +222,8 @@ export function runToEnd(
     gates: recordingGates().gates,
     changes: fakeChangeTracker(),
     stateWriter: nonDurableStateWriter,
+    // PR B-2 D-20: review copies go beside the project, outside it, and tempProject removes them.
+    reviewRoot: `${overrides.cwd}-review`,
     ...overrides
   });
 }
@@ -278,6 +349,17 @@ export function restoreSnapshot(cwd: string, state: FeatureState): FeatureState 
   saveState(cwd, state);
   return structuredClone(state);
 }
+
+/** The state.json of the only live run in project `cwd` (archived runs aside), or undefined when there is none or more than one. */
+export function onDisk(cwd: string): FeatureState | undefined {
+  const factory = join(cwd, '.factory');
+  if (!existsSync(factory)) return undefined;
+  const runs = readdirSync(factory).filter(name => name !== ARCHIVE_DIRNAME && existsSync(join(factory, name, 'state.json')));
+  return runs.length === 1 ? loadState(cwd, runs[0]) : undefined;
+}
+
+/** A run's recorded verification evaluations, empty when there are none (or no state). */
+export const evaluations = (state: FeatureState | undefined): ValidatorEvaluation[] => state?.validatorEvaluations ?? [];
 
 /**
  * A logger that deletes one document right after the harness persists it into the run directory,

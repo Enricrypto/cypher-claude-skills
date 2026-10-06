@@ -27,8 +27,13 @@ import {
   createFeatureState,
   FeatureState,
   invalidateAgentSteps,
+  closeEvaluation,
   recordAgentStep,
   recordCheckpointApproval,
+  recordEvaluationStart,
+  recordEvaluationValidator,
+  recordFollowup,
+  recordReviewCopy,
   recordCheckpointRejection,
   recordExecutionGate,
   recordLoopBack,
@@ -36,7 +41,8 @@ import {
   recordValidatorRound
 } from '../../harness/state-tracker';
 import { ValidatorIssue } from '../../harness/agent-output-schema';
-import { backend, frontend, researcher, spec, story, testVerifier, validator } from '../fixtures/agent-outputs';
+import { mergeIssues, verdictOf } from '../../harness/verification';
+import { backend, followup, frontend, researcher, spec, story, testVerifier, validator } from '../fixtures/agent-outputs';
 
 const CWD = '/projects/app';
 
@@ -248,6 +254,16 @@ describe('rebuildOutputs (D-2)', () => {
     expect(outputs.validator).toBeUndefined();
   });
 
+  it("AC-127 a follow-up PASS is rebuilt into its own slot and never into the Validator's", () => {
+    let state = builtRun();
+    state = recordAgentStep(state, 4, '07b-validator-followup', 'PASS', followup({ files: ['test/a.test.ts'] }));
+
+    const outputs = rebuildOutputs(state);
+    expect(outputs.validatorFollowup?.agent).toBe('07b-validator-followup');
+    expect(outputs.validatorFollowup?.details.filesReviewed).toEqual(['test/a.test.ts']);
+    expect(outputs.validator).toBeUndefined();
+  });
+
   it('D-2 the rebuilt outputs are copies: changing them never changes the run record', () => {
     const state = builtRun();
     const outputs = rebuildOutputs(state);
@@ -281,6 +297,59 @@ describe('pendingValidatorRound (D-2)', () => {
     state = recordAgentStep(state, 3, '04-backend-builder', 'PASS', backend({ files: ['src/a.ts', 'src/c.ts'] }), undefined, { phase: 'validator-round', round: 1 });
 
     expect(pendingValidatorRound(state, CWD)?.backend.map(i => i.file)).toEqual(['src/a.ts']);
+  });
+
+  /**
+   * builtRun, then a first-pass evaluation reviewed in `copy`, decided not passed on `standing` of
+   * its merged issues, its 07 FAIL step (carrying the evaluation's timing) and round 1 opened.
+   */
+  function roundOpenedByEvaluation(main: ValidatorIssue[], followupIssues: ValidatorIssue[] | undefined, standing: (keys: string[]) => string[]) {
+    const copy = '/private/var/folders/T/factory-review-progress-e1-AbC';
+    const timing = { startedAt: '2026-10-05T10:00:00.000Z', completedAt: '2026-10-05T10:01:00.000Z' };
+    let state = builtRun();
+    state = recordAgentStep(state, 4, '06-test-verifier', 'PASS', testVerifier());
+    state = recordEvaluationStart(state, { cycle: 0, round: 0, kind: 'first-pass' });
+    state = recordReviewCopy(state, 1, {
+      dir: copy,
+      source: { kind: 'snapshot', n: 1, ref: 'refs/factory/x/stage3-1', commit: 'c'.repeat(40), tree: 'd'.repeat(40) },
+      entries: 1,
+      digest: 'a'.repeat(64),
+      madeAt: timing.startedAt
+    });
+    const output = validator({ status: 'FAIL', issues: main.map(i => (i.file?.startsWith('/') ? i : { ...i, file: i.file ? `${copy}/${i.file}` : i.file })) });
+    state = recordEvaluationValidator(state, 1, output, timing);
+    if (followupIssues) {
+      state = recordFollowup(state, 1, { status: 'reviewed', files: ['test/a.test.ts'], output: followup({ files: ['test/a.test.ts'], issues: followupIssues }), timing });
+    }
+    const merged = mergeIssues({ issues: output.details.issues, copyDir: copy }, followupIssues ? { issues: followupIssues } : undefined, CWD);
+    const kept = standing(verdictOf(merged, []).standing.map(entry => entry.key));
+    state = closeEvaluation(state, 1, { outcome: 'decided', verdict: { passed: kept.length === 0, standing: kept, disproved: [], recordedAt: timing.completedAt } });
+    state = recordExecutionGate(state, { round: 0, total: 10, passed: 10, failed: 0, passRate: 1, canAdvance: true });
+    state = recordAgentStep(state, 4, '07-validator', 'FAIL', output, undefined, undefined, timing);
+    return recordValidatorRound(state, 1);
+  }
+
+  it("PR B-2 a resumed round routes the opener evaluation's standing issues, their absolute copy paths mapped out of its copy", () => {
+    const state = roundOpenedByEvaluation([critical('src/a.ts')], undefined, keys => keys);
+
+    // The raw 07 FAIL names the copy, not the project: routed only through the evaluation's copy.
+    expect((state.stageHistory.at(-1)!.output as ReturnType<typeof validator>).details.issues[0].file).toMatch(/^\/private\/var\/folders\/T\/factory-review-progress-e1-AbC\//);
+    const pending = pendingValidatorRound(state, CWD);
+    expect(pending?.round).toBe(1);
+    expect(pending?.backend.map(i => i.file)).toEqual(['src/a.ts']);
+  });
+
+  it('PR B-2 a resumed round routes only the issues the verdict kept standing (a disproved CRITICAL is not routed)', () => {
+    const disprovedOne = { ...critical('src/a.ts'), message: 'disproved' };
+    const state = roundOpenedByEvaluation([disprovedOne, critical('src/a.ts')], undefined, keys => keys.slice(1));
+
+    expect(pendingValidatorRound(state, CWD)?.backend.map(i => i.message)).toEqual(['Problem in src/a.ts']);
+  });
+
+  it('PR B-2 a standing follow-up issue, which no builder owns, makes the round not pending (the resume re-evaluates)', () => {
+    const state = roundOpenedByEvaluation([critical('src/a.ts')], [critical('test/a.test.ts')], keys => keys);
+
+    expect(pendingValidatorRound(state, CWD)).toBeUndefined();
   });
 
   it('D-2 nothing is pending before any round, or when the latest Validator step is not a FAIL', () => {

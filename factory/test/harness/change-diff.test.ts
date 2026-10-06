@@ -10,20 +10,39 @@
 import { describe, it, expect, beforeEach, afterEach, jest } from '@jest/globals';
 import { execFileSync } from 'child_process';
 import { createHash } from 'crypto';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'fs';
+import {
+  chmodSync,
+  closeSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  openSync,
+  readdirSync,
+  readFileSync,
+  readlinkSync,
+  readSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync
+} from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
+import { deflateSync } from 'zlib';
 
 import {
   ChangeDiffError,
   DEFAULT_CHANGE_TRACKER,
   factoryRef,
   git as harnessGit,
+  GIT_EXTRACTION_SUBCOMMANDS,
   GIT_READ_SUBCOMMANDS,
   GIT_SNAPSHOT_SUBCOMMANDS,
   MAX_INLINE_BYTES,
   SNAPSHOT_TMP_PREFIX
 } from '../../harness/change-diff';
+import { copyIntact, copyWorkingTree, leafDigest } from '../../harness/review-copy';
 import { ChangeBase } from '../../harness/state-tracker';
 import { tempProject, TempProject } from '../fixtures/harness-run';
 import { isolateHarnessGit, setupGit } from '../fixtures/real-git';
@@ -749,5 +768,686 @@ describe('snapshot (AC-82, AC-83, AC-85, AC-86, AC-88)', () => {
     } finally {
       outside.cleanup();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// PR B-2, step 2: the review copy's extraction (D-1, AC-117) and the measurement of the Test
+// Verifier's changes (D-2, AC-121). Real git in temp repositories only; the harness's own calls
+// are isolated from the user's global and system git configuration.
+// ---------------------------------------------------------------------------------------------
+
+type Snap = { ref: string; commit: string; tree: string };
+interface TreeEntry {
+  mode: string;
+  type: string;
+  oid: string;
+  path: string;
+}
+
+/** Write a blob object; returns its id. */
+function hashBlob(content: string): string {
+  return setupGit(project.dir, ['hash-object', '-w', '--stdin'], {}, content).trim();
+}
+
+/** A tree built from `[mode, type, oid, name]` entries by `git mktree`, which checks no name. */
+function mktree(entries: Array<[string, string, string, string]>): string {
+  const input = entries.map(([mode, type, oid, name]) => `${mode} ${type} ${oid}\t${name}\n`).join('');
+  return setupGit(project.dir, ['mktree', '--missing'], {}, input).trim();
+}
+
+/** A hand-built tree committed under a test ref, so it can be passed as a recorded snapshot. */
+function snapOf(tree: string, ref = 'refs/test/snapshot'): Snap {
+  const commit = git(project.dir, 'commit-tree', '-m', 'hand-built', tree).trim();
+  git(project.dir, 'update-ref', ref, commit);
+  return { ref, commit, tree };
+}
+
+/** Git's object id of `bytes` as a blob, in the hash the length of `oid` names. */
+function blobId(bytes: Buffer, oid: string): string {
+  return createHash(oid.length === 64 ? 'sha256' : 'sha1')
+    .update(Buffer.concat([Buffer.from(`blob ${bytes.length}\0`), bytes]))
+    .digest('hex');
+}
+
+/** Every leaf entry of a tree (blobs and gitlinks), as `ls-tree -r --full-tree` lists them. */
+function lsTree(tree: string): TreeEntry[] {
+  return git(project.dir, 'ls-tree', '-r', '-z', '--full-tree', tree)
+    .split('\0')
+    .filter(Boolean)
+    .map(line => {
+      const m = /^(\d{6}) (\w+) ([0-9a-f]+)\t([\s\S]*)$/.exec(line)!;
+      return { mode: m[1], type: m[2], oid: m[3], path: m[4] };
+    });
+}
+
+/** Every leaf under `root` (files, symlinks, empty directories), sorted, never following a link. */
+function leaves(root: string, prefix = ''): string[] {
+  const names = readdirSync(prefix === '' ? root : join(root, prefix));
+  if (names.length === 0 && prefix !== '') return [prefix];
+  return names
+    .flatMap(name => {
+      const path = prefix === '' ? name : `${prefix}/${name}`;
+      return lstatSync(join(root, path)).isDirectory() ? leaves(root, path) : [path];
+    })
+    .sort();
+}
+
+/** The bytes of the file at `path` at each of `offsets`, read one at a time (no whole-file buffer). */
+function bytesAt(path: string, offsets: readonly number[]): number[] {
+  const fd = openSync(path, 'r');
+  try {
+    return offsets.map(offset => {
+      const one = Buffer.alloc(1);
+      readSync(fd, one, 0, 1, offset);
+      return one[0];
+    });
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/** The loose-object file of `oid`. */
+const looseObject = (oid: string) => join(project.dir, '.git', 'objects', oid.slice(0, 2), oid.slice(2));
+
+describe('git(): raw output and stdin input (D-1, AC-80, AC-89)', () => {
+  it('AC-80 D-1 the extraction array is exactly ls-tree and cat-file, and git() accepts both', () => {
+    repoWithCommit();
+
+    expect([...GIT_EXTRACTION_SUBCOMMANDS]).toEqual(['ls-tree', 'cat-file']);
+    expect(harnessGit(project.dir, 'ls-tree', ['--name-only', 'HEAD']).ok).toBe(true);
+    expect(harnessGit(project.dir, 'cat-file', ['-t', 'HEAD']).ok).toBe(true);
+  });
+
+  it('AC-89 D-1 git() returns the raw bytes, and its text is exactly their UTF-8 decoding', () => {
+    git(project.dir, 'init', '-q');
+    const bytes = Buffer.from([0x63, 0x61, 0x66, 0xc3, 0xa9, 0x0a, 0xff, 0x00, 0xfe, 0x0a]);
+    const oid = setupGit(project.dir, ['hash-object', '-w', write('bin.dat', bytes)]).trim();
+
+    const result = harnessGit(project.dir, 'cat-file', ['blob', oid]);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.raw).toEqual(bytes);
+    expect(result.stdout).toBe(bytes.toString('utf8'));
+    // Text output is what a utf8 spawn of the same command gives.
+    expect(harnessGit(project.dir, 'rev-parse', ['--is-inside-work-tree'])).toMatchObject({ ok: true, stdout: 'true\n' });
+  });
+
+  it('D-1 git() pipes stdin only when input is given; otherwise stdin is closed and nothing waits on it', () => {
+    repoWithCommit();
+    const oid = git(project.dir, 'rev-parse', 'HEAD:src/a.ts').trim();
+
+    const closed = harnessGit(project.dir, 'cat-file', ['--batch']);
+    const piped = harnessGit(project.dir, 'cat-file', ['--batch'], undefined, { input: `${oid}\n` });
+
+    expect(closed).toMatchObject({ ok: true, stdout: '' });
+    expect(piped).toMatchObject({ ok: true, stdout: `${oid} blob 20\nexport const a = 1;\n\n` });
+  });
+});
+
+describe('extractSnapshot (D-1, AC-117)', () => {
+  let restoreEnv: () => void;
+  let scratch: string[];
+
+  beforeEach(() => {
+    restoreEnv = isolateHarnessGit();
+    scratch = [];
+  });
+
+  afterEach(() => {
+    restoreEnv();
+    for (const dir of scratch) rmSync(dir, { recursive: true, force: true });
+  });
+
+  /** A fresh empty destination outside the project. */
+  function freshDest(): string {
+    const dest = mkdtempSync(join(tmpdir(), 'ff-copy-'));
+    scratch.push(dest);
+    return dest;
+  }
+
+  /**
+   * A working tree with every entry kind, snapshotted by the real tracker: an edited and a new
+   * file, an executable, a binary, a relative and a dangling absolute symlink, a nested repository
+   * (a gitlink), a tracked-but-ignored file, an untracked ignored file and .factory/.
+   */
+  async function richSnapshot(): Promise<Snap> {
+    repoWithCommit();
+    write('keep.log', 'tracked although ignored\n');
+    git(project.dir, 'add', '-f', 'keep.log');
+    git(project.dir, 'commit', '-q', '-m', 'force-added log');
+    const base = await DEFAULT_CHANGE_TRACKER.captureBase(project.dir);
+    write('src/a.ts', 'export const a = 2;\n');
+    chmodSync(write('bin/run.sh', '#!/bin/sh\necho run\n'), 0o755);
+    write('assets/logo.png', Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x0a, 0xff, 0x0d]));
+    symlinkSync('src/a.ts', join(project.dir, 'link-to-a.ts'));
+    symlinkSync('/factory-test/absent', join(project.dir, 'dangling'));
+    const lib = join(project.dir, 'vendor', 'lib');
+    mkdirSync(lib, { recursive: true });
+    git(lib, 'init', '-q');
+    write('vendor/lib/lib.ts', 'lib\n');
+    git(lib, 'add', '.');
+    git(lib, 'commit', '-q', '-m', 'lib');
+    write('src/new.ts', 'export const n = 1;\n');
+    write('debug.log', 'ignored, untracked\n');
+    write('.factory/run-1/state.json', '{}');
+
+    const result = await DEFAULT_CHANGE_TRACKER.snapshot(project.dir, base, 'run-1', 1);
+    if (result.kind !== 'written') throw new Error(`snapshot not written: ${JSON.stringify(result)}`);
+    return { ref: result.ref, commit: result.commit, tree: result.tree };
+  }
+
+  it.each<[string, (dest: string, entries: TreeEntry[]) => void]>([
+    [
+      'writes every blob byte-identical with its mode',
+      (dest, entries) => {
+        const files = entries.filter(e => e.mode === '100644' || e.mode === '100755');
+        expect(files.map(e => e.path)).toEqual(['.gitignore', 'assets/logo.png', 'bin/run.sh', 'keep.log', 'src/a.ts', 'src/new.ts']);
+        for (const entry of files) {
+          const stat = lstatSync(join(dest, entry.path));
+          expect(stat.isFile()).toBe(true);
+          expect(blobId(readFileSync(join(dest, entry.path)), entry.oid)).toBe(entry.oid);
+          expect(stat.mode & 0o777).toBe(entry.mode === '100755' ? 0o755 : 0o644);
+        }
+        expect(readFileSync(join(dest, 'src/a.ts'), 'utf8')).toBe('export const a = 2;\n');
+      }
+    ],
+    [
+      'keeps a symlink as a link without following it',
+      (dest, entries) => {
+        const links = entries.filter(e => e.mode === '120000');
+        expect(links.map(e => e.path)).toEqual(['dangling', 'link-to-a.ts']);
+        for (const entry of links) {
+          expect(lstatSync(join(dest, entry.path)).isSymbolicLink()).toBe(true);
+          expect(blobId(readlinkSync(join(dest, entry.path), { encoding: 'buffer' }), entry.oid)).toBe(entry.oid);
+        }
+        expect(readlinkSync(join(dest, 'link-to-a.ts'))).toBe('src/a.ts');
+        expect(readlinkSync(join(dest, 'dangling'))).toBe('/factory-test/absent');
+      }
+    ],
+    [
+      'makes a gitlink an empty directory',
+      (dest, entries) => {
+        expect(entries.filter(e => e.mode === '160000').map(e => [e.type, e.path])).toEqual([['commit', 'vendor/lib']]);
+        expect(lstatSync(join(dest, 'vendor/lib')).isDirectory()).toBe(true);
+        expect(readdirSync(join(dest, 'vendor/lib'))).toEqual([]);
+      }
+    ],
+    [
+      'equals the snapshot tree exactly: no .git, no .factory, no untracked ignored file, the tracked ignored file present',
+      (dest, entries) => {
+        expect(leaves(dest)).toEqual(entries.map(e => e.path).sort());
+        expect(existsSync(join(dest, '.git'))).toBe(false);
+        expect(existsSync(join(dest, '.factory'))).toBe(false);
+        expect(existsSync(join(dest, 'debug.log'))).toBe(false);
+        expect(readFileSync(join(dest, 'keep.log'), 'utf8')).toBe('tracked although ignored\n');
+      }
+    ]
+  ])('AC-117 extractSnapshot %s', async (_, check) => {
+    const snap = await richSnapshot();
+    const dest = freshDest();
+
+    const result = await DEFAULT_CHANGE_TRACKER.extractSnapshot(project.dir, snap, dest);
+
+    const entries = lsTree(snap.tree);
+    expect(result).toEqual({ kind: 'extracted', entries: entries.length });
+    check(dest, entries);
+  });
+
+  it('AC-123 D-B2-2 an extracted copy and a fallback copy of the same working tree have the same leaf count and digest', async () => {
+    repoWithCommit();
+    const base = await DEFAULT_CHANGE_TRACKER.captureBase(project.dir);
+    chmodSync(write('bin/run.sh', '#!/bin/sh\necho run\n'), 0o755);
+    write('src/deep/b.ts', 'export const b = 2;\n');
+    symlinkSync('src/a.ts', join(project.dir, 'link-to-a.ts'));
+    const written = await DEFAULT_CHANGE_TRACKER.snapshot(project.dir, base, 'run-1', 1);
+    if (written.kind !== 'written') throw new Error(written.kind);
+    const extracted = freshDest();
+    const fallback = freshDest();
+
+    const result = await DEFAULT_CHANGE_TRACKER.extractSnapshot(project.dir, written, extracted);
+    const record = leafDigest(extracted);
+
+    expect(result).toEqual({ kind: 'extracted', entries: record.entries });
+    expect(copyWorkingTree(project.dir, fallback)).toEqual(record);
+    expect(copyIntact(extracted, record)).toBe(true);
+  });
+
+  it('AC-117 extractSnapshot from a subdirectory cwd extracts the whole project-rooted snapshot tree', async () => {
+    git(project.dir, 'init', '-q');
+    write('app/src/a.ts', 'a\n');
+    write('other/b.ts', 'b\n');
+    git(project.dir, 'add', '.');
+    git(project.dir, 'commit', '-q', '-m', 'base');
+    const cwd = join(project.dir, 'app');
+    const base = await DEFAULT_CHANGE_TRACKER.captureBase(cwd);
+    write('app/src/new.ts', 'n\n');
+    const written = await DEFAULT_CHANGE_TRACKER.snapshot(cwd, base, 'run-1', 1);
+    if (written.kind !== 'written') throw new Error(written.kind);
+    const dest = freshDest();
+
+    const result = await DEFAULT_CHANGE_TRACKER.extractSnapshot(cwd, written, dest);
+
+    expect(result).toEqual({ kind: 'extracted', entries: 2 });
+    expect(leaves(dest)).toEqual(['src/a.ts', 'src/new.ts']);
+  });
+
+  it('AC-117 extractSnapshot fetches more than 1000 blobs in batches of at most 1000 objects', async () => {
+    repoWithCommit();
+    const base = await DEFAULT_CHANGE_TRACKER.captureBase(project.dir);
+    for (let i = 0; i < 1001; i++) write(`many/f${String(i).padStart(4, '0')}.txt`, `file ${i}\n`);
+    const written = await DEFAULT_CHANGE_TRACKER.snapshot(project.dir, base, 'run-1', 1);
+    if (written.kind !== 'written') throw new Error(written.kind);
+    const dest = freshDest();
+
+    const spawned = jest.spyOn(require('child_process') as typeof import('child_process'), 'spawnSync');
+    let result;
+    let batches: number;
+    try {
+      result = await DEFAULT_CHANGE_TRACKER.extractSnapshot(project.dir, written, dest);
+      batches = spawned.mock.calls.filter(call => (call[1] as string[]).includes('cat-file')).length;
+    } finally {
+      spawned.mockRestore();
+    }
+
+    expect(result).toEqual({ kind: 'extracted', entries: 1003 });
+    expect(batches).toBe(2);
+    expect(readFileSync(join(dest, 'many/f1000.txt'), 'utf8')).toBe('file 1000\n');
+    expect(leaves(dest)).toHaveLength(1003);
+  });
+
+  /**
+   * Whether this git can create a sha256 repository (`init --object-format`, git 2.29 or later),
+   * probed once when the file is collected: Jest decides a skip before any hook runs.
+   */
+  const SHA256_REPOSITORIES = ((): boolean => {
+    const dir = mkdtempSync(join(tmpdir(), 'ff-sha256-probe-'));
+    try {
+      setupGit(dir, ['init', '-q', '--object-format=sha256']);
+      return true;
+    } catch {
+      return false;
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  })();
+  const sha256It = SHA256_REPOSITORIES ? it : it.skip;
+  const SHA256_SKIP_NOTE = SHA256_REPOSITORIES ? '' : ' (skipped: this git cannot create a sha256 repository; it requires git 2.29 or later)';
+
+  sha256It(`AC-117 D-1 extractSnapshot in a sha256 repository checks every blob with sha256 and writes it byte-identical${SHA256_SKIP_NOTE}`, async () => {
+    // Kills: the blob check always hashing with sha1 (a 64-hex object id is a sha256 repository).
+    git(project.dir, 'init', '-q', '--object-format=sha256');
+    write('src/a.ts', 'export const a = 1;\n');
+    git(project.dir, 'add', '.');
+    git(project.dir, 'commit', '-q', '-m', 'base');
+    const base = await DEFAULT_CHANGE_TRACKER.captureBase(project.dir);
+    write('src/b.ts', 'export const b = 2;\n');
+    const written = await DEFAULT_CHANGE_TRACKER.snapshot(project.dir, base, 'run-1', 1);
+    if (written.kind !== 'written') throw new Error(`snapshot not written: ${JSON.stringify(written)}`);
+    expect(written.tree).toMatch(/^[0-9a-f]{64}$/);
+    const dest = freshDest();
+
+    const result = await DEFAULT_CHANGE_TRACKER.extractSnapshot(project.dir, written, dest);
+
+    expect(result).toEqual({ kind: 'extracted', entries: 2 });
+    expect(readFileSync(join(dest, 'src', 'a.ts'), 'utf8')).toBe('export const a = 1;\n');
+    expect(readFileSync(join(dest, 'src', 'b.ts'), 'utf8')).toBe('export const b = 2;\n');
+  });
+
+  it('AC-117 D-1 extractSnapshot never asks cat-file for more than 64 MiB of blobs at once: two 40 MiB blobs take two requests', async () => {
+    // Kills: the 64 MiB per-request byte bound raised (the 1000-object bound is the test above).
+    // The tree is built by hand, so no 80 MiB snapshot is taken; one 40 MiB buffer is refilled for
+    // each blob, and the copies are checked by size and a few bytes (the extraction itself
+    // hash-checks every blob), so no second large buffer is held.
+    git(project.dir, 'init', '-q');
+    const SIZE = 40 * 1024 * 1024;
+    let buffer: Buffer | undefined = Buffer.alloc(SIZE);
+    const blobOf = (name: string, fill: number): string => {
+      buffer!.fill(fill);
+      const path = write(name, buffer!);
+      const oid = git(project.dir, 'hash-object', '-w', path).trim();
+      rmSync(path);
+      return oid;
+    };
+    const first = blobOf('big-a.bin', 0x61);
+    const second = blobOf('big-b.bin', 0x62);
+    buffer = undefined;
+    const snap = snapOf(mktree([['100644', 'blob', first, 'big-a.bin'], ['100644', 'blob', second, 'big-b.bin']]));
+    const dest = freshDest();
+
+    const spawned = jest.spyOn(require('child_process') as typeof import('child_process'), 'spawnSync');
+    let requests: number;
+    let result;
+    try {
+      result = await DEFAULT_CHANGE_TRACKER.extractSnapshot(project.dir, snap, dest);
+      requests = spawned.mock.calls.filter(call => (call[1] as string[]).includes('cat-file')).length;
+    } finally {
+      spawned.mockRestore();
+    }
+
+    expect(result).toEqual({ kind: 'extracted', entries: 2 });
+    expect(requests).toBe(2);
+    for (const [name, fill] of [['big-a.bin', 0x61], ['big-b.bin', 0x62]] as const) {
+      expect({ name, size: statSync(join(dest, name)).size, spots: bytesAt(join(dest, name), [0, SIZE / 2, SIZE - 1]) }).toEqual({
+        name,
+        size: SIZE,
+        spots: [fill, fill, fill]
+      });
+    }
+  });
+
+  it('AC-117 N-1 extractSnapshot creates symlinks last, so a link in the tree never redirects a file write', async () => {
+    git(project.dir, 'init', '-q');
+    const outside = freshDest();
+    // `D` (a link to a directory outside) sorts before `d/x`: written in tree order, `d/x` would go
+    // through the link on a case-insensitive file system.
+    const link = hashBlob(outside);
+    const inner = mktree([['100644', 'blob', hashBlob('x\n'), 'x']]);
+    const snap = snapOf(mktree([['120000', 'blob', link, 'D'], ['040000', 'tree', inner, 'd']]));
+    const dest = freshDest();
+
+    await DEFAULT_CHANGE_TRACKER.extractSnapshot(project.dir, snap, dest);
+
+    expect(readdirSync(outside)).toEqual([]);
+    expect(lstatSync(join(dest, 'd', 'x')).isFile()).toBe(true);
+  });
+
+  /** One refusal: the snapshot to extract, the destination, and what must hold afterwards. */
+  interface Refusal {
+    snap: Snap;
+    dest: string;
+    error: RegExp;
+    /** Default: the destination is still empty. */
+    unchanged?: () => void;
+  }
+
+  it.each<[string, () => Promise<Refusal>]>([
+    [
+      'a ref that moved since it was recorded',
+      async () => {
+        const snap = await richSnapshot();
+        git(project.dir, 'update-ref', snap.ref, 'HEAD');
+        return { snap, dest: freshDest(), error: /no longer points at the recorded commit/ };
+      }
+    ],
+    [
+      'a recorded tree that is not the commit\'s tree',
+      async () => {
+        const snap = await richSnapshot();
+        return { snap: { ...snap, tree: git(project.dir, 'rev-parse', 'HEAD^{tree}').trim() }, dest: freshDest(), error: /tree/ };
+      }
+    ],
+    [
+      'a ref, commit or tree that is not an object id',
+      async () => {
+        const snap = await richSnapshot();
+        return { snap: { ...snap, ref: '--output=/tmp/x' }, dest: freshDest(), error: /not a valid/ };
+      }
+    ],
+    ...['..', '.', '.git', '.GIT', '.Git'].map((name): [string, () => Promise<Refusal>] => [
+      `an unsafe path segment ${JSON.stringify(name)}`,
+      async () => {
+        git(project.dir, 'init', '-q');
+        const blob = hashBlob('payload\n');
+        const below = mktree([['100644', 'blob', blob, name]]);
+        const snap = snapOf(mktree([['100644', 'blob', blob, 'fine.txt'], ['040000', 'tree', below, 'a']]));
+        return { snap, dest: freshDest(), error: /unsafe path/ };
+      }
+    ]),
+    [
+      'an unsafe path segment at the root',
+      async () => {
+        git(project.dir, 'init', '-q');
+        const blob = hashBlob('payload\n');
+        const snap = snapOf(mktree([['100644', 'blob', blob, '..'], ['100644', 'blob', blob, 'fine.txt']]));
+        return { snap, dest: freshDest(), error: /unsafe path/ };
+      }
+    ],
+    [
+      'the same path twice',
+      async () => {
+        git(project.dir, 'init', '-q');
+        const blob = hashBlob('payload\n');
+        const snap = snapOf(mktree([['100644', 'blob', blob, 'twice'], ['100644', 'blob', blob, 'twice']]));
+        return { snap, dest: freshDest(), error: /more than once|inside another/ };
+      }
+    ],
+    [
+      'a path that is both a symlink and a directory',
+      async () => {
+        git(project.dir, 'init', '-q');
+        const outside = freshDest();
+        const inner = mktree([['100644', 'blob', hashBlob('x\n'), 'x']]);
+        const snap = snapOf(mktree([['120000', 'blob', hashBlob(outside), 'd'], ['040000', 'tree', inner, 'd']]));
+        const dest = freshDest();
+        return {
+          snap,
+          dest,
+          error: /more than once|inside another/,
+          unchanged: () => {
+            expect(readdirSync(dest)).toEqual([]);
+            expect(readdirSync(outside)).toEqual([]);
+          }
+        };
+      }
+    ],
+    [
+      'a blob whose bytes do not match its object id',
+      async () => {
+        git(project.dir, 'init', '-q');
+        const wanted = hashBlob('the reviewed content\n');
+        const other = hashBlob('something else\n');
+        rmSync(looseObject(wanted), { force: true });
+        writeFileSync(looseObject(wanted), readFileSync(looseObject(other)));
+        const snap = snapOf(mktree([['100644', 'blob', wanted, 'f.ts']]));
+        return { snap, dest: freshDest(), error: /does not match its object id/ };
+      }
+    ],
+    [
+      'a blob larger than the git output limit (256 MiB)',
+      async () => {
+        git(project.dir, 'init', '-q');
+        // A loose object whose header claims 300 MB: ls-tree reports that size; nothing is fetched.
+        const oid = createHash('sha1').update('factory-test-huge').digest('hex');
+        mkdirSync(join(looseObject(oid), '..'), { recursive: true });
+        writeFileSync(looseObject(oid), deflateSync(Buffer.from('blob 300000000\0x')));
+        const snap = snapOf(mktree([['100644', 'blob', oid, 'huge.bin']]));
+        return { snap, dest: freshDest(), error: /larger than/ };
+      }
+    ],
+    [
+      'a blob the repository does not have',
+      async () => {
+        git(project.dir, 'init', '-q');
+        const snap = snapOf(mktree([['100644', 'blob', '1'.repeat(40), 'gone.ts']]));
+        return { snap, dest: freshDest(), error: /./ };
+      }
+    ],
+    [
+      'a destination that is not empty',
+      async () => {
+        const snap = await richSnapshot();
+        const dest = freshDest();
+        writeFileSync(join(dest, 'existing'), 'x');
+        return { snap, dest, error: /empty/, unchanged: () => expect(readdirSync(dest)).toEqual(['existing']) };
+      }
+    ],
+    [
+      'a destination that is a symlink to an empty directory',
+      async () => {
+        const snap = await richSnapshot();
+        const target = freshDest();
+        const holder = freshDest();
+        const dest = join(holder, 'link');
+        symlinkSync(target, dest);
+        return { snap, dest, error: /real directory/, unchanged: () => expect(readdirSync(target)).toEqual([]) };
+      }
+    ],
+    [
+      'a destination that does not exist',
+      async () => {
+        const snap = await richSnapshot();
+        const dest = join(freshDest(), 'absent');
+        return { snap, dest, error: /real directory/, unchanged: () => expect(existsSync(dest)).toBe(false) };
+      }
+    ]
+  ])('AC-117 extractSnapshot refuses %s: failed, and nothing is written', async (_, setup) => {
+    const { snap, dest, error, unchanged } = await setup();
+
+    const result = await DEFAULT_CHANGE_TRACKER.extractSnapshot(project.dir, snap, dest);
+
+    expect(result.kind).toBe('failed');
+    expect(result.kind === 'failed' && result.error).toMatch(error);
+    if (unchanged) unchanged();
+    else expect(readdirSync(dest)).toEqual([]);
+  });
+});
+
+describe('changedSince: the Test Verifier measurement (D-2, AC-121)', () => {
+  let restoreEnv: () => void;
+
+  beforeEach(() => {
+    restoreEnv = isolateHarnessGit();
+  });
+
+  afterEach(() => {
+    restoreEnv();
+  });
+
+  /** A repository with app/ and other/, snapshotted from `cwd`; returns the snapshot's tree. */
+  async function snapshotFrom(sub: string): Promise<{ cwd: string; tree: string }> {
+    git(project.dir, 'init', '-q');
+    write('.gitignore', '*.log\n');
+    write('app/src/a.ts', 'a\n');
+    write('app/src/gone.ts', 'gone\n');
+    write('app/test/old.test.ts', 'old\n');
+    write('other/b.ts', 'b\n');
+    git(project.dir, 'add', '.');
+    git(project.dir, 'commit', '-q', '-m', 'base');
+    const cwd = sub === '' ? project.dir : join(project.dir, sub);
+    const base = await DEFAULT_CHANGE_TRACKER.captureBase(cwd);
+    const written = await DEFAULT_CHANGE_TRACKER.snapshot(cwd, base, 'run-1', 1);
+    if (written.kind !== 'written') throw new Error(written.kind);
+    return { cwd, tree: written.tree };
+  }
+
+  it.each([
+    ['the project root', '', ['app/src/a.ts', 'app/src/gone.ts', 'app/test/new.test.ts', 'other/b.ts']],
+    ['a subdirectory of the repository', 'app', ['src/a.ts', 'src/gone.ts', 'test/new.test.ts']]
+  ])(
+    'AC-121 changedSince lists the files that differ from a snapshot tree, untracked and deleted included, also from a subdirectory, without touching .git/index (%s)',
+    async (_, sub, expected) => {
+      const { cwd, tree } = await snapshotFrom(sub);
+      write('app/src/a.ts', 'a2\n');
+      rmSync(join(project.dir, 'app/src/gone.ts'));
+      write('app/test/new.test.ts', 'new\n');
+      write('app/debug.log', 'ignored\n');
+      write('other/b.ts', 'b2\n');
+      write(join(sub, '.factory/run-1/state.json'), '{}');
+      const gitDir = join(project.dir, '.git');
+      const before = { head: readFileSync(join(gitDir, 'HEAD')), index: readFileSync(join(gitDir, 'index')), refs: factoryRefs(project.dir) };
+
+      const result = await DEFAULT_CHANGE_TRACKER.changedSince(cwd, tree);
+
+      expect(result).toEqual({ kind: 'files', files: expected });
+      expect(readFileSync(join(gitDir, 'HEAD'))).toEqual(before.head);
+      expect(readFileSync(join(gitDir, 'index'))).toEqual(before.index);
+      expect(factoryRefs(project.dir)).toEqual(before.refs);
+    }
+  );
+
+  it.each([
+    ['the project root', ''],
+    ['a subdirectory of the repository', 'app']
+  ])(
+    'IMPORTANT-1 workingTreeId is the tree changedSince compares with: the snapshot\'s while nothing changed, and later changes measure against it, without touching HEAD, the index or a ref (%s)',
+    async (_, sub) => {
+      const { cwd, tree } = await snapshotFrom(sub);
+      const gitDir = join(project.dir, '.git');
+      const before = { head: readFileSync(join(gitDir, 'HEAD')), index: readFileSync(join(gitDir, 'index')), refs: factoryRefs(project.dir) };
+
+      const unchanged = await DEFAULT_CHANGE_TRACKER.workingTreeId(cwd);
+      expect(unchanged).toEqual({ kind: 'tree', tree });
+
+      // A hand fix before the Test Verifier starts is in the baseline; only what follows is measured.
+      write('app/src/a.ts', 'hand fix\n');
+      const baseline = await DEFAULT_CHANGE_TRACKER.workingTreeId(cwd);
+      if (baseline.kind !== 'tree') throw new Error(baseline.error);
+      expect(baseline.tree).not.toBe(tree);
+      write('app/test/new.test.ts', 'new\n');
+      expect(await DEFAULT_CHANGE_TRACKER.changedSince(cwd, baseline.tree)).toEqual({
+        kind: 'files',
+        files: [sub === '' ? 'app/test/new.test.ts' : 'test/new.test.ts']
+      });
+      expect(readFileSync(join(gitDir, 'HEAD'))).toEqual(before.head);
+      expect(readFileSync(join(gitDir, 'index'))).toEqual(before.index);
+      expect(factoryRefs(project.dir)).toEqual(before.refs);
+    }
+  );
+
+  it('IMPORTANT-1 workingTreeId never throws: outside a work tree it returns failed with a reason', async () => {
+    const result = await DEFAULT_CHANGE_TRACKER.workingTreeId(project.dir);
+
+    expect(result.kind).toBe('failed');
+    expect(result.kind === 'failed' && result.error.length).toBeGreaterThan(0);
+  });
+
+  it('AC-121 changedSince of an unchanged working tree lists no file', async () => {
+    const { cwd, tree } = await snapshotFrom('app');
+
+    expect(await DEFAULT_CHANGE_TRACKER.changedSince(cwd, tree)).toEqual({ kind: 'files', files: [] });
+  });
+
+  it('AC-121 changedSince is not narrowed by a repository\'s diff.relative setting', async () => {
+    const { cwd, tree } = await snapshotFrom('app');
+    git(project.dir, 'config', 'diff.relative', 'true');
+    write('app/src/a.ts', 'a2\n');
+
+    expect(await DEFAULT_CHANGE_TRACKER.changedSince(cwd, tree)).toEqual({ kind: 'files', files: ['src/a.ts'] });
+  });
+
+  it('IMPORTANT-4 the measurement needs no git >= 2.28 option: no --no-relative flag; diff.relative=false is set per call and --ignore-submodules=none is kept', () => {
+    const source = readFileSync(join(__dirname, '..', '..', 'harness', 'change-diff.ts'), 'utf-8')
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/^\s*\/\/.*$/gm, '');
+    const treeOptions = /const TREE_DIFF_OPTIONS = \[([^\]]*)\]/.exec(source);
+    const safeConfig = /const SAFE_GIT_CONFIG = \[([\s\S]*?)\];/.exec(source);
+
+    expect(source).not.toContain('--no-relative');
+    expect(treeOptions?.[1]).toContain(`'--ignore-submodules=none'`);
+    expect(safeConfig?.[1]).toContain(`'-c', 'diff.relative=false'`);
+  });
+
+  it('AC-121 changedSince lists a moved gitlink even when the repository sets diff.ignoreSubmodules=all', async () => {
+    const { cwd, tree } = await snapshotFrom('');
+    const lib = join(project.dir, 'vendor', 'lib');
+    mkdirSync(lib, { recursive: true });
+    git(lib, 'init', '-q');
+    write('vendor/lib/lib.ts', 'one\n');
+    git(lib, 'add', '.');
+    git(lib, 'commit', '-q', '-m', 'one');
+    const withLib = await DEFAULT_CHANGE_TRACKER.snapshot(cwd, await DEFAULT_CHANGE_TRACKER.captureBase(cwd), 'run-1', 2);
+    if (withLib.kind !== 'written') throw new Error(withLib.kind);
+    write('vendor/lib/lib.ts', 'two\n');
+    git(lib, 'commit', '-q', '-am', 'two');
+    git(project.dir, 'config', 'diff.ignoreSubmodules', 'all');
+
+    expect(await DEFAULT_CHANGE_TRACKER.changedSince(cwd, tree)).toEqual({ kind: 'files', files: ['vendor/lib'] });
+    expect(await DEFAULT_CHANGE_TRACKER.changedSince(cwd, withLib.tree)).toEqual({ kind: 'files', files: ['vendor/lib'] });
+  });
+
+  it.each<[string, (cwd: string, tree: string) => [string, string]]>([
+    ['a tree id that is not an object id', cwd => [cwd, '--output=/tmp/x']],
+    ['a tree the repository does not have', cwd => [cwd, '0'.repeat(40)]],
+    ['a commit id, not a tree id', cwd => [cwd, git(project.dir, 'rev-parse', 'HEAD').trim()]],
+    ['a project that is not a work tree', (_, tree) => [tmpdir(), tree]]
+  ])('AC-121 changedSince never throws: %s returns failed with a reason', async (_, args) => {
+    const { cwd, tree } = await snapshotFrom('');
+
+    const result = await DEFAULT_CHANGE_TRACKER.changedSince(...args(cwd, tree));
+
+    expect(result.kind).toBe('failed');
+    expect(result.kind === 'failed' && result.error.length).toBeGreaterThan(0);
   });
 });

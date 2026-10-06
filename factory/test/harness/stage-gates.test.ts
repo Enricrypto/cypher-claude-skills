@@ -250,7 +250,7 @@ describe('Stage Gates', () => {
       acceptanceCriteriaTestedCount: 4,
       acceptanceCriteriaNotCoverableCount: 0,
       storyAcceptanceCriteriaCount: 4,
-      criticalIssuesCount: 0,
+      validationVerdict: { passed: true, standing: 0, disproved: 0 },
       securityIssuesCount: 0,
       securityBlockers: [],
       executionMeasurement: { total: 10, passed: 10, failed: 0, passRate: 1 },
@@ -455,6 +455,27 @@ describe('Stage Gates', () => {
       expect(decision.missingArtifacts).toEqual(['TEST_REPORT.md']);
       expect(decision.blockers.join('\n')).toContain('TEST_REPORT.md');
       expect(decision.recommendation).not.toBe('ADVANCE');
+    });
+
+    it.each<[string, Stage4Metadata['validationVerdict'], boolean, RegExp]>([
+      ['absent: no verdict fails closed', undefined, false, /no validation verdict/i],
+      ['passed with nothing standing', { passed: true, standing: 0, disproved: 0 }, true, /no CRITICAL issue standing/],
+      ['passed: one CRITICAL disproved by both skeptics, nothing standing', { passed: true, standing: 0, disproved: 1 }, true, /1 disproved/],
+      ['not passed: one CRITICAL standing', { passed: false, standing: 1, disproved: 0 }, false, /1 CRITICAL issue\(s\) standing/],
+      ['inconsistent: passed but one standing', { passed: true, standing: 1, disproved: 0 }, false, /1 CRITICAL issue\(s\) standing/],
+      ['inconsistent: not passed with nothing standing', { passed: false, standing: 0, disproved: 2 }, false, /did not pass/],
+      ['malformed: standing is not a number', { passed: true, standing: '0' as unknown as number, disproved: 0 }, false, /no validation verdict/i]
+    ])('AC-131 Validation Passed reads the typed verdict, not the raw issue list (%s)', async (_, verdict, passes, details) => {
+      mockContext.artifacts = stage4Artifacts();
+      const metadata: Stage4Metadata = { ...cleanStage4(), validationVerdict: verdict };
+      // A raw CRITICAL count, as the pre-B-2 context carried it, is never read.
+      mockContext.metadata = { ...metadata, criticalIssuesCount: passes ? 3 : 0 };
+
+      const decision = await canAdvanceStage(4, stageContracts[4], mockContext);
+
+      expect(decision.criteriaResults['Validation Passed'].passed).toBe(passes);
+      expect(decision.criteriaResults['Validation Passed'].details).toMatch(details);
+      expect(decision.canAdvance).toBe(passes);
     });
 
     it('a security blocker is carried into the gate blockers', async () => {

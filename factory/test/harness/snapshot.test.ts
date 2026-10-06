@@ -10,7 +10,7 @@
 
 import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
 import { createHash } from 'crypto';
-import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, symlinkSync, writeFileSync } from 'fs';
 import { join, relative } from 'path';
 
 import { CheckpointRequest } from '../../feature/workflows/feature-factory-orchestrator';
@@ -26,7 +26,8 @@ import {
   recordStage3Snapshot,
   Stage3Snapshot,
   stage3SnapshotNumber,
-  stage3SnapshotPassedBy
+  stage3SnapshotPassedBy,
+  ValidatorEvaluation
 } from '../../harness/state-tracker';
 import { backend, testVerifier, validator } from '../fixtures/agent-outputs';
 import { FAKE_SNAPSHOT_COMMIT, FAKE_SNAPSHOT_TREE, fakeChangeTracker } from '../fixtures/changes';
@@ -43,6 +44,7 @@ import {
 } from '../fixtures/harness-run';
 import { executionAudit, infraAudit, recordingGates } from '../fixtures/gates';
 import { isolateHarnessGit, setupGit } from '../fixtures/real-git';
+import { copyIntact, createReviewDir, leafDigest, sealReadOnly } from '../../harness/review-copy';
 
 const RUN_TIMEOUT_MS = 30_000;
 
@@ -269,6 +271,34 @@ describe('Stage 3 snapshot records (D-7)', () => {
       const state = withRework();
       arrange(state);
       expect(stage3SnapshotPassedBy(state, rework1)).toBe(true);
+    });
+
+    // AC-157 (D-14): the verification-start marker. It is committed before the copy and before the
+    // Test Verifier is invoked, so a kill or a throw anywhere in verification leaves it.
+    const evaluation = (startedAt: string, closed?: ValidatorEvaluation['closed']): ValidatorEvaluation => ({
+      e: 1,
+      cycle: 1,
+      round: 0,
+      kind: 'first-pass',
+      startedAt,
+      ...(closed ? { closed } : {})
+    });
+
+    it.each<[string, (state: FeatureState) => void, boolean]>([
+      ['an open evaluation started after it, with no invocation or Gate 2 record', state => (state.validatorEvaluations = [evaluation('2026-10-05T00:00:01.000Z')]), true],
+      ['an evaluation started exactly at it', state => (state.validatorEvaluations = [evaluation(TAKEN)]), true],
+      ['an escalated evaluation started after it', state => (state.validatorEvaluations = [evaluation('2026-10-05T00:00:01.000Z', { outcome: 'escalated', at: '2026-10-05T00:00:02.000Z' })]), true],
+      ['only an evaluation started one millisecond before it', state => (state.validatorEvaluations = [evaluation('2026-10-04T23:59:59.999Z')]), false],
+      ['a follow-up invocation started after it', state => (state.agentInvocations = [invocation('07b-validator-followup', '2026-10-05T00:00:01.000Z')]), true],
+      ['a skeptic invocation started after it', state => (state.agentInvocations = [invocation('07c-validator-skeptic', '2026-10-05T00:00:01.000Z')]), true],
+      ['a skipped entry with a later evaluation start', state => {
+        state.stage3Snapshots = [{ status: 'skipped', reason: 'not a git work tree', at: rework1, takenAt: TAKEN }];
+        state.validatorEvaluations = [evaluation('2026-10-05T00:00:01.000Z')];
+      }, false]
+    ])('AC-157 a verification start at or after the snapshot counts as moving past it (%s)', (_label, arrange, expected) => {
+      const state = withRework();
+      arrange(state);
+      expect(stage3SnapshotPassedBy(state, rework1)).toBe(expected);
     });
   });
 
@@ -701,7 +731,7 @@ describe('AC-81 AC-85 a CHECKPOINT 3 rework the run has moved past keeps its sna
     expect(factoryRefs(dir)).toHaveLength(2);
   }, RUN_TIMEOUT_MS);
 
-  it('AC-85 I-4 a rework killed after its Stage 3 gate passed and was recorded, before the Test Verifier ran, is re-evaluated on a plain resume: same n, same commit for an unchanged tree', async () => {
+  it('AC-85 I-4 a rework killed at Gate 1.5, after its Stage 3 gate passed and was recorded and before verification started, is re-evaluated on a plain resume: same n, same commit for an unchanged tree', async () => {
     const dir = project.dir;
     repoWithCommit();
 
@@ -714,11 +744,27 @@ describe('AC-81 AC-85 a CHECKPOINT 3 rework the run has moved past keeps its sna
     });
     expect(rejected.completionStatus).toBe('ESCALATED');
 
-    // Run 2: the rework passes its Stage 3 gate (stage3-2, recorded), then the process dies as the
-    // rework's Test Verifier is about to run: no 06/07 invocation and no Gate 2 record after the snapshot.
-    const kill = killAt(scriptedInvoker(gitScript(dir), { cwd: dir }).invoke, '06-test-verifier', 1, dir);
-    await runToEnd({ cwd: dir, invoke: kill.invoke, resumeFromState: onDisk(), changes: realTracker() });
-    const killed = restoreSnapshot(dir, kill.snapshot());
+    // Run 2: the rework passes its Stage 3 gate (stage3-2, recorded), then the process dies in
+    // Gate 1.5, before verification starts (PR B-2 AC-157 moved the kill point here: a kill at the
+    // Test Verifier is after the verification-start marker): no evaluation, no 06/07 invocation and
+    // no Gate 2 record after the snapshot. The state on disk at that moment is what a kill leaves.
+    let captured: FeatureState | undefined;
+    const killedInGate15 = recordingGates({
+      auditInfrastructure: () => {
+        captured = onDisk();
+        throw new SimulatedKill('gate-1.5', 1);
+      }
+    });
+    await runToEnd({
+      cwd: dir,
+      invoke: scriptedInvoker(gitScript(dir), { cwd: dir }).invoke,
+      resumeFromState: onDisk(),
+      gates: killedInGate15.gates,
+      changes: realTracker()
+    });
+    expect(captured).toBeDefined();
+    const killed = restoreSnapshot(dir, captured!);
+    expect((killed.validatorEvaluations ?? []).filter(evaluation => evaluation.cycle === 1)).toEqual([]);
     const reworkBefore = written(killed).find(s => s.at.phase === 'rework')!;
     expect(reworkBefore).toMatchObject({ n: 2, at: { phase: 'rework', round: 1 } });
     expect(reworkBefore.reused).toBeUndefined();
@@ -917,7 +963,15 @@ describe('AC-89 snapshots change nothing CHECKPOINT 3 binds to', () => {
       tree: FAKE_SNAPSHOT_TREE,
       reused: false
     });
-    const withoutSnapshots = await cp3(twinB, { ...realTracker(), snapshot: noOp });
+    // The no-op snapshot names no real commit, so the review copy and the measurement (PR B-2)
+    // use the fake tracker's too; neither touches what CHECKPOINT 3 binds to.
+    const fake = fakeChangeTracker();
+    const withoutSnapshots = await cp3(twinB, {
+      ...realTracker(),
+      snapshot: noOp,
+      extractSnapshot: fake.extractSnapshot,
+      changedSince: fake.changedSince
+    });
 
     expect(factoryRefs(twinA)).toHaveLength(1);
     expect(factoryRefs(twinB)).toEqual([]);
@@ -951,5 +1005,167 @@ describe('AC-89 snapshots change nothing CHECKPOINT 3 binds to', () => {
     expect(state.checkpointApprovals.at(-1)).toMatchObject({ checkpointId: 3, sha256: paused.pendingCheckpoint!.sha256 });
     expect(state.stage3Snapshots).toEqual(snapshotsAtPause);
     expect(factoryRefs(dir)).toHaveLength(1);
+  }, RUN_TIMEOUT_MS);
+});
+
+// =============================================================================================
+// PR B-2: the main Validator's review copy, against real git (AC-117, AC-157, D-B2-2)
+// =============================================================================================
+
+describe('PR B-2 the review copy against real git', () => {
+  /** Every regular file and symlink below `root`, relative and sorted: a file by its content, a link by its target. */
+  function leavesOf(root: string): Record<string, string> {
+    const out: Record<string, string> = {};
+    const walk = (dir: string) => {
+      for (const name of readdirSync(dir)) {
+        const absolute = join(dir, name);
+        const stat = lstatSync(absolute);
+        if (stat.isDirectory()) walk(absolute);
+        else out[relative(root, absolute)] = stat.isSymbolicLink() ? `link ${readlinkSync(absolute)}` : readFileSync(absolute, 'utf8');
+      }
+    };
+    walk(root);
+    return out;
+  }
+
+  const evaluationsOf = (state: FeatureState) => state.validatorEvaluations ?? [];
+
+  it('AC-117 the main Validator\'s copy is extracted from the latest snapshot ref and equals its tree exactly (no .git, no .factory, no untracked ignored file) and holds nothing the Test Verifier writes', async () => {
+    const dir = project.dir;
+    repoWithCommit();
+    write(dir, 'debug.log', 'untracked and ignored\n');
+    write(dir, 'notes.txt', 'untracked, not ignored\n');
+    const TEST_FILE = 'test/feature.test.ts';
+    let seen: { cwd?: string; leaves: Record<string, string> } | undefined;
+    const script = {
+      ...gitScript(dir),
+      '06-test-verifier': () => {
+        write(dir, TEST_FILE, 'it("works", () => {});\n');
+        return testVerifier();
+      },
+      '07-validator': (call: AgentInvocation) => {
+        seen = { cwd: call.cwd, leaves: leavesOf(call.cwd!) };
+        return validator();
+      }
+    };
+
+    const state = await runToEnd({ cwd: dir, invoke: scriptedInvoker(script, { cwd: dir }).invoke, changes: realTracker() });
+
+    expect(state.completionStatus).toBe('SUCCESS');
+    const snapshot = latestStage3Snapshot(state)!;
+    const [evaluation] = evaluationsOf(state);
+    const copy = evaluation.copy!;
+    expect(copy.source).toEqual({ kind: 'snapshot', n: snapshot.n, ref: snapshot.ref, commit: snapshot.commit, tree: snapshot.tree });
+    expect(seen?.cwd).toBe(copy.dir);
+
+    // Exactly the snapshot's tree, byte for byte: what git holds is what the Validator read.
+    const paths = treePaths(dir, snapshot.commit);
+    expect(Object.keys(seen!.leaves).sort()).toEqual(paths);
+    for (const path of paths) expect({ path, content: seen!.leaves[path] }).toEqual({ path, content: blob(dir, snapshot.commit, path) });
+    expect(paths).toEqual(expect.arrayContaining(['notes.txt', BUILT, 'src/a.ts']));
+    for (const absent of ['debug.log', TEST_FILE]) expect(paths).not.toContain(absent);
+    expect(paths.some(path => path.startsWith('.factory/') || path.startsWith('.git/'))).toBe(false);
+    expect(existsSync(join(copy.dir, '.git'))).toBe(false);
+    expect(existsSync(join(copy.dir, '.factory'))).toBe(false);
+
+    // Still whole after the run, recorded with its leaves and digest; the Test Verifier's file was measured against it.
+    expect(copyIntact(copy.dir, copy)).toBe(true);
+    expect(copy.entries).toBe(paths.length);
+    expect(existsSync(join(copy.dir, TEST_FILE))).toBe(false);
+    expect(evaluation.testVerifierChanges).toEqual({ kind: 'tests', files: [TEST_FILE] });
+  }, RUN_TIMEOUT_MS);
+
+  it('D-B2-2 on a rich extracted snapshot (an executable, a symlink, nested and unusual names) the leaf digest taken after extraction has the extraction\'s entry count and copyIntact holds after sealing', async () => {
+    const dir = project.dir;
+    repoWithCommit();
+    write(dir, 'bin/run.sh', '#!/bin/sh\necho hi\n');
+    chmodSync(join(dir, 'bin/run.sh'), 0o755);
+    symlinkSync('../src/a.ts', join(dir, 'bin/a-link'));
+    write(dir, 'deep/er/still/x.ts', 'export const x = 1;\n');
+    write(dir, 'names/with space.ts', 'export {};\n');
+    write(dir, 'names/ñandú.md', '# ñandú\n');
+    git(dir, 'add', '-A');
+    git(dir, 'commit', '-q', '-m', 'rich');
+
+    const base = await DEFAULT_CHANGE_TRACKER.captureBase(dir);
+    const snapshot = await DEFAULT_CHANGE_TRACKER.snapshot(dir, base, 'run-rich', 1);
+    expect(snapshot.kind).toBe('written');
+    const snap = snapshot as Extract<SnapshotResult, { kind: 'written' }>;
+    const dest = createReviewDir(`${dir}-review`, 'run-rich', 1);
+
+    const extracted = await DEFAULT_CHANGE_TRACKER.extractSnapshot(dir, snap, dest);
+
+    expect(extracted.kind).toBe('extracted');
+    const leaves = leafDigest(dest);
+    expect(leaves.entries).toBe(extracted.kind === 'extracted' ? extracted.entries : -1);
+    expect(leaves.entries).toBe(treePaths(dir, snap.commit).length);
+    sealReadOnly(dest);
+    expect(copyIntact(dest, leaves)).toBe(true);
+    expect(lstatSync(join(dest, 'bin/a-link')).isSymbolicLink()).toBe(true);
+    expect(lstatSync(join(dest, 'bin/run.sh')).mode & 0o111).not.toBe(0);
+  }, RUN_TIMEOUT_MS);
+
+  it('AC-157 the rework\'s Test Verifier writes a partial file and its invocation throws: a resume keeps stage3-<k>, its commit, tree and record, and extracts the Validator\'s copy from it, without the partial file', async () => {
+    const dir = project.dir;
+    repoWithCommit();
+    const PARTIAL = 'test/partial.test.ts';
+
+    // Run 1: Stage 3, then CHECKPOINT 3 is rejected.
+    const rejected = await runToEnd({
+      cwd: dir,
+      invoke: scriptedInvoker(gitScript(dir), { cwd: dir }).invoke,
+      approveCheckpoint: decisions(true, true, { decision: 'REJECT', notes: 'Tighten the guard.' }).approve,
+      changes: realTracker()
+    });
+    expect(rejected.completionStatus).toBe('ESCALATED');
+
+    // Run 2: the rework passes its Stage 3 gate (stage3-2); the Test Verifier writes part of a file,
+    // then its invocation throws (an SDK or API error).
+    const throwing = {
+      ...gitScript(dir),
+      '06-test-verifier': () => {
+        write(dir, PARTIAL, 'it("half a test", () => {\n');
+        throw new Error('SDK error: 529 overloaded');
+      }
+    };
+    const stopped = await runToEnd({ cwd: dir, invoke: scriptedInvoker(throwing, { cwd: dir }).invoke, resumeFromState: onDisk(), changes: realTracker() });
+    expect(stopped.escalations.at(-1)).toMatchObject({ agent: 'orchestrator', reason: 'MANUAL' });
+    const afterThrow = onDisk();
+    expect(afterThrow.agentInvocations!.filter(i => i.agent === '06-test-verifier').at(-1)).toMatchObject({ outcome: 'threw', error: 'SDK error: 529 overloaded' });
+    const reworkBefore = written(afterThrow).find(s => s.at.phase === 'rework')!;
+    expect(reworkBefore).toMatchObject({ n: 2, at: { phase: 'rework', round: 1 } });
+    expect(stage3SnapshotPassedBy(afterThrow, reworkBefore.at)).toBe(true);
+    expect(existsSync(join(dir, PARTIAL))).toBe(true);
+
+    // Run 3: a plain --resume, counting snapshot calls; the Validator records the copy it reads.
+    let snapshots = 0;
+    const counting: Partial<ChangeTracker> = {
+      ...realTracker(),
+      snapshot: async (...args) => {
+        snapshots++;
+        return DEFAULT_CHANGE_TRACKER.snapshot(...args);
+      }
+    };
+    let seen: { cwd?: string; leaves: Record<string, string> } | undefined;
+    const resumedScript = {
+      ...gitScript(dir),
+      '07-validator': (call: AgentInvocation) => {
+        seen = { cwd: call.cwd, leaves: leavesOf(call.cwd!) };
+        return validator();
+      }
+    };
+    const state = await runToEnd({ cwd: dir, invoke: scriptedInvoker(resumedScript, { cwd: dir }).invoke, resumeFromState: onDisk(), changes: counting });
+
+    expect(state.completionStatus).toBe('SUCCESS');
+    expect(snapshots).toBe(0);
+    expect(written(state).find(s => s.at.phase === 'rework')).toEqual(reworkBefore);
+    expect(refTarget(dir, reworkBefore.ref)).toBe(reworkBefore.commit);
+    expect(git(dir, 'rev-parse', `${reworkBefore.ref}^{tree}`).trim()).toBe(reworkBefore.tree);
+    // The resumed evaluation's copy was extracted from stage3-<k>, which holds no partial write.
+    const resumedEvaluation = evaluationsOf(state).filter(evaluation => evaluation.cycle === 1).at(-1)!;
+    expect(resumedEvaluation.copy!.source).toEqual({ kind: 'snapshot', n: 2, ref: reworkBefore.ref, commit: reworkBefore.commit, tree: reworkBefore.tree });
+    expect(seen?.cwd).toBe(resumedEvaluation.copy!.dir);
+    expect(Object.keys(seen!.leaves).sort()).toEqual(treePaths(dir, reworkBefore.commit));
+    expect(Object.keys(seen!.leaves)).not.toContain(PARTIAL);
   }, RUN_TIMEOUT_MS);
 });

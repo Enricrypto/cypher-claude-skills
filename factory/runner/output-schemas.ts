@@ -17,8 +17,14 @@
  * something the harness has to catch after the fact.
  */
 
-import { isReadOnly, FeatureFactoryAgent, AGENT_STAGE, REQUIRED_ARTIFACTS } from './agent-registry';
-import { SECURITY_CHECKS, SECURITY_CHECK_SURFACE, SECURITY_SURFACES, SecurityCheckName } from '../harness/agent-output-schema';
+import { isReadOnly, FeatureFactoryAgent, AGENT_STAGE, REQUIRED_ARTIFACTS, returnsOnlyReviewDocuments } from './agent-registry';
+import {
+  SECURITY_CHECKS,
+  SECURITY_CHECK_SURFACE,
+  SECURITY_SURFACES,
+  SecurityCheckName,
+  SKEPTIC_VERDICTS
+} from '../harness/agent-output-schema';
 
 type Schema = Record<string, unknown>;
 
@@ -71,6 +77,20 @@ const SECURITY_CHECK_DESCRIPTIONS: Record<SecurityCheckName, string> = {
 
 const surfaceDeclaration = (description: string): Schema => ({ type: 'string', enum: ['PRESENT', 'ABSENT'], description });
 
+/** One reviewer issue: the Validator's shape, shared by the follow-up review (D-6). */
+const reviewIssue = (): Schema =>
+  object(
+    {
+      severity: { type: 'string', enum: ['CRITICAL', 'IMPORTANT', 'MINOR'] },
+      message: str('The problem'),
+      suggestion: str('The fix'),
+      canFix: bool('Can a builder fix this automatically?'),
+      file: str('File'),
+      line: int('Line')
+    },
+    ['severity', 'message', 'suggestion', 'canFix']
+  );
+
 function artifactSchema(agent: FeatureFactoryAgent, readOnly: boolean): Schema {
   const requiredNames = REQUIRED_ARTIFACTS[agent];
 
@@ -82,7 +102,9 @@ function artifactSchema(agent: FeatureFactoryAgent, readOnly: boolean): Schema {
         ? {
             type: 'string',
             enum: requiredNames,
-            description: `MUST be exactly one of: ${requiredNames.join(', ')}. A gate looks the document up by this exact name.`
+            description: returnsOnlyReviewDocuments(agent)
+              ? `MUST be exactly one of: ${requiredNames.join(', ')}. No gate reads it: the harness keeps the document under this exact name.`
+              : `MUST be exactly one of: ${requiredNames.join(', ')}. A gate looks the document up by this exact name.`
           }
         : str('Filename of the document you produced'),
     path: str('Path relative to the project root'),
@@ -309,21 +331,51 @@ const DETAILS_BY_AGENT: Record<FeatureFactoryAgent, { properties: Record<string,
         [...SECURITY_CHECKS]
       ),
       issues: arrayOf(
-        object(
-          {
-            severity: { type: 'string', enum: ['CRITICAL', 'IMPORTANT', 'MINOR'] },
-            message: str('The problem'),
-            suggestion: str('The fix'),
-            canFix: bool('Can a builder fix this automatically?'),
-            file: str('File'),
-            line: int('Line')
-          },
-          ['severity', 'message', 'suggestion', 'canFix']
-        ),
+        reviewIssue(),
         'Every issue found. An empty array is a valid finding — it means the code is clean. A false security check above IS an issue and blocks the stage.'
       )
     },
     required: ['storyCompliance', 'briefCompliance', 'codeQuality', 'security', 'issues']
+  },
+
+  // No security block: security is the main Validator's (D-6).
+  '07b-validator-followup': {
+    properties: {
+      filesReviewed: arrayOf(
+        str('A project-relative path'),
+        'Exactly the files your prompt lists, as project-relative paths. Review no other file.'
+      ),
+      issues: arrayOf(
+        reviewIssue(),
+        'Every issue found in the listed files. An empty array is a valid finding — it means the tests are sound.'
+      )
+    },
+    required: ['filesReviewed', 'issues']
+  },
+
+  '07c-validator-skeptic': {
+    properties: {
+      issueKey: str('The issue key your prompt gives, echoed exactly. A different key fails your output.'),
+      verdict: {
+        type: 'string',
+        enum: [...SKEPTIC_VERDICTS],
+        description:
+          'UPHELD unless you can show the issue as stated is not real. DISPROVED needs file:line evidence from the tree you read.'
+      },
+      reason: str('Why, in one paragraph.'),
+      evidence: arrayOf(
+        object(
+          {
+            file: str('Path relative to your working directory'),
+            line: int('Line'),
+            note: str('What this line shows')
+          },
+          ['file', 'note']
+        ),
+        'file:line evidence for your verdict. At least one entry when DISPROVED.'
+      )
+    },
+    required: ['issueKey', 'verdict', 'reason', 'evidence']
   },
 
   '08-feature-consolidator': {
@@ -415,9 +467,11 @@ export function agentOutputSchema(agent: FeatureFactoryAgent): Schema {
           summary: str('One paragraph. Do not put findings ONLY here — the structured fields below are what the gates read.'),
           artifacts: arrayOf(
             artifactSchema(agent, readOnly),
-            requiredArtifacts.length > 0
-              ? `You MUST return exactly these documents, by these exact names: ${requiredArtifacts.join(', ')}. A gate looks each one up by name and blocks the stage if it is absent.`
-              : 'Documents and files you produced',
+            requiredArtifacts.length === 0
+              ? 'Documents and files you produced'
+              : returnsOnlyReviewDocuments(agent)
+                ? `You MUST return exactly these documents, by these exact names: ${requiredArtifacts.join(', ')}. No gate reads it: the harness keeps it under that exact name as the record of your review, and the output check fails if it is absent.`
+                : `You MUST return exactly these documents, by these exact names: ${requiredArtifacts.join(', ')}. A gate looks each one up by name and blocks the stage if it is absent.`,
             requiredArtifacts.length || undefined
           ),
           ...spec.properties

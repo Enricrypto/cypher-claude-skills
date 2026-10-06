@@ -8,14 +8,17 @@
  * 1. DISCOVER (Researcher) — Map codebase
  * 2. PLAN (Story Writer → CP1 → Spec Writer → CP2) — Design feature
  * 3. EXECUTE (Backend Builder → Frontend Builder) — Implement with loop-backs
- * 4. VERIFY (Test Verifier → Gate 2 → Validator → Stage 4 gate → CP3) — the harness measures
- *    regressions itself, and a human approves the validated change
+ * 4. VERIFY (Test Verifier in the project ∥ Validator in a read-only copy of the latest Stage 3
+ *    snapshot → Gate 2 → follow-up review of the Test Verifier's files → merge → two skeptics per
+ *    CRITICAL → Validator rounds → Stage 4 gate → CP3) — the harness measures regressions and the
+ *    Test Verifier's changes itself, and a human approves the validated change
  *
  * SUCCESS = the Stage 4 gate passed and CHECKPOINT 3 was approved (AC-44). Stage 5 (the Feature
  * Consolidator) is not part of a run: it runs on a finished SUCCESS run, on request.
  */
 
-import { lstatSync } from 'fs';
+import { lstatSync, realpathSync, rmSync } from 'fs';
+import { tmpdir } from 'os';
 import { join, relative, resolve } from 'path';
 
 import {
@@ -31,6 +34,7 @@ import {
 import {
   CheckpointPresentation,
   CheckpointPresentationError,
+  CP3_FOLLOWUP_DOCUMENT,
   NOT_GIT_SNAPSHOT_REASON,
   presentationFor
 } from '../../harness/checkpoint-presentation';
@@ -39,6 +43,7 @@ import { ChangeSet, ChangeTracker, DEFAULT_CHANGE_TRACKER, HeadState } from '../
 import {
   activeRework,
   checkpointApproval,
+  currentReworkCycle,
   hasPass,
   isCheckpointApproved,
   isPreSuppliedRun,
@@ -76,6 +81,8 @@ import {
   FeatureFactoryAgentOutput,
   BackendBuilderOutput,
   FrontendBuilderOutput,
+  SkepticOutput,
+  ValidatorFollowupOutput,
   ValidatorIssue,
   verifyArtifactMaterialization,
   generateMaterializationReport
@@ -94,9 +101,11 @@ import {
   BuilderFailure,
   builderPrompt,
   CheckpointRework,
+  followupPrompt,
   ValidatorRoundFailure,
   PromptContext,
   researcherPrompt,
+  skepticPrompt,
   specPrompt,
   storyPrompt,
   testVerifierPrompt,
@@ -122,6 +131,7 @@ import {
 } from '../../harness/infrastructure-gates';
 
 import { AgentInvocation, AgentInvoker } from '../../runner/invoke-agent';
+import { REQUIRED_ARTIFACTS } from '../../runner/agent-registry';
 import {
   buildStageContext,
   BuildStageContextInput,
@@ -156,6 +166,25 @@ import {
   recordStage3Snapshot,
   stage3SnapshotNumber,
   stage3SnapshotPassedBy,
+  latestStage3Snapshot,
+  recordEvaluationStart,
+  openEvaluation,
+  recordMeasurementBaseline,
+  MeasurementBaseline,
+  reviewCopyDirs,
+  recordReviewCopy,
+  recordEvaluationValidator,
+  recordTestVerifierChanges,
+  recordFollowup,
+  recordSkepticVerdict,
+  SKEPTIC_INSTANCES,
+  SkepticInstance,
+  closeEvaluation,
+  closeOpenEvaluations,
+  ReviewSource,
+  TestVerifierChanges,
+  ValidationVerdict,
+  ValidatorEvaluation,
   clearPause,
   invalidateAgentSteps,
   reopenFeature,
@@ -186,6 +215,32 @@ export { LOOP_BACK_RULES, MAX_BUILDER_ATTEMPTS, MAX_VALIDATOR_ROUNDS };
 export type { LoopBackRule, LoopBackSituation } from '../../harness/loop-rules';
 
 import { saveState, stateFilePath, StatePersistenceError } from '../../harness/state-store';
+import {
+  classifyTestVerifierChanges,
+  disprovedFinding,
+  earlierBaseline,
+  escalatedReviewFindings,
+  evaluationKind,
+  followupMismatch,
+  followupPresented,
+  importantFindings,
+  MergedIssue,
+  mergeIssues,
+  stage4Verdict,
+  testVerifierFiles,
+  verdictOf
+} from '../../harness/verification';
+import {
+  compareWithCopy,
+  copyIntact,
+  copyWorkingTree,
+  CopyLeaves,
+  createReviewDir,
+  insideReviewCopies,
+  leafDigest,
+  reviewRootProblem,
+  sealReadOnly
+} from '../../harness/review-copy';
 import { assertNoFactoryCaseVariant, prepareNewRunDirectory, supersedeArtifacts } from '../../harness/run-directory';
 
 /**
@@ -305,18 +360,19 @@ const PLANNING_REWORK_AGENTS: Readonly<Partial<Record<CheckpointId, readonly str
 const SUPERSEDED_ON_REWORK: Readonly<Record<CheckpointId, readonly string[]>> = {
   1: ['USER_STORY.md'],
   2: ['TECHNICAL_BRIEF.md', 'FILE_LIST.md'],
-  3: ['TEST_REPORT.md', 'VALIDATION_REPORT.md']
+  3: ['TEST_REPORT.md', 'VALIDATION_REPORT.md', CP3_FOLLOWUP_DOCUMENT]
 };
 
 /**
  * The PASS steps a rework invalidates, so the skip rule runs them again (D-5): the planning agent
- * for CP1/CP2; for CP3 the Test Verifier and the Validator. Builders are never invalidated — a CP3
- * rework re-runs them in their own `rework` phase, and their outputs are merged.
+ * for CP1/CP2; for CP3 the Test Verifier, the Validator and its follow-up review. Builders are never
+ * invalidated — a CP3 rework re-runs them in their own `rework` phase, and their outputs are merged.
+ * Skeptics have no step to invalidate: their verdicts belong to their evaluation (PR B-2 D-7).
  */
 const INVALIDATED_ON_REWORK: Readonly<Record<CheckpointId, readonly string[]>> = {
   1: ['02-story-writer'],
   2: ['03-spec-writer'],
-  3: ['06-test-verifier', '07-validator']
+  3: ['06-test-verifier', '07-validator', '07b-validator-followup']
 };
 
 /** Each checkpoint by its id. */
@@ -423,6 +479,14 @@ export interface OrchestrationOptions {
    */
   stateWriter?: (cwd: string, state: FeatureState) => void;
 
+  /**
+   * Where the main Validator's read-only review copies are made (PR B-2 D-3, D-20). TESTS ONLY;
+   * omitted = the OS temp directory (its realpath), which is what production always uses: a copy
+   * inside the project would be collected by its test runner. A repo-hygiene test checks that no
+   * production code passes this.
+   */
+  reviewRoot?: string;
+
   logger?: (message: string) => void;
 }
 
@@ -436,7 +500,10 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
   const changes: ChangeTracker = {
     captureBase: options.changes?.captureBase ?? DEFAULT_CHANGE_TRACKER.captureBase,
     collect: options.changes?.collect ?? DEFAULT_CHANGE_TRACKER.collect,
-    snapshot: options.changes?.snapshot ?? DEFAULT_CHANGE_TRACKER.snapshot
+    snapshot: options.changes?.snapshot ?? DEFAULT_CHANGE_TRACKER.snapshot,
+    extractSnapshot: options.changes?.extractSnapshot ?? DEFAULT_CHANGE_TRACKER.extractSnapshot,
+    changedSince: options.changes?.changedSince ?? DEFAULT_CHANGE_TRACKER.changedSince,
+    workingTreeId: options.changes?.workingTreeId ?? DEFAULT_CHANGE_TRACKER.workingTreeId
   };
 
   const log = options.logger ?? ((message: string) => console.log(`[FF] ${message}`));
@@ -444,6 +511,9 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
   /** Every state save of this run goes through here: the durable store unless a test injected a writer (AC-104). */
   const save = options.stateWriter ?? saveState;
   const phase = (title: string) => log(`\n=== ${title} ===`);
+
+  /** Where review copies are made (PR B-2 D-3): outside the project, in the OS temp directory unless a test says otherwise. */
+  const reviewParent = options.reviewRoot ?? realpathSync(tmpdir());
 
   // Pre-flight (§4), OUTSIDE the try: a refusal is a thrown RunRefusedError with nothing of this
   // run written. A fresh start first archives finished runs into .factory/_archive/ — previous
@@ -577,13 +647,26 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
    * success — which is what makes "a finished run always has a state file" true by construction
    * rather than by remembering to add a save next to each `return`. If you add an exit path,
    * use this; a bare completeFeature() would return a run that left no record of why it ended.
+   *
+   * An escalation closes every open verification evaluation (PR B-2 D-7, I-6), so a resume after
+   * it starts a new one and re-runs the Validator. Only a kill, which never gets here, leaves one
+   * open for the resume to continue. Never called while a parallel verification branch runs (D-8).
+   * Before it closes them, the IMPORTANT issues of an open evaluation whose Validator output is on
+   * record are recorded once under 07-validator (MINOR-5): never decided, they would otherwise
+   * never reach CHECKPOINT 3.
    */
   const finish = (
     current: FeatureState,
     status: 'SUCCESS' | 'ESCALATED' | 'MANUAL_STOP',
     summary: string
   ): FeatureState => {
-    const completed = commit(completeFeature(current, status, summary));
+    if (status === 'ESCALATED') {
+      const kept = addImportantFindingsOnce(current, 4, '07-validator', escalatedReviewFindings(current.validatorEvaluations ?? [], cwd));
+      logFindings('07-validator', kept.added);
+      current = kept.next;
+    }
+    const closed = status === 'ESCALATED' ? closeOpenEvaluations(current, new Date().toISOString()) : current;
+    const completed = commit(completeFeature(closed, status, summary));
     log(`  📋 Run record: ${stateFilePath(cwd, completed.featureId)}`);
     return completed;
   };
@@ -634,18 +717,25 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
     );
   };
 
-  /** What the Stage 4 gate judges "No Regressions" on: the latest Gate 2 record, and its reference. */
-  const latestGate2 = (): HarnessMeasurements => {
+  /**
+   * What the Stage 4 gate judges (D-5, PR B-2 D-12): "No Regressions" on the latest Gate 2 record
+   * and its reference; "Validation Passed" on the typed verdict of the current cycle's latest
+   * decided evaluation. A run whose Validator PASS was recorded before B-2 has no evaluation in
+   * this cycle, and is judged on the legacy verdict from the raw issue list (I-27). A cycle with
+   * evaluations but none decided gives no verdict, so the gate fails closed.
+   */
+  const stage4Evidence = (): HarnessMeasurements => {
+    const validation: ValidationVerdict | undefined = stage4Verdict(state, currentReworkCycle(state), outputs.validator);
     const history = state.executionGateHistory ?? [];
     const latest = history[history.length - 1];
-    if (!latest) return {};
+    if (!latest) return validation ? { validation } : {};
     const execution: ExecutionMeasurement = {
       total: latest.total,
       passed: latest.passed,
       failed: latest.failed,
       passRate: latest.passRate
     };
-    return { execution, regressionReferenceCount: latest.referenceCount };
+    return { execution, regressionReferenceCount: latest.referenceCount, ...(validation ? { validation } : {}) };
   };
 
   /**
@@ -711,27 +801,38 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
    *
    * Every agent invocation goes through here, so `state.agentInvocations` and
    * `metrics.timePerStage` cover the whole run. The returned `timing` is the same start and end,
-   * for the step that records the agent's result. An invocation that throws records nothing: the
-   * error reaches the outer catch, which escalates.
+   * for the step that records the agent's result. An invocation that throws is recorded too, with
+   * `outcome: 'threw'` and the first line of the error (at most 500 characters), committed, and
+   * the error is rethrown (PR B-2 I-16): with two agents in parallel, both must be on record
+   * (AC-124). The error then reaches the outer catch, which escalates.
    */
   const timedInvoke = async (call: AgentInvocation, meta: InvocationMeta = {}): Promise<TimedInvocation> => {
     const started = new Date();
-    const output = await invokeAgent(call);
-    const completed = new Date();
-    const timing: InvocationTiming = { startedAt: started.toISOString(), completedAt: completed.toISOString() };
-
-    state = commit(
+    const record = (completed: Date, failure?: { error: unknown }) =>
       recordAgentInvocation(state, {
         stage: call.stage,
         agent: call.agent,
-        ...timing,
+        startedAt: started.toISOString(),
+        completedAt: completed.toISOString(),
         durationMs: completed.getTime() - started.getTime(),
         ...(meta.phase !== undefined ? { phase: meta.phase } : {}),
         ...(meta.round !== undefined ? { round: meta.round } : {}),
-        ...(meta.attempt !== undefined ? { attempt: meta.attempt } : {})
-      })
-    );
-    return { output, timing };
+        ...(meta.attempt !== undefined ? { attempt: meta.attempt } : {}),
+        ...(meta.evaluation !== undefined ? { evaluation: meta.evaluation } : {}),
+        ...(meta.instance !== undefined ? { instance: meta.instance } : {}),
+        ...(failure ? { outcome: 'threw' as const, error: invocationError(failure.error) } : {})
+      });
+
+    let output: unknown;
+    try {
+      output = await invokeAgent(call);
+    } catch (error) {
+      state = commit(record(new Date(), { error }));
+      throw error;
+    }
+    const completed = new Date();
+    state = commit(record(completed));
+    return { output, timing: { startedAt: started.toISOString(), completedAt: completed.toISOString() } };
   };
 
   /** Render a harness document into the run dir (only) and log where it went. */
@@ -1124,6 +1225,27 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
       return finish(state, 'ESCALATED', 'Artifact materialization failed: builders claimed files inside .factory/');
     }
 
+    // The same for the review copies (PR B-2 D-15, AC-117): they are outside the project, and only
+    // the harness writes there. A claim inside one names a file no builder wrote.
+    const inCopies = insideReviewCopies(
+      claimedFiles.map(claim => claim.path),
+      (state.validatorEvaluations ?? []).flatMap(reviewCopyDirs),
+      cwd
+    );
+    if (inCopies.length > 0) {
+      log('\n❌ CRITICAL: Builders claimed files inside a review copy, which only the harness writes:\n');
+      inCopies.forEach(p => log(`  ❌ ${p}`));
+      state = recordEscalation(
+        state,
+        escalationStage,
+        'harness',
+        'HALLUCINATION_DETECTED',
+        `${inCopies.length} claimed file(s) inside a review copy, which only the harness writes: ${inCopies.join(', ')}`,
+        { blockers: inCopies.map(p => `${p} is inside a review copy; a builder cannot claim a harness-written file`) }
+      );
+      return finish(state, 'ESCALATED', 'Artifact materialization failed: builders claimed files inside a review copy');
+    }
+
     const artifactAudit = await verifyArtifactMaterialization(3, 'builders', claimedFiles, cwd);
 
     log(generateMaterializationReport(artifactAudit));
@@ -1297,12 +1419,12 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
   /**
    * Gate 2, evaluation `round`: 0 right after the Test Verifier, N in validator round N — judged
    * against `.factory/baseline.json` for round 0 and the run's first record afterwards (D-12).
+   * `referenceCount` is `gate2Reference(round)`, read by the caller BEFORE anything of the
+   * evaluation runs and outside any try (PR B-2 D-8, I-9): an untrustworthy baseline must escalate
+   * the run before an agent is invoked, never read as "none".
    */
-  const executionGate = async (round: number): Promise<FeatureState | undefined> => {
+  const executionGate = async (round: number, referenceCount: number | undefined): Promise<FeatureState | undefined> => {
     log('\n🔍 Verifying test execution (ensuring tests actually ran and passed 100%)...\n');
-
-    // Outside the try: an untrustworthy baseline must escalate the run, never read as "none".
-    const referenceCount = gate2Reference(round);
 
     // FAILS CLOSED (AC-6, AC-7). A Gate 2 that could not run escalates; it never hands an
     // unverified build to the Validator for "human review" to catch.
@@ -1674,8 +1796,9 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
   };
 
   /**
-   * STAGE 4: VERIFY. Gate 1.5, then Test Verifier → Gate 2 → Validator with the bounded validator
-   * rounds (D-9), then the Stage 4 gate.
+   * STAGE 4: VERIFY. Gate 1.5, then the Test Verifier (project) ∥ the Validator (read-only copy of
+   * the latest snapshot) → Gate 2, with the bounded validator rounds (D-9; PR B-2 D-8, D-13), then
+   * the Stage 4 gate.
    */
   const stage4 = async (): Promise<FeatureState | undefined> => {
     // An approved CP3 closes Stage 4: what remains is the baseline and SUCCESS (D-6).
@@ -1695,28 +1818,30 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
 
     phase('Stage 4: Verify');
 
-    // On resume (D-2) the Test Verifier is skipped when it already passed, and the whole
-    // Gate 2 → Validator loop when the Validator did. Gate 1.5 and the Stage 4 gate always run.
-    if (!hasPass(state, '06-test-verifier')) {
+    // On resume (D-2) the whole verification — the Test Verifier ∥ the Validator, Gate 2 and the
+    // validator rounds — is skipped once the Validator's evaluation passed. Gate 1.5 and the
+    // Stage 4 gate always run. Legacy path (PR B-2 D-8): a Validator PASS recorded before B-2
+    // without a Test Verifier PASS runs the Test Verifier alone, as before.
+    if (!hasPass(state, '07-validator')) {
+      const stopped = await validatorLoop();
+      if (stopped) return stopped;
+    } else if (!hasPass(state, '06-test-verifier')) {
       const stopped = await runTestVerifier();
       if (stopped) return stopped;
     }
 
-    if (!hasPass(state, '07-validator')) {
-      const stopped = await validatorLoop();
-      if (stopped) return stopped;
-    }
-
     // Check Stage 4 gate. "No Regressions" judges the harness's own latest Gate 2 count against
-    // its reference — never anything the Validator says about regressions (AC-22).
-    const stage4Decision = await stageGate(4, { harness: latestGate2() });
+    // its reference — never anything the Validator says about regressions (AC-22). "Validation
+    // Passed" reads the typed verdict of the current cycle's decided evaluation (B-2 AC-131).
+    const stage4Decision = await stageGate(4, { harness: stage4Evidence() });
     if (!stage4Decision.canAdvance) {
-      // I-6: what this gate judged — the Test Verifier's and the Validator's work — is not done,
-      // so a resume re-runs both instead of re-failing on the same reports. Builders are never
-      // invalidated: their attempts are budgeted, and their gates simply run again.
+      // I-6: what this gate judged — the Test Verifier's and the Validator's work, with its
+      // follow-up — is not done, so a resume re-runs them instead of re-failing on the same
+      // reports. Builders are never invalidated: their attempts are budgeted, and their gates
+      // simply run again.
       state = invalidateAgentSteps(
         state,
-        ['06-test-verifier', '07-validator'],
+        ['06-test-verifier', '07-validator', '07b-validator-followup'],
         `Stage 4 gate failed: ${stage4Decision.reason}`
       );
       state = recordEscalation(
@@ -1735,7 +1860,11 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
     return undefined;
   };
 
-  /** The Test Verifier unit (U10): its verdict is believed; a PASS renders TEST_REPORT.md. */
+  /**
+   * The Test Verifier unit (U10) on the legacy path only (PR B-2 D-8): a Validator PASS recorded
+   * before B-2 without a Test Verifier PASS. Its verdict is believed; a PASS renders TEST_REPORT.md.
+   * Everywhere else the Test Verifier runs as branch T of `evaluate`.
+   */
   const runTestVerifier = async (): Promise<FeatureState | undefined> => {
     const test = await timedInvoke({
       stage: 4,
@@ -1826,79 +1955,650 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
     return infrastructureGate();
   };
 
-  /** Record the Validator's IMPORTANT issues as findings, skipping any the run already holds (MINOR-9). */
-  const recordValidatorFindings = (issues: ValidatorIssue[]) => {
-    const messages = issues
-      .filter(issue => issue?.severity === 'IMPORTANT')
-      .map(issue => `${issue.file ? `[${issue.file}${issue.line !== undefined ? `:${issue.line}` : ''}] ` : ''}${issue.message}`);
-    recordFindingsOnce(4, '07-validator', messages);
+  /**
+   * Record the merged reviews' IMPORTANT issues as findings, each under the source of the review
+   * that reported it, skipping any the run already holds (MINOR-9, PR B-2 D-10). The merge dropped
+   * duplicates first, so an issue both reviews report is recorded once (AC-122). Every reviewed
+   * output's IMPORTANT issues are kept — a round that fails on a CRITICAL issue may raise
+   * IMPORTANT ones the next round never repeats — each exactly once, across rounds and resumes.
+   */
+  const recordValidatorFindings = (merged: readonly MergedIssue[]) => {
+    const findings = importantFindings(merged);
+    recordFindingsOnce(4, '07-validator', findings['07-validator']);
+    recordFindingsOnce(4, FOLLOWUP_AGENT, findings[FOLLOWUP_AGENT]);
+  };
+
+  // ==========================================================================================
+  // Stage 4 verification (PR B-2, D-3 and D-7 to D-14)
+  //
+  // An EVALUATION is one main-Validator review with what hangs off it: its read-only copy, the
+  // Validator's output and, in a first pass, the Test Verifier's run and the measurement of what it
+  // changed. A `first-pass` evaluation runs the Test Verifier (real tree) and the Validator (the
+  // copy) in parallel, then Gate 2; a `validator-round` evaluation runs Gate 2, then the Validator
+  // alone on a fresh copy of the round's snapshot. Every step is recorded on the evaluation and
+  // committed, so a kill resumes only unfinished work; an escalation closes it (finish).
+  // ==========================================================================================
+
+  /** Evaluation `e` of this run's record. */
+  const evaluationNumbered = (e: number): ValidatorEvaluation => {
+    const evaluation = (state.validatorEvaluations ?? []).find(candidate => candidate.e === e);
+    if (!evaluation) throw new Error(`No verification evaluation ${e} is recorded.`);
+    return evaluation;
+  };
+
+  /** Escalate REVIEW_COPY_FAILED (I-18): the copy could not be made, re-made or measured against. */
+  const reviewCopyFailed = (message: string): FeatureState => {
+    log(`❌ ${message}`);
+    state = recordEscalation(state, 4, 'harness', 'REVIEW_COPY_FAILED', message, {
+      remediation: 'Fix the cause (disk space, permissions, the snapshot ref), then resume the run.'
+    });
+    return finish(state, 'ESCALATED', 'The review copy could not be made or measured');
+  };
+
+  /** What evaluation `round` of this loop is (D-7, D-13): verification.ts `evaluationKind`, on this run's record. */
+  const nextEvaluationKind = (round: number, afterRoundFix: boolean): ValidatorEvaluation['kind'] =>
+    evaluationKind(state, currentReworkCycle(state), round, afterRoundFix, hasPass(state, '06-test-verifier'));
+
+  /**
+   * Continue the open evaluation of (cycle, round) (AC-123), or open a new one: its start is
+   * committed BEFORE the copy is made and before any agent of it is invoked (D-14, AC-157), so a
+   * kill, a throw or a crash anywhere in verification leaves the "verification started" marker.
+   */
+  const startEvaluation = (kind: ValidatorEvaluation['kind'], round: number): number => {
+    const cycle = currentReworkCycle(state);
+    const open = openEvaluation(state, cycle, round);
+    if (open) {
+      log(`  ↩️  Continuing verification evaluation ${open.e} (${open.kind}, cycle ${cycle}, round ${round})`);
+      return open.e;
+    }
+    state = commit(recordEvaluationStart(state, { cycle, round, kind }));
+    const started = state.validatorEvaluations![state.validatorEvaluations!.length - 1];
+    log(`  🔎 Verification evaluation ${started.e} (${kind}, cycle ${cycle}, round ${round})`);
+    return started.e;
   };
 
   /**
-   * GATE 2 → VALIDATOR, AND THE BOUNDED VALIDATOR LOOP-BACK (D-9).
+   * Where a new copy comes from (D-3): the latest written Stage 3 snapshot (the current phase's,
+   * Q2), else the AC-126 fallback, a copy of the working tree, with why there is no snapshot.
+   */
+  const reviewSource = (): ReviewSource => {
+    const snapshot = latestStage3Snapshot(state);
+    if (snapshot) return { kind: 'snapshot', n: snapshot.n, ref: snapshot.ref, commit: snapshot.commit, tree: snapshot.tree };
+    return {
+      kind: 'working-tree',
+      reason: state.changeBase?.kind === 'none' ? NOT_GIT_SNAPSHOT_REASON : NO_SNAPSHOT_RECORDED_REASON
+    };
+  };
+
+  /**
+   * Evaluation `e`'s read-only copy, made before either agent of the evaluation is invoked (D-3):
+   *  - a recorded copy that is still whole (copyIntact: leaf count and digest) is reused;
+   *  - a snapshot copy that is not is re-extracted, into a new directory, from the SAME recorded
+   *    snapshot (AC-123); the new directory is recorded and committed;
+   *  - a fallback copy that is not, after the Test Verifier was invoked in this evaluation or its
+   *    measurement baseline was recorded, cannot be re-made (the working tree may now hold its
+   *    writes): REVIEW_COPY_FAILED (I-28);
+   *  - a review root inside the project, or holding it, is refused with REVIEW_COPY_FAILED before
+   *    anything is created (MINOR-6);
+   *  - otherwise a new copy: extracted (its leaf digest taken right after extraction, before
+   *    sealing, and its count checked against the extraction's) or copied from the working tree;
+   *    sealed read-only; recorded with its leaves and digest (D-B2-2); committed.
+   * Any failure escalates REVIEW_COPY_FAILED; a directory a failed attempt left is removed.
+   */
+  const prepareReviewCopy = async (e: number): Promise<{ dir: string; source: ReviewSource } | { finished: FeatureState }> => {
+    const recorded = evaluationNumbered(e).copy;
+    if (recorded && copyIntact(recorded.dir, recorded)) return { dir: recorded.dir, source: recorded.source };
+
+    const source = recorded?.source ?? reviewSource();
+    if (recorded && source.kind === 'working-tree') {
+      const verifierRan =
+        evaluationNumbered(e).baseline !== undefined ||
+        (state.agentInvocations ?? []).some(invocation => invocation.agent === '06-test-verifier' && invocation.evaluation === e);
+      if (verifierRan) {
+        return {
+          finished: reviewCopyFailed(
+            `The review copy ${recorded.dir} of the working tree is missing or changed, and the Test Verifier already ran in ` +
+              `evaluation ${e}: the copy cannot be made again, because the working tree may now hold the Test Verifier's writes (I-28).`
+          )
+        };
+      }
+    }
+
+    const misplaced = reviewRootProblem(reviewParent, cwd);
+    if (misplaced !== undefined) {
+      return { finished: reviewCopyFailed(`The review copy for evaluation ${e} cannot be made: ${misplaced}; it must be outside the project.`) };
+    }
+
+    let dir: string | undefined;
+    let leaves: CopyLeaves;
+    try {
+      dir = createReviewDir(reviewParent, state.featureId, e);
+      if (source.kind === 'snapshot') {
+        const extracted = await changes.extractSnapshot(cwd, { ref: source.ref, commit: source.commit, tree: source.tree }, dir);
+        if (extracted.kind === 'failed') throw new Error(extracted.error);
+        leaves = leafDigest(dir);
+        if (leaves.entries !== extracted.entries) {
+          throw new Error(`the extraction reported ${extracted.entries} entries, but the copy holds ${leaves.entries}`);
+        }
+      } else {
+        leaves = copyWorkingTree(cwd, dir);
+      }
+      sealReadOnly(dir);
+    } catch (error) {
+      if (dir !== undefined) discardReviewDir(dir);
+      const what = source.kind === 'snapshot' ? `extracted from stage3-${source.n} (${source.ref})` : 'copied from the working tree';
+      return {
+        finished: reviewCopyFailed(
+          `The review copy for evaluation ${e} could not be ${what}: ${error instanceof Error ? error.message : String(error)}`
+        )
+      };
+    }
+
+    state = commit(
+      recordReviewCopy(state, e, { dir, source, entries: leaves.entries, digest: leaves.digest, madeAt: new Date().toISOString() })
+    );
+    log(
+      `  📂 Review copy ${recorded ? 're-made' : 'made'} for evaluation ${e}: ${dir} ` +
+        `(${source.kind === 'snapshot' ? `stage3-${source.n}` : `working tree: ${source.reason}`}; ${leaves.entries} entries; read-only)`
+    );
+    return { dir, source };
+  };
+
+  /** What branch T (the Test Verifier) settled with. It never calls finish (D-8). */
+  type TestVerifierBranch =
+    | { kind: 'skipped' | 'passed' }
+    | { kind: 'schema'; error: string }
+    | { kind: 'failed'; verdict: ReturnType<typeof testVerifierVerdict> };
+
+  /**
+   * Branch T (D-8): the Test Verifier, in the real project tree (no `cwd`, AC-118). Its verdict is
+   * believed (AC-19): a PASS renders TEST_REPORT.md and records the PASS step; anything else
+   * records the FAIL or ESCALATED step. Both are committed here; the decision is the caller's.
+   */
+  const testVerifierBranch = async (e: number): Promise<TestVerifierBranch> => {
+    const test = await timedInvoke(
+      { stage: 4, agent: '06-test-verifier', prompt: testVerifierPrompt(promptCtx) },
+      { evaluation: e }
+    );
+    const testOutput = test.output;
+
+    const testValidation = validateOutputSchema(4, '06-test-verifier', testOutput);
+    if (!testValidation.valid) return { kind: 'schema', error: testValidation.errors[0] };
+
+    const verdict = testVerifierVerdict(testOutput);
+    if (!verdict.passed) {
+      state = commit(
+        recordAgentStep(
+          state,
+          4,
+          '06-test-verifier',
+          testOutput.status === 'ESCALATE' ? 'ESCALATED' : 'FAIL',
+          testOutput,
+          undefined,
+          undefined,
+          test.timing
+        )
+      );
+      return { kind: 'failed', verdict };
+    }
+
+    outputs.test = testOutput;
+    // Rendered by the harness from the structured output the gate judges (I-5). Run dir only.
+    writeDocument('TEST_REPORT.md', renderTestReport(testOutput));
+    state = commit(recordAgentStep(state, 4, '06-test-verifier', 'PASS', testOutput, undefined, undefined, test.timing));
+    return { kind: 'passed' };
+  };
+
+  /** What branch V (the main Validator) settled with. It never calls finish (D-8). */
+  type ValidatorBranch = { kind: 'skipped' | 'recorded' } | { kind: 'schema'; error: string };
+
+  /**
+   * Branch V (D-8): the main Validator, in evaluation `e`'s read-only copy (`cwd` = the copy,
+   * AC-117, AC-118). A schema-valid output, whatever its status, is its completion (I-7): its
+   * document is persisted and the output is recorded on the evaluation (committed). Its IMPORTANT
+   * issues are recorded at the decision, from the merged list (D-10); its stageHistory step too.
+   */
+  const validatorBranch = async (e: number, round: number, copy: { dir: string; source: ReviewSource }): Promise<ValidatorBranch> => {
+    const validator = await timedInvoke(
+      { stage: 4, agent: '07-validator', prompt: validatorPrompt(promptCtx, copy), cwd: copy.dir },
+      { round, evaluation: e }
+    );
+    const validatorOutput = validator.output;
+
+    const validatorValidation = validateOutputSchema(4, '07-validator', validatorOutput);
+    if (!validatorValidation.valid) return { kind: 'schema', error: validatorValidation.errors[0] };
+
+    // The Validator's own document goes into the run dir now — the stage gate no longer persists.
+    persist({ validator: validatorOutput });
+    state = commit(recordEvaluationValidator(state, e, validatorOutput, validator.timing));
+    return { kind: 'recorded' };
+  };
+
+  /**
+   * Record evaluation `e`'s measurement baseline (IMPORTANT-1), committed BEFORE the Test Verifier
+   * is invoked in it (`testVerifierRuns`), so the measurement attributes to it only what changed
+   * while it ran, never a hand fix made after an earlier escalation:
+   *  - an earlier first pass of this cycle whose baseline was not cleared (its measurement failed,
+   *    or found a change outside a test path) passes that baseline on, also when the Test Verifier
+   *    does not run again, so the earlier run's writes are still measured (IMPORTANT-2);
+   *  - otherwise, for a snapshot copy, the working tree's tree id (`workingTreeId`); for the
+   *    AC-126 fallback, the evaluation's own copy of the working tree, made before the Test
+   *    Verifier started, with its leaf count and digest.
+   * A baseline already on record (a continued evaluation) is kept. A tree id git cannot give
+   * escalates REVIEW_COPY_FAILED before the Test Verifier runs.
+   */
+  const recordBaseline = async (e: number, testVerifierRuns: boolean): Promise<FeatureState | undefined> => {
+    const evaluation = evaluationNumbered(e);
+    if (evaluation.baseline) return undefined;
+    const earlier = earlierBaseline(state.validatorEvaluations ?? [], evaluation.cycle, e);
+    const inherited = earlier && !earlier.cleared ? earlier.baseline : undefined;
+    if (!testVerifierRuns && inherited === undefined) return undefined;
+
+    let baseline: MeasurementBaseline;
+    const recordedAt = new Date().toISOString();
+    const copy = evaluation.copy!;
+    if (inherited !== undefined) {
+      baseline = inherited;
+    } else if (copy.source.kind === 'snapshot') {
+      const id = await changes.workingTreeId(cwd);
+      if (id.kind === 'failed') return reviewCopyFailed(`The tree 06-test-verifier is measured against could not be recorded: ${id.error}`);
+      baseline = { kind: 'tree', tree: id.tree, recordedAt };
+    } else {
+      baseline = { kind: 'copy', dir: copy.dir, entries: copy.entries, digest: copy.digest, recordedAt };
+    }
+    state = commit(recordMeasurementBaseline(state, e, baseline));
+    return undefined;
+  };
+
+  /**
+   * What the Test Verifier changed (D-2, N-3), measured in every first pass after both agents
+   * settled, whatever they returned (a failed verdict, a schema failure, a throw), and BEFORE Gate 2,
+   * so Gate 2's own writes are not attributed to it:
+   *  - against the evaluation's baseline (IMPORTANT-1): the tree id with `changedSince`, or the
+   *    fallback copy with `compareWithCopy` once `copyIntact` holds;
+   *  - with no baseline of its own (the Test Verifier did not run in it), nothing new when an
+   *    earlier first pass of the cycle cleared its run; else, for a run whose Test Verifier passed
+   *    before baselines existed, against the reviewed tree, as before.
+   * The latest result is recorded. A change outside a test path escalates CRITICAL_ISSUE naming
+   * the files; a measurement that fails, REVIEW_COPY_FAILED.
+   */
+  const measureTestVerifier = async (e: number, copy: { dir: string; source: ReviewSource }): Promise<FeatureState | undefined> => {
+    const evaluation = evaluationNumbered(e);
+    const baseline = evaluation.baseline;
+    let files: string[];
+    try {
+      if (baseline?.kind === 'tree') {
+        files = await filesChangedSince(baseline.tree);
+      } else if (baseline?.kind === 'copy') {
+        if (!copyIntact(baseline.dir, baseline)) {
+          throw new Error(`the copy of the working tree it is compared with, ${baseline.dir}, is missing or changed`);
+        }
+        files = compareWithCopy(cwd, baseline.dir);
+      } else if (earlierBaseline(state.validatorEvaluations ?? [], evaluation.cycle, e)?.cleared) {
+        files = [];
+      } else if (copy.source.kind === 'snapshot') {
+        files = await filesChangedSince(copy.source.tree);
+      } else {
+        files = compareWithCopy(cwd, copy.dir);
+      }
+    } catch (error) {
+      return reviewCopyFailed(
+        `What 06-test-verifier changed could not be measured against the reviewed tree: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+
+    const measured: TestVerifierChanges = classifyTestVerifierChanges(files);
+    state = commit(recordTestVerifierChanges(state, e, measured));
+    if (measured.kind !== 'outside-tests') return undefined;
+
+    const { outside } = measured;
+    state = recordEscalation(
+      state,
+      4,
+      '06-test-verifier',
+      'CRITICAL_ISSUE',
+      `06-test-verifier changed ${outside.length} file(s) outside a test path: ${outside.join(', ')}. Revert them or close the run.`,
+      { blockers: outside }
+    );
+    return finish(state, 'ESCALATED', '06-test-verifier changed files outside a test path');
+  };
+
+  /** The files where the working tree now differs from git tree `tree`; throws the measurement's error. */
+  const filesChangedSince = async (tree: string): Promise<string[]> => {
+    const measured = await changes.changedSince(cwd, tree);
+    if (measured.kind === 'failed') throw new Error(measured.error);
+    return measured.files;
+  };
+
+  /** The main Validator's reviewed output for the decision, with its timing, the copy it reviewed and the copies that one replaced. */
+  type Reviewed = { e: number; output: any; timing: InvocationTiming; copyDir: string; previousCopyDirs: string[] };
+
+  /**
+   * One evaluation up to the decision (D-8, D-13).
    *
-   * Round 0 is the evaluation right after the Test Verifier. A fixable CRITICAL issue the
-   * Validator pins to a builder's file sends that builder back, then Gates 1, 3, 1.5 and 2
-   * re-run before the Validator is asked again — at most MAX_VALIDATOR_ROUNDS times. The run
-   * stays in Stage 4 throughout: it never claims to be back in Stage 3 (AC-33).
+   *  1. The Gate 2 reference is read before anything runs (I-9). A validator round then runs its
+   *     Gate 2 first (I-10): the round's "moved past" marker stays before the Validator.
+   *  2. The evaluation is opened or continued, and its copy made or reused (both committed).
+   *  3. Branch T (first pass only, while the Test Verifier has no PASS) and branch V (while the
+   *     evaluation has no Validator output) start in that order in the same tick, so the invoker
+   *     sees the Test Verifier's call first. Promise.allSettled: no agent is left running (AC-124).
+   *     In a first pass, the measurement baseline is recorded before branch T starts (IMPORTANT-1).
+   *  4. First pass: the Test Verifier's changes are measured, whatever either branch settled with,
+   *     so a non-test write escalates in the evaluation that made it (IMPORTANT-1, IMPORTANT-2).
+   *  5. Then, in this fixed order: a rejected branch is rethrown (T first) to the outer catch; the
+   *     Test Verifier's schema failure, then its failed verdict; the Validator's schema failure.
+   *  6. First pass: Gate 2.
+   */
+  const evaluate = async (kind: ValidatorEvaluation['kind'], round: number): Promise<Reviewed | { finished: FeatureState }> => {
+    const firstPass = kind === 'first-pass';
+    const referenceCount = gate2Reference(round);
+    if (!firstPass) {
+      const executionFailure = await executionGate(round, referenceCount);
+      if (executionFailure) return { finished: executionFailure };
+    }
+
+    const e = startEvaluation(kind, round);
+    const copy = await prepareReviewCopy(e);
+    if ('finished' in copy) return copy;
+
+    const startT = firstPass && !hasPass(state, '06-test-verifier');
+    if (firstPass) {
+      const baselineFailure = await recordBaseline(e, startT);
+      if (baselineFailure) return { finished: baselineFailure };
+    }
+    const startV = evaluationNumbered(e).validator === undefined;
+    const branchT: Promise<TestVerifierBranch> = startT ? testVerifierBranch(e) : Promise.resolve({ kind: 'skipped' });
+    const branchV: Promise<ValidatorBranch> = startV ? validatorBranch(e, round, copy) : Promise.resolve({ kind: 'skipped' });
+    const [t, v] = await Promise.allSettled([branchT, branchV]);
+
+    if (firstPass) {
+      const measured = await measureTestVerifier(e, copy);
+      if (measured) return { finished: measured };
+    }
+
+    if (t.status === 'rejected') throw t.reason;
+    if (v.status === 'rejected') throw v.reason;
+
+    if (t.value.kind === 'schema') {
+      state = recordEscalation(state, 4, '06-test-verifier', 'SCHEMA_VALIDATION', `Test output schema invalid: ${t.value.error}`);
+      return { finished: finish(state, 'ESCALATED', 'Test verifier schema validation failed') };
+    }
+    if (t.value.kind === 'failed') {
+      // The Test Verifier's verdict is believed (AC-19). Anything but a clean PASS — status FAIL,
+      // LOOP_BACK (I-6) or ESCALATE, a failing test, or a CRITICAL issue — stops here: the step is
+      // not recorded PASS, Gate 2 does not run, and the Validator's review is never decided.
+      const { verdict } = t.value;
+      state = recordEscalation(
+        state,
+        4,
+        '06-test-verifier',
+        'CRITICAL_ISSUE',
+        `06-test-verifier did not pass: ${verdict.reasons.join('; ')}`,
+        { failingTests: verdict.failingCriteria, issues: verdict.issues }
+      );
+      return { finished: finish(state, 'ESCALATED', `06-test-verifier did not pass: ${verdict.reasons[0]}`) };
+    }
+    if (v.value.kind === 'schema') {
+      state = recordEscalation(state, 4, '07-validator', 'SCHEMA_VALIDATION', `Validator output schema invalid: ${v.value.error}`);
+      return { finished: finish(state, 'ESCALATED', 'Validator schema validation failed') };
+    }
+
+    if (firstPass) {
+      const executionFailure = await executionGate(round, referenceCount);
+      if (executionFailure) return { finished: executionFailure };
+    }
+
+    const evaluation = evaluationNumbered(e);
+    const reviewed = evaluation.validator!;
+    return { e, output: reviewed.output, timing: reviewed.timing, copyDir: copy.dir, previousCopyDirs: [...(evaluation.previousCopyDirs ?? [])] };
+  };
+
+  /** Whether `path` (project-relative) still exists in the project: a symlink counts, followed or not. */
+  const existsInProject = (path: string): boolean => {
+    try {
+      lstatSync(resolve(cwd, path));
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  /** `output` with only its artifacts named `name`: what a review agent may have persisted (never another document). */
+  const onlyDocument = <T extends FeatureFactoryAgentOutput>(output: T, name: string): T => ({
+    ...output,
+    details: { ...output.details, artifacts: output.details.artifacts.filter(artifact => artifact.name === name) }
+  });
+
+  /**
+   * The follow-up review (D-9, AC-121), first pass only, after Gate 2 and the main Validator's
+   * ESCALATE check. Its record is the evaluation's write-once `followup` slot (AC-123):
+   *  - recorded → reused (a resume never runs it twice);
+   *  - the Test Verifier changed no file in this cycle → recorded skipped, with the reason;
+   *  - otherwise 07b reviews exactly the test files it changed in this cycle's first passes
+   *    (verification.ts `testVerifierFiles`: each evaluation measures only its own run), in the
+   *    project (no `cwd`; deleted files named as deleted). A schema failure escalates SCHEMA_VALIDATION, an ESCALATE CRITICAL_ISSUE.
+   *    Otherwise its document is persisted as VALIDATION_FOLLOWUP.md (never VALIDATION_REPORT.md),
+   *    its step is recorded PASS and the review recorded on the evaluation, in one commit.
+   * A `filesReviewed` that is not the list it was given is one IMPORTANT finding, not a block (I-29).
+   * A validator round never runs it (AC-125). Returns the reviewed output, if any.
+   */
+  const followupReview = async (e: number): Promise<{ output?: ValidatorFollowupOutput } | { finished: FeatureState }> => {
+    const evaluation = evaluationNumbered(e);
+    if (evaluation.kind !== 'first-pass') return {};
+
+    let reviewed = evaluation.followup;
+    if (!reviewed) {
+      if (evaluation.testVerifierChanges === undefined) throw new Error(`Evaluation ${e} has no measurement of what 06-test-verifier changed.`);
+      const changed = testVerifierFiles(state.validatorEvaluations ?? [], evaluation.cycle, e);
+      if (changed.length === 0) {
+        state = commit(recordFollowup(state, e, { status: 'skipped', reason: FOLLOWUP_SKIPPED_REASON }));
+        log(`  ⏭️  Follow-up review skipped: ${FOLLOWUP_SKIPPED_REASON}`);
+        return {};
+      }
+
+      const files = changed.map(path => ({ path, deleted: !existsInProject(path) }));
+      const followup = await timedInvoke(
+        { stage: 4, agent: FOLLOWUP_AGENT, prompt: followupPrompt(promptCtx, files) },
+        { evaluation: e }
+      );
+      const output = followup.output;
+
+      const validation = validateOutputSchema(4, FOLLOWUP_AGENT, output);
+      if (!validation.valid) {
+        state = recordEscalation(state, 4, FOLLOWUP_AGENT, 'SCHEMA_VALIDATION', `Follow-up output schema invalid: ${validation.errors[0]}`);
+        return { finished: finish(state, 'ESCALATED', 'Validator follow-up schema validation failed') };
+      }
+      const issues: ValidatorIssue[] = output.details.issues;
+      if (output.status === 'ESCALATE') {
+        state = commit(recordAgentStep(state, 4, FOLLOWUP_AGENT, 'ESCALATED', output, undefined, undefined, followup.timing));
+        state = recordEscalation(state, 4, FOLLOWUP_AGENT, 'CRITICAL_ISSUE', `${FOLLOWUP_AGENT} escalated: ${output.details.summary}`, {
+          issues: issues.map(issue => issue.message)
+        });
+        return { finished: finish(state, 'ESCALATED', `${FOLLOWUP_AGENT} declared the work blocked`) };
+      }
+
+      persist({ validatorFollowup: onlyDocument(output as ValidatorFollowupOutput, CP3_FOLLOWUP_DOCUMENT) });
+      state = recordAgentStep(state, 4, FOLLOWUP_AGENT, 'PASS', output, undefined, undefined, followup.timing);
+      state = commit(recordFollowup(state, e, { status: 'reviewed', files: [...changed], output, timing: followup.timing }));
+      reviewed = evaluationNumbered(e).followup!;
+    }
+    if (reviewed.status !== 'reviewed') return {};
+
+    outputs.validatorFollowup = reviewed.output;
+    const mismatch = followupMismatch(reviewed.files, reviewed.output.details.filesReviewed, cwd);
+    if (mismatch) recordFindingsOnce(4, FOLLOWUP_AGENT, [mismatch]);
+    return { output: reviewed.output };
+  };
+
+  /**
+   * The skeptics (D-11, AC-128 to AC-134): every merged CRITICAL issue, in merged order, is given to
+   * skeptic A and skeptic B TOGETHER (IMPORTANT-3): both are started in the same tick, A first, so
+   * neither can be started after the other's verdict is on record. IMPORTANT and MINOR issues never
+   * are, and with no CRITICAL nothing runs. A verdict already on record for the evaluation is
+   * skipped per (issue, instance) (AC-133): a resume runs only the missing one.
+   *
+   * Each skeptic reads the tree its issue's reviewer read (AC-132): a main-Validator issue the
+   * evaluation's review copy (`cwd` = the copy, made intact first — re-extracted when it is not), a
+   * follow-up issue the project (no `cwd`). Its prompt holds the issue, never a verdict (AC-128),
+   * and tells it not to read the run's state.json or any SKEPTIC_* document.
+   *
+   * Each verdict is recorded (its document persisted as SKEPTIC_E<e>_<issueKey>_<A|B>.md, the
+   * verdict committed) as soon as it returns. Promise.allSettled: no skeptic is left running. Then,
+   * A before B: a throw (recorded by timedInvoke first) reaches the outer catch; a schema failure or
+   * an echoed key other than the one given escalates SCHEMA_VALIDATION; a status other than PASS
+   * escalates CRITICAL_ISSUE (I-12). The failing skeptic's verdict is not recorded, so the issue is
+   * not disproved (AC-134).
+   */
+  const challengeCriticals = async (e: number, merged: readonly MergedIssue[]): Promise<FeatureState | undefined> => {
+    /** One skeptic on one issue: its verdict recorded, or why it failed. Never calls finish. */
+    type SkepticRun = { kind: 'recorded' } | { kind: 'schema' | 'status'; instance: SkepticInstance; message: string; summary: string };
+
+    const critical = new Set(criticalIssues(merged.map(entry => entry.issue)));
+    for (const entry of merged.filter(candidate => critical.has(candidate.issue))) {
+      const missing = SKEPTIC_INSTANCES.filter(
+        instance => !(evaluationNumbered(e).skeptics ?? []).some(verdict => verdict.issueKey === entry.key && verdict.instance === instance)
+      );
+      if (missing.length === 0) continue;
+
+      let treeDir = cwd;
+      if (entry.origin === '07-validator') {
+        const copy = await prepareReviewCopy(e);
+        if ('finished' in copy) return copy.finished;
+        treeDir = copy.dir;
+      }
+
+      const challenge = async (instance: SkepticInstance): Promise<SkepticRun> => {
+        const prompt = skepticPrompt(promptCtx, { instance, issueKey: entry.key, origin: entry.origin, issue: entry.issue, treeDir });
+        const skeptic = await timedInvoke(
+          { stage: 4, agent: SKEPTIC_AGENT, prompt, ...(treeDir !== cwd ? { cwd: treeDir } : {}) },
+          { evaluation: e, instance }
+        );
+        const output = skeptic.output;
+
+        const validation = validateOutputSchema(4, SKEPTIC_AGENT, output);
+        const problem = !validation.valid
+          ? validation.errors[0]
+          : output.details.issueKey !== entry.key
+            ? `it echoed issue key ${JSON.stringify(output.details.issueKey)}, but was given ${entry.key}`
+            : undefined;
+        if (problem !== undefined) {
+          return {
+            kind: 'schema',
+            instance,
+            message: `Skeptic ${instance} output on issue ${entry.key} is invalid: ${problem}`,
+            summary: 'Skeptic schema validation failed'
+          };
+        }
+        if (output.status !== 'PASS') {
+          return {
+            kind: 'status',
+            instance,
+            message: `${SKEPTIC_AGENT} ${instance} returned ${output.status} on issue ${entry.key}: ${output.details.summary}`,
+            summary: `${SKEPTIC_AGENT} ${instance} returned ${output.status}`
+          };
+        }
+
+        // One document per invocation, never overwritten (I-11): the schema's name, made unique.
+        const verdict = output as SkepticOutput;
+        const kept = onlyDocument(verdict, SKEPTIC_DOCUMENT);
+        const document = kept.details.artifacts.find(artifact => typeof artifact.content === 'string' && artifact.content.trim().length > 0)!;
+        document.name = `SKEPTIC_E${e}_${entry.key}_${instance}.md`;
+        persist({ skeptic: { ...kept, details: { ...kept.details, artifacts: [document] } } });
+        state = commit(
+          recordSkepticVerdict(state, e, {
+            issueKey: entry.key,
+            origin: entry.origin,
+            instance,
+            verdict: verdict.details.verdict,
+            reason: verdict.details.reason,
+            document: document.path
+          })
+        );
+        log(`  🧐 Skeptic ${instance} on ${entry.key} (${entry.origin}): ${verdict.details.verdict}`);
+        return { kind: 'recorded' };
+      };
+
+      // Both started before either is awaited, A first (`missing` keeps SKEPTIC_INSTANCES' order).
+      const settled = await Promise.allSettled(missing.map(instance => challenge(instance)));
+      for (const result of settled) if (result.status === 'rejected') throw result.reason;
+      for (const result of settled) {
+        if (result.status !== 'fulfilled' || result.value.kind === 'recorded') continue;
+        const failed = result.value;
+        state = recordEscalation(
+          state,
+          4,
+          SKEPTIC_AGENT,
+          failed.kind === 'schema' ? 'SCHEMA_VALIDATION' : 'CRITICAL_ISSUE',
+          failed.message,
+          { issues: [describeIssue(entry.issue)] }
+        );
+        return finish(state, 'ESCALATED', failed.summary);
+      }
+    }
+    return undefined;
+  };
+
+  /** The decided verdict of an evaluation (D-12): passed exactly when no CRITICAL issue stands. */
+  const decidedVerdict = (standing: readonly MergedIssue[], disproved: readonly { merged: MergedIssue }[]): ValidationVerdict => ({
+    passed: standing.length === 0,
+    standing: standing.map(issue => issue.key),
+    disproved: disproved.map(entry => entry.merged.key),
+    recordedAt: new Date().toISOString()
+  });
+
+  /**
+   * VERIFICATION AND THE BOUNDED VALIDATOR LOOP-BACK (D-9; PR B-2 D-8 to D-13).
+   *
+   * The first evaluation is a first pass: the Test Verifier ∥ the Validator, then Gate 2. Each
+   * evaluation is then decided here, in this order:
+   *  1. the main Validator's ESCALATE is believed (AC-20);
+   *  2. a main status other than PASS with no CRITICAL in its own output escalates (I-6, I-13);
+   *  3. the follow-up review (first pass only, D-9);
+   *  4. the merge of both reviews (D-10): their IMPORTANT issues recorded once, each under its
+   *     review's source; a follow-up status other than PASS with no CRITICAL of its own escalates;
+   *  5. the skeptics on every merged CRITICAL (D-11); a CRITICAL both disproved becomes one
+   *     IMPORTANT finding (source 07c-validator-skeptic), never routed (AC-130);
+   *  6. the verdict (D-12): nothing standing → the 07 step PASS and the evaluation decided passed.
+   *     Otherwise the 07 step FAIL, the evaluation decided not passed, then the round bound
+   *     (MAX_LOOPS), the routing of the STANDING issues to their builders (unroutable → escalate),
+   *     and a validator round: Gates 1, 3, 1.5, then Gate 2 and the Validator alone on a fresh copy
+   *     of the round's snapshot — at most MAX_VALIDATOR_ROUNDS times. The run stays in Stage 4
+   *     throughout: it never claims to be back in Stage 3 (AC-33).
+   *
+   * Each evaluation's 07 step is recorded once, at its decision (PASS, FAIL or ESCALATED, with the
+   * Validator's output and invocation timing).
    *
    * On resume (D-2) the rounds continue from state: a round that was opened but never reached its
-   * Gate 2 re-enters at its builder fix; otherwise the loop starts at the round state records.
+   * Gate 2 re-enters at its builder fix; an open evaluation is continued; otherwise the loop starts
+   * at the round state records.
    */
   const validatorLoop = async (): Promise<FeatureState | undefined> => {
     let round = state.validatorRoundsCompleted ?? 0;
+    let afterRoundFix = false;
 
     const pending = pendingValidatorRound(state, cwd);
     if (pending) {
       log(`\n↩️  Resuming validator round ${pending.round} of ${MAX_VALIDATOR_ROUNDS} at its builder fix\n`);
       const stopped = await validatorRoundFix(pending.round, pending);
       if (stopped) return stopped;
+      afterRoundFix = true;
     }
 
     for (;;) {
-      const executionFailure = await executionGate(round);
-      if (executionFailure) return executionFailure;
+      const reviewed = await evaluate(nextEvaluationKind(round, afterRoundFix), round);
+      if ('finished' in reviewed) return reviewed.finished;
 
-      const validator = await timedInvoke(
-        {
-          stage: 4,
-          agent: '07-validator',
-          prompt: validatorPrompt(promptCtx)
-        },
-        { round }
-      );
-      const validatorOutput = validator.output;
-
-      const validatorValidation = validateOutputSchema(4, '07-validator', validatorOutput);
-      if (!validatorValidation.valid) {
-        state = recordEscalation(
-          state,
-          4,
-          '07-validator',
-          'SCHEMA_VALIDATION',
-          `Validator output schema invalid: ${validatorValidation.errors[0]}`
-        );
-        return finish(state, 'ESCALATED', 'Validator schema validation failed');
-      }
-
-      // The Validator's own document goes into the run dir now — the stage gate no longer persists.
-      persist({ validator: validatorOutput });
+      const { e, output: validatorOutput, timing, copyDir, previousCopyDirs } = reviewed;
       outputs.validator = validatorOutput;
 
       const validatorIssues: ValidatorIssue[] = Array.isArray(validatorOutput.details.issues)
         ? validatorOutput.details.issues
         : [];
 
-      // MINOR-9: the IMPORTANT issues of EVERY Validator output are kept — a round that fails on a
-      // CRITICAL issue may raise IMPORTANT ones the next round never repeats — each exactly once,
-      // across rounds and across resumes.
-      recordValidatorFindings(validatorIssues);
-
-      // ESCALATE is believed, and is never recorded PASS (AC-20).
+      // ESCALATE is believed, and is never recorded PASS (AC-20). After Gate 2 (I-8).
       if (validatorOutput.status === 'ESCALATE') {
-        state = commit(
-          recordAgentStep(state, 4, '07-validator', 'ESCALATED', validatorOutput, undefined, undefined, validator.timing)
-        );
+        recordValidatorFindings(mergeIssues({ issues: validatorIssues, copyDir, previousCopyDirs }, undefined, cwd));
+        state = commit(recordAgentStep(state, 4, '07-validator', 'ESCALATED', validatorOutput, undefined, undefined, timing));
         state = recordEscalation(
           state,
           4,
@@ -1910,35 +2610,64 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
         return finish(state, 'ESCALATED', '07-validator declared the work blocked');
       }
 
-      const critical = criticalIssues(validatorIssues);
+      // FAIL or LOOP_BACK with no CRITICAL issue of its own: the Validator says the work is not
+      // acceptable but names nothing fixable. Fail closed (I-6, kept per reviewer: I-13).
+      if (validatorOutput.status !== 'PASS' && criticalIssues(validatorIssues).length === 0) {
+        recordValidatorFindings(mergeIssues({ issues: validatorIssues, copyDir, previousCopyDirs }, undefined, cwd));
+        state = commit(recordAgentStep(state, 4, '07-validator', 'FAIL', validatorOutput, undefined, undefined, timing));
+        state = recordEscalation(
+          state,
+          4,
+          '07-validator',
+          'CRITICAL_ISSUE',
+          `07-validator reported ${validatorOutput.status} with no CRITICAL issue: ${validatorOutput.details.summary}`,
+          { issues: validatorIssues.map(i => i.message) }
+        );
+        return finish(state, 'ESCALATED', `07-validator reported ${validatorOutput.status}`);
+      }
+
+      const followup = await followupReview(e);
+      if ('finished' in followup) return followup.finished;
+      const followupIssues: ValidatorIssue[] | undefined = followup.output ? followup.output.details.issues : undefined;
+
+      // The merged list (D-10): the main review's paths mapped out of its copy, then the
+      // follow-up's; routing, the Stage 4 gate and CHECKPOINT 3 all use it (AC-122).
+      const merged = mergeIssues(
+        { issues: validatorIssues, copyDir, previousCopyDirs },
+        followupIssues ? { issues: followupIssues } : undefined,
+        cwd
+      );
+      recordValidatorFindings(merged);
+
+      if (followup.output && followup.output.status !== 'PASS' && criticalIssues(followupIssues).length === 0) {
+        state = recordEscalation(
+          state,
+          4,
+          FOLLOWUP_AGENT,
+          'CRITICAL_ISSUE',
+          `${FOLLOWUP_AGENT} reported ${followup.output.status} with no CRITICAL issue: ${followup.output.details.summary}`,
+          { issues: (followupIssues ?? []).map(i => i.message) }
+        );
+        return finish(state, 'ESCALATED', `${FOLLOWUP_AGENT} reported ${followup.output.status}`);
+      }
+
+      const challenged = await challengeCriticals(e, merged);
+      if (challenged) return challenged;
+
+      const { standing, disproved } = verdictOf(merged, evaluationNumbered(e).skeptics ?? []);
+      // AC-130: shown at CHECKPOINT 3 with both reasons, never routed, never dropped.
+      recordFindingsOnce(4, SKEPTIC_AGENT, disproved.map(disprovedFinding));
+      const verdict = decidedVerdict(standing, disproved);
+      const critical = standing.map(entry => entry.issue);
 
       if (critical.length === 0) {
-        // FAIL or LOOP_BACK with no CRITICAL issue to act on: the Validator says the work is not
-        // acceptable but names nothing fixable. Fail closed (I-6).
-        if (validatorOutput.status !== 'PASS') {
-          state = commit(
-            recordAgentStep(state, 4, '07-validator', 'FAIL', validatorOutput, undefined, undefined, validator.timing)
-          );
-          state = recordEscalation(
-            state,
-            4,
-            '07-validator',
-            'CRITICAL_ISSUE',
-            `07-validator reported ${validatorOutput.status} with no CRITICAL issue: ${validatorOutput.details.summary}`,
-            { issues: validatorIssues.map(i => i.message) }
-          );
-          return finish(state, 'ESCALATED', `07-validator reported ${validatorOutput.status}`);
-        }
-
-        state = commit(
-          recordAgentStep(state, 4, '07-validator', 'PASS', validatorOutput, undefined, undefined, validator.timing)
-        );
+        state = closeEvaluation(state, e, { outcome: 'decided', verdict });
+        state = commit(recordAgentStep(state, 4, '07-validator', 'PASS', validatorOutput, undefined, undefined, timing));
         return undefined;
       }
 
-      state = commit(
-        recordAgentStep(state, 4, '07-validator', 'FAIL', validatorOutput, undefined, undefined, validator.timing)
-      );
+      state = closeEvaluation(state, e, { outcome: 'decided', verdict });
+      state = commit(recordAgentStep(state, 4, '07-validator', 'FAIL', validatorOutput, undefined, undefined, timing));
 
       // The bound (AC-32): the Validator has now judged MAX_VALIDATOR_ROUNDS rounds of fixes.
       if (round === MAX_VALIDATOR_ROUNDS) {
@@ -1988,9 +2717,8 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
       // The round is judged by the same gates as the original build, over the merged outputs.
       const stopped = await validatorRoundFix(round, routing);
       if (stopped) return stopped;
+      afterRoundFix = true;
     }
-
-    return undefined;
   };
 
   /**
@@ -2135,8 +2863,8 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
    * rejection named (backend first) that has not passed this rework cycle re-runs in its own
    * `rework` budget, briefed with the notes; its output is merged and its documents re-rendered.
    * Then Gate 1 and the Stage 3 gate over the merged outputs. Gate 1.5, the Test Verifier (its PASS
-   * was invalidated), Gate 2 and the Validator follow in Stage 4 as always — validator rounds are not
-   * reset — then the Stage 4 gate and CP3, presented again.
+   * was invalidated) ∥ the Validator on the rework's snapshot, and Gate 2 follow in Stage 4 as always
+   * — validator rounds are not reset — then the Stage 4 gate and CP3, presented again.
    */
   const changeRework = async (): Promise<FeatureState | undefined> => {
     const active = activeRework(state);
@@ -2173,8 +2901,9 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
     if (reworkMaterialization) return reworkMaterialization;
 
     // Resume by recorded completion (IMPORTANT-1): once a later step of this cycle is on record
-    // (the Test Verifier, the Validator or Gate 2 ran after the snapshot), this gate pass is done,
-    // and stage3-<k> stays the tree it judged. A kill before the next agent still re-evaluates it (AC-85).
+    // (verification started — PR B-2 AC-157 —, or the Test Verifier, the Validator or Gate 2 ran
+    // after the snapshot), this gate pass is done, and stage3-<k> stays the tree it judged. A kill
+    // before verification starts (in Gate 1.5) still re-evaluates it (AC-85).
     if (stage3SnapshotPassedBy(state, at)) {
       log(`  📸 The rework's Stage 3 gate passed earlier in cycle ${cycle}, and the run has moved past it: its snapshot is kept`);
       return undefined;
@@ -2342,7 +3071,14 @@ async function presentCheckpoint(
     state.stage3Snapshots !== undefined
       ? { entries: state.stage3Snapshots, ...(state.changeBase ? { base: state.changeBase } : {}) }
       : undefined;
-  return presentationFor(3, runDirAbs, { findings: state.importantFindings ?? [], change, ...(snapshots ? { snapshots } : {}) });
+  // PR B-2 (D-16, I-15): the follow-up document only when the run's latest first pass reviewed
+  // files, derived from state, so a run without one re-builds exactly the text it presented.
+  return presentationFor(3, runDirAbs, {
+    findings: state.importantFindings ?? [],
+    change,
+    ...(snapshots ? { snapshots } : {}),
+    ...(followupPresented(state) ? { followup: true as const } : {})
+  });
 }
 
 /** HEAD for the HEAD_MOVED message (D-8): `<branch | detached | unborn> at <commit | no commit>`. */
@@ -2486,8 +3222,53 @@ type BuilderRun =
 /** The real start and end of one agent invocation (D-13), shared by its invocation record and its step. */
 type InvocationTiming = { startedAt: string; completedAt: string };
 
-/** Where an invocation sits in a builder loop (phase, round, attempt), or which validator round it judged. */
-type InvocationMeta = { phase?: StepPhase['phase']; round?: number; attempt?: number };
+/**
+ * Where an invocation sits in a builder loop (phase, round, attempt), or which validator round it
+ * judged; for Stage 4 verification also the evaluation it belonged to (PR B-2 D-8) and, for a
+ * skeptic, its instance (D-11).
+ */
+type InvocationMeta = {
+  phase?: StepPhase['phase'];
+  round?: number;
+  attempt?: number;
+  evaluation?: number;
+  /** Which skeptic a 07c invocation was (PR B-2 D-11). */
+  instance?: SkepticInstance;
+};
+
+/** The follow-up reviewer and the skeptic (PR B-2 D-6), and the document the skeptic's schema names. */
+const FOLLOWUP_AGENT = '07b-validator-followup';
+const SKEPTIC_AGENT = '07c-validator-skeptic';
+const SKEPTIC_DOCUMENT = REQUIRED_ARTIFACTS[SKEPTIC_AGENT][0];
+
+/** Why a first pass recorded its follow-up as skipped (D-9). */
+const FOLLOWUP_SKIPPED_REASON = 'the Test Verifier changed no file';
+
+/** Why a run has no snapshot to copy for the Validator, when it is in git (AC-126, N-10). */
+const NO_SNAPSHOT_RECORDED_REASON = 'no snapshot was recorded for this run (started before PR B-1)';
+
+/**
+ * Remove a review directory a failed copy attempt left (D-3: discard it after an extraction
+ * failure). It was never recorded, so nothing refers to it. Best effort: a directory that cannot
+ * be removed stays, unrecorded, and the escalation already says why the copy failed.
+ */
+function discardReviewDir(dir: string): void {
+  try {
+    rmSync(dir, { recursive: true, force: true });
+  } catch {
+    // Left in the temp directory; see above.
+  }
+}
+
+/** How long a recorded invocation error may be (PR B-2 I-16). */
+const INVOCATION_ERROR_LENGTH = 500;
+
+/** What a thrown invocation is recorded with (I-16): the first line of its message, at most 500 characters. */
+function invocationError(error: unknown): string {
+  const text = error instanceof Error ? error.message || error.name : String(error);
+  const firstLine = text.split(/\r?\n/, 1)[0] ?? '';
+  return (firstLine.trim() === '' ? 'the invocation threw' : firstLine).slice(0, INVOCATION_ERROR_LENGTH);
+}
 
 /** An agent's output, and when it ran. The output is untyped until validateOutputSchema judges it. */
 type TimedInvocation = { output: any; timing: InvocationTiming };

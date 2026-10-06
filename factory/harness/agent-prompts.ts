@@ -11,7 +11,7 @@
  * Prompts are built at invocation time, so "exists" means "exists when the agent starts".
  */
 
-import { resolve } from 'path';
+import { isAbsolute, resolve } from 'path';
 
 import { getRemediationInstruction } from './error-categories';
 import {
@@ -24,8 +24,10 @@ import {
 import { stateFilePathIn } from './state-store';
 import { FeatureFactoryAgent } from '../runner/agent-registry';
 import { ValidatorIssue } from './agent-output-schema';
+import type { IssueOrigin, ReviewSource, SkepticInstance } from './state-tracker';
 import { describeIssue } from './validator-routing';
 import { MAX_BUILDER_ATTEMPTS } from './loop-rules';
+import { TEST_DIRECTORY_NAMES, TEST_FILE_NAME_PATTERNS } from './test-paths';
 
 /** What every prompt builder needs to know about the run. */
 export interface PromptContext {
@@ -340,9 +342,11 @@ export function builderPrompt(
         ? `The backend is already built. Consume its API contract (listed above); do not invent endpoints.`
         : `The backend is already built. Consume its API contract; do not invent endpoints.`
       : `Your scope ends at the API contract. Do not touch frontend files.`,
-    // B2 (AC-90, AC-91): an instruction, not enforced; Gate 2 runs the full suite.
+    // B2 (AC-90, AC-91): an instruction, not enforced; Gate 2 runs the full suite. D-B2-4: these
+    // rules are the program's only, so this prompt carries them and contracts 04 and 05 do not.
     `Run only the tests related to the files you changed; the harness runs the full suite in Gate 2.`,
     `Never commit, push or switch branches, and never write under .git/ or .factory/.`,
+    `The harness snapshots your work itself.`,
     ...(validatorRound ? [``, validatorBriefing(validatorRound)] : []),
     ...reworkSection(options.rework),
     ``,
@@ -360,20 +364,144 @@ export function testVerifierPrompt(ctx: PromptContext): string {
     ``,
     `The harness renders TEST_REPORT.md from your structured output (acceptanceTests, testExecution,`,
     `issues). Do not write a TEST_REPORT.md yourself: report in the structured fields — they are`,
-    `what the Stage 4 gate judges.`
+    `what the Stage 4 gate judges.`,
+    ``,
+    ...testPathRule()
   ]);
 }
 
-export function validatorPrompt(ctx: PromptContext): string {
+/**
+ * The test-path rule (B-2 D-2, N-3, I-4), worded from test-paths.ts so it cannot drift from
+ * isTestPath. D-B2-4: only the program measures what the Test Verifier changed, so this prompt
+ * carries the rule and contract 06 does not.
+ */
+function testPathRule(): string[] {
+  return [
+    `Where you may write: test paths only.`,
+    `You write and change test files only. After you finish, the harness compares the project with how`,
+    `it was just before you started and lists every file you created, modified or deleted. A path counts`,
+    `as a test path, compared in lower case, when either:`,
+    `- a directory in it (not the file name) is one of ${TEST_DIRECTORY_NAMES.join(', ')};`,
+    `- or the file name matches ${TEST_FILE_NAME_PATTERNS.join(', ')}.`,
+    `A directory named e2e/ alone does not make a path a test path.`,
+    `If you change any file outside a test path (a deletion counts), the run escalates and names the files;`,
+    `a human must revert them before the run can continue.`,
+    `The test files you change are then reviewed by a follow-up reviewer.`
+  ];
+}
+
+/** The read-only copy the main Validator reviews (PR B-2 D-3, D-5): its directory and what it was made from. */
+export interface ValidatorReview {
+  /** The copy, absolute: the Validator's working directory. */
+  dir: string;
+  source: ReviewSource;
+}
+
+/**
+ * The main Validator's prompt (PR B-2 D-5, AC-120). It names the read-only copy it reviews, says
+ * what the copy was made from, and asks for paths relative to it. Its upstream list has no
+ * TEST_REPORT.md: the Test Verifier runs at the same time, in the live project.
+ */
+export function validatorPrompt(ctx: PromptContext, review: ValidatorReview): string {
+  const { dir, source } = review;
+  if (!isAbsolute(dir)) throw new RangeError(`validatorPrompt: the review copy must be an absolute path, got ${dir}.`);
+  const what =
+    source.kind === 'snapshot'
+      ? `It is a READ-ONLY SNAPSHOT of the project taken after the Stage 3 gate passed: stage3-${source.n}, ${source.ref}, commit ${source.commit}.`
+      : `It is a read-only copy of the working tree made before the Test Verifier started (${source.reason}).`;
   return withRules(ctx, [
     `Validate the implementation of "${ctx.featureDescription}" against the approved user story and`,
     `technical brief.`,
+    ``,
+    `Review the implementation in ${dir}. ${what} It is your working directory.`,
+    `Review the code there, not the live project at ${ctx.cwd}, where the Test Verifier may be writing tests now.`,
+    `Do not run anything.`,
+    `Report file paths relative to ${dir}.`,
+    `You get no test report: the Test Verifier runs at the same time as you. Gate 2 runs the full suite, and a separate follow-up review covers the tests the Test Verifier writes.`,
     ``,
     ...upstreamSection(ctx, '07-validator'),
     ...harnessGeneratedNote(ctx, '07-validator'),
     ``,
     `Write your VALIDATION_REPORT.md into artifacts[].content; the harness writes it into this run's`,
     `directory.`
+  ]);
+}
+
+/** A file the Test Verifier changed, project-relative; `deleted` when it is gone from the tree now. */
+export interface FollowupFile {
+  path: string;
+  deleted: boolean;
+}
+
+/**
+ * The follow-up reviewer (07b, PR B-2 D-5): exactly the test files the harness measured as changed
+ * by the Test Verifier in this cycle's first passes, each run measured against its pre-Test-Verifier
+ * baseline (IMPORTANT-1; verification.ts `testVerifierFiles`), in the live project. An empty list
+ * throws: the follow-up runs only when there are files to review (D-9).
+ */
+export function followupPrompt(ctx: PromptContext, files: readonly FollowupFile[]): string {
+  if (files.length === 0) {
+    throw new RangeError('followupPrompt needs at least one file: the follow-up runs only on files the Test Verifier changed.');
+  }
+  return withRules(ctx, [
+    `The Test Verifier wrote or changed exactly these files in this verification cycle, each measured against the project as it was before the Test Verifier ran.`,
+    `Review only them, in the live project at ${ctx.cwd}: do the tests really exercise the acceptance`,
+    `criteria they name; are assertions specific; is there a test that cannot fail?`,
+    ``,
+    `Files (absolute paths):`,
+    ...files.map(file => `  - ${resolve(ctx.cwd, file.path)}${file.deleted ? ' (deleted)' : ''}`),
+    ``,
+    ...upstreamSection(ctx, '07b-validator-followup'),
+    ...harnessGeneratedNote(ctx, '07b-validator-followup'),
+    ``,
+    `Return VALIDATION_FOLLOWUP.md in artifacts[].content; the harness writes it into this run's directory.`,
+    `\`filesReviewed\` lists exactly these project-relative paths: ${files.map(file => file.path).join(', ')}.`
+  ]);
+}
+
+/** What a skeptic (07c) is given: one CRITICAL issue, its key, who reported it and the tree they read. */
+export interface SkepticPromptInput {
+  instance: SkepticInstance;
+  issueKey: string;
+  origin: IssueOrigin;
+  issue: ValidatorIssue;
+  /** The tree the reporting reviewer read, absolute: the review copy for 07, the project for 07b. */
+  treeDir: string;
+}
+
+/**
+ * A skeptic's prompt (PR B-2 D-5, AC-128). Blind by construction: it is built only from the issue,
+ * the tree and the upstream documents, never from a recorded verdict, so skeptic B cannot learn what
+ * skeptic A decided. The A and B prompts differ only in the instance letter. The "Echo issueKey"
+ * line is what the skeptic must return in `issueKey`; the harness rejects any other key.
+ */
+export function skepticPrompt(ctx: PromptContext, input: SkepticPromptInput): string {
+  const { instance, issueKey, origin, issue, treeDir } = input;
+  if (instance !== 'A' && instance !== 'B') throw new RangeError(`unknown skeptic instance ${String(instance)}`);
+  if (issue.severity !== 'CRITICAL') {
+    throw new RangeError(`skepticPrompt is for CRITICAL issues only, not ${String(issue.severity)} (AC-128).`);
+  }
+  if (!/^[^`\s]+$/.test(issueKey)) throw new RangeError(`skepticPrompt: the issue key must be one word without a backtick.`);
+  if (!isAbsolute(treeDir)) throw new RangeError(`skepticPrompt: the tree directory must be absolute, got ${treeDir}.`);
+
+  return withRules(ctx, [
+    `You are skeptic ${instance}.`,
+    `One CRITICAL issue was reported by ${origin} about the code in ${treeDir} (your working directory; read-only).`,
+    `Try to disprove it. Default to UPHELD. Return DISPROVED only when you can show, with file:line evidence`,
+    `from that tree, that the issue as stated is not real. Paths in the issue are relative to that tree.`,
+    ``,
+    `The issue:`,
+    `  Severity: ${issue.severity}`,
+    `  ${describeIssue(issue)}`,
+    ``,
+    `Echo issueKey \`${issueKey}\`.`,
+    `Put exactly that key in \`issueKey\`.`,
+    ``,
+    `Do not read this run's \`state.json\` or any \`SKEPTIC_*\` document: decide without the other skeptic's verdict.`,
+    ``,
+    ...upstreamSection(ctx, '07c-validator-skeptic'),
+    ``,
+    `Return SKEPTIC_REVIEW.md in artifacts[].content; the harness writes it into this run's directory.`
   ]);
 }
 

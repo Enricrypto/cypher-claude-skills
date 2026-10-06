@@ -40,7 +40,6 @@ You do not invent endpoints. If the API shape is wrong for what the UI needs, yo
 - Follow the component patterns documented in the Researcher Report
 - No new UI dependencies without flagging them explicitly in your summary
 - Every new component gets a test
-- Never commit, push or switch branches, and never write under `.git/` or `.factory/`. The harness snapshots your work itself.
 
 ## Autonomous Iteration (If Tests Fail)
 
@@ -70,7 +69,7 @@ If a backend change is needed to fix a mismatch, note it clearly — do not make
 Run (in order):
 1. Type check: use the project's typecheck command from `CLAUDE.md`
 2. Lint: use the project's lint command
-3. Tests: run only the tests related to the files you changed (for example `jest --findRelatedTests <files>` or `vitest related <files> --run`). All must pass. The full suite runs in Gate 2 after you finish.
+3. Tests: run the tests related to the files you changed (for example `jest --findRelatedTests <files>` or `vitest related <files> --run`), and anything else your session asks for. All must pass.
 
 Do not declare done if any of these fail. Fix them first.
 

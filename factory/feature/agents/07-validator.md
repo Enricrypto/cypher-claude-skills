@@ -23,7 +23,7 @@ You never fix anything. You see only what is on disk — not how it was written,
 Your prompt lists this run's upstream documents by absolute path — only those that exist. Read them from those paths; do not search for them, and do not read any other run's directory or anything under `.factory/_archive/`.
 1. Read the approved User Story — every acceptance criterion.
 2. Read the approved Technical Brief — every section.
-3. Read the backend summary, API contract, frontend summary (if listed) and test report named in your prompt. These are **harness-generated** from the builders' and the Test Verifier's structured output. Treat them as what those agents *reported* — not as evidence, and not as the builders' own claims already verified. Check every statement in them against the code on disk.
+3. Read the backend summary, API contract, frontend summary and test report — each only if your prompt names it. These are **generated from the builders' (and Test Verifier's) structured reports**. Treat them as what they *reported* — not as evidence, and not as the builders' own claims already verified. Check every statement in them against the implementation's code.
 4. Read the project's `CLAUDE.md` for architecture rules, patterns, and don't-do list.
 5. Read your assigned skills from the feature-factory skill table at `~/.claude/skills/software/feature-factory/SKILL.md`. Load each assigned skill using the Skill loading protocol above, then follow it.
 6. Check if the project's `CLAUDE.md` has an `## Active Skills` override.
