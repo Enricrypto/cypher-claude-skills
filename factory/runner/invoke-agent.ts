@@ -20,6 +20,7 @@ import {
   AGENT_TOOLS,
   AGENT_STAGE,
   REQUIRED_ARTIFACTS,
+  returnsOnlyReviewDocuments,
   FeatureFactoryAgent,
   deniedToolsFor,
   isReadOnly,
@@ -35,6 +36,11 @@ export interface AgentInvocation {
   stage: number;
   agent: string;
   prompt: string;
+  /**
+   * The agent's working directory; omitted = the invoker's project cwd (PR B-2, D-4). The main
+   * Validator and its skeptics are pointed at the read-only review copy this way.
+   */
+  cwd?: string;
 }
 
 export type AgentInvoker = (call: AgentInvocation) => Promise<any>;
@@ -116,12 +122,20 @@ did the work.
 
   if (isReadOnly(agent)) {
     const required = REQUIRED_ARTIFACTS[agent];
-    const names = required.length > 0
-      ? `You MUST return exactly these documents, named EXACTLY as written: ${required.join(', ')}.
+    const exactly = `You MUST return exactly these documents, named EXACTLY as written: ${required.join(', ')}.`;
+    // PR B-2: a review document (the follow-up's, a skeptic's) is presented or kept as evidence;
+    // no gate reads it, so the contract must not say one does.
+    const names = required.length === 0
+      ? ''
+      : returnsOnlyReviewDocuments(agent)
+        ? `${exactly}
+No gate reads it: the harness keeps it under that exact name as the record of your review. A
+document called anything else fails the output check and the run stops, however good the work is.
+`
+        : `${exactly}
 A gate looks each one up by that exact name. A document called anything else is invisible to it
 and the stage fails, however good the work is.
-`
-      : '';
+`;
 
     return (
       common +
@@ -180,7 +194,9 @@ export function createSdkInvoker(config: SdkInvokerConfig): AgentInvoker {
     for await (const message of query({
       prompt: call.prompt,
       options: {
-        cwd: config.cwd,
+        // The agent's own working directory when the call names one (D-4): the review copy for the
+        // main Validator and its skeptics; the project for everyone else.
+        cwd: call.cwd ?? config.cwd,
         model,
         effort,
         maxTurns,

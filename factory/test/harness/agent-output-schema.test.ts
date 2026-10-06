@@ -17,7 +17,19 @@ import {
   verifyArtifactMaterialization
 } from '../../harness/agent-output-schema';
 import { tempProject } from '../fixtures/harness-run';
-import { backend, consolidator, researcher, spec, story, testVerifier, validator } from '../fixtures/agent-outputs';
+import {
+  backend,
+  consolidator,
+  echoedIssueKey,
+  followup,
+  researcher,
+  skeptic,
+  spec,
+  story,
+  testVerifier,
+  validator
+} from '../fixtures/agent-outputs';
+import { AgentInvocation } from '../../runner/invoke-agent';
 
 describe('Agent Output Schema', () => {
   describe('validateOutputSchema - Base Requirements', () => {
@@ -425,6 +437,69 @@ describe('Agent Output Schema', () => {
     it('MINOR-8 builders and the Test Verifier write their own files and are not held to the document rule', () => {
       expect(validateOutputSchema(3, '04-backend-builder', backend()).valid).toBe(true);
       expect(validateOutputSchema(4, '06-test-verifier', testVerifier()).valid).toBe(true);
+    });
+  });
+
+  describe('the follow-up (07b) and skeptic (07c) outputs (AC-127, D-6)', () => {
+    const KEY = '0123456789ab';
+    const call: AgentInvocation = {
+      stage: 4,
+      agent: '07c-validator-skeptic',
+      prompt: `You are skeptic A.\nEcho issueKey \`${KEY}\`.\nMore rules.`
+    };
+    const skepticOutput = (options: Parameters<typeof skeptic>[0] = {}): any => skeptic(options)(call);
+
+    it('AC-127 a follow-up with filesReviewed and an issues array passes its schema', () => {
+      expect(validateOutputSchema(4, '07b-validator-followup', followup())).toEqual({ valid: true, errors: [] });
+      const withIssue = followup({
+        files: ['test/a.test.ts'],
+        issues: [{ severity: 'IMPORTANT', message: 'weak assertion', suggestion: 'assert the value', canFix: true }]
+      });
+      expect(validateOutputSchema(4, '07b-validator-followup', withIssue)).toEqual({ valid: true, errors: [] });
+    });
+
+    it.each([
+      ['filesReviewed is missing', (o: any) => delete o.details.filesReviewed, /filesReviewed/],
+      ['filesReviewed is not an array', (o: any) => (o.details.filesReviewed = 'test/a.test.ts'), /filesReviewed/],
+      ['issues is missing', (o: any) => delete o.details.issues, /issues/],
+      ['VALIDATION_FOLLOWUP.md has no content', (o: any) => delete o.details.artifacts[0].content, /VALIDATION_FOLLOWUP\.md.*content/]
+    ])('AC-127 a follow-up output whose %s fails its schema', (_label, mutate, message) => {
+      const output: any = followup();
+      mutate(output);
+      const result = validateOutputSchema(4, '07b-validator-followup', output);
+      expect(result.valid).toBe(false);
+      expect(result.errors).toContainEqual(expect.stringMatching(message));
+    });
+
+    it('AC-127 a skeptic that echoes its key with UPHELD, or DISPROVED with evidence, passes its schema', () => {
+      expect(validateOutputSchema(4, '07c-validator-skeptic', skepticOutput())).toEqual({ valid: true, errors: [] });
+      expect(validateOutputSchema(4, '07c-validator-skeptic', skepticOutput({ verdict: 'DISPROVED' }))).toEqual({ valid: true, errors: [] });
+    });
+
+    it.each([
+      ['a verdict outside DISPROVED / UPHELD', (o: any) => (o.details.verdict = 'MAYBE'), /verdict/],
+      ['no verdict', (o: any) => delete o.details.verdict, /verdict/],
+      ['a blank reason', (o: any) => (o.details.reason = ' \n '), /reason/],
+      ['no reason', (o: any) => delete o.details.reason, /reason/],
+      ['evidence that is not an array', (o: any) => (o.details.evidence = 'src/a.ts:1'), /evidence/],
+      ['DISPROVED with no evidence entry', (o: any) => { o.details.verdict = 'DISPROVED'; o.details.evidence = []; }, /DISPROVED.*evidence/],
+      ['a blank issueKey', (o: any) => (o.details.issueKey = '  '), /issueKey/],
+      ['an issueKey that is not a string', (o: any) => (o.details.issueKey = 12), /issueKey/],
+      ['SKEPTIC_REVIEW.md missing', (o: any) => (o.details.artifacts = []), /SKEPTIC_REVIEW\.md.*content/]
+    ])('AC-127 a skeptic output with %s fails its schema', (_label, mutate, message) => {
+      const output = skepticOutput();
+      mutate(output);
+      const result = validateOutputSchema(4, '07c-validator-skeptic', output);
+      expect(result.valid).toBe(false);
+      expect(result.errors).toContainEqual(expect.stringMatching(message));
+    });
+
+    it("AC-127 the skeptic fixture echoes the key from its prompt's \"Echo issueKey `<k>`\" line, and '' without one", () => {
+      expect(skepticOutput().details.issueKey).toBe(KEY);
+      expect(echoedIssueKey('no such line')).toBe('');
+      const noKey = skeptic()({ ...call, prompt: 'You are skeptic B.' });
+      expect(validateOutputSchema(4, '07c-validator-skeptic', noKey).valid).toBe(false);
+      expect(skeptic({ issueKey: () => 'other' })(call).details.issueKey).toBe('other');
     });
   });
 

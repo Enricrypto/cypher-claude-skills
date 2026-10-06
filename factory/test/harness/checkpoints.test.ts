@@ -56,6 +56,7 @@ describe('the three human checkpoints', () => {
       featureName: 'no-approver',
       featureDescription: 'add 2FA',
       cwd: projectDir,
+      reviewRoot: `${projectDir}-review`,
       changes: fakeChangeTracker(),
       invoke: planningInvoker(seen)
       // approveCheckpoint deliberately omitted
@@ -77,6 +78,7 @@ describe('the three human checkpoints', () => {
       featureName: 'rejected',
       featureDescription: 'add 2FA',
       cwd: projectDir,
+      reviewRoot: `${projectDir}-review`,
       changes: fakeChangeTracker(),
       invoke: planningInvoker(seen),
       approveCheckpoint: async () => false
@@ -95,6 +97,7 @@ describe('the three human checkpoints', () => {
       featureName: 'approved',
       featureDescription: 'add 2FA',
       cwd: projectDir,
+      reviewRoot: `${projectDir}-review`,
       changes: fakeChangeTracker(),
       invoke: planningInvoker(seen),
       approveCheckpoint: async cp => {
@@ -114,6 +117,7 @@ describe('the three human checkpoints', () => {
       featureName: 'summary',
       featureDescription: 'add 2FA',
       cwd: projectDir,
+      reviewRoot: `${projectDir}-review`,
       changes: fakeChangeTracker(),
       invoke: planningInvoker([]),
       approveCheckpoint: async cp => {
@@ -150,6 +154,7 @@ describe('the workspace the agents read', () => {
       featureName: 'clean-workspace',
       featureDescription: 'add 2FA',
       cwd: projectDir,
+      reviewRoot: `${projectDir}-review`,
       changes: fakeChangeTracker(),
       approveCheckpoint: async () => true,
       invoke: planningInvoker([])
@@ -172,6 +177,7 @@ describe('the workspace the agents read', () => {
       featureName: 'builder-refuses',
       featureDescription: 'add 2FA',
       cwd: projectDir,
+      reviewRoot: `${projectDir}-review`,
       changes: fakeChangeTracker(),
       approveCheckpoint: async () => true,
       invoke: scriptedInvoker({
@@ -210,6 +216,7 @@ describe('artifact persistence and sequencing', () => {
       featureName: 'sequencing',
       featureDescription: 'add 2FA',
       cwd: projectDir,
+      reviewRoot: `${projectDir}-review`,
       changes: fakeChangeTracker(),
       approveCheckpoint: async () => true,
       invoke: scriptedInvoker({
@@ -236,6 +243,7 @@ describe('artifact persistence and sequencing', () => {
         featureName: 'namespaced',
         featureDescription: 'add 2FA',
         cwd: projectDir,
+        reviewRoot: `${projectDir}-review`,
         changes: fakeChangeTracker(),
         approveCheckpoint: async () => true,
         invoke: planningInvoker([])

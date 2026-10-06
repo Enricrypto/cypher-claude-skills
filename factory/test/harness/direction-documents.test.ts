@@ -43,10 +43,15 @@ import {
   backend,
   consolidator,
   featureSpec,
+  followup,
   frontend,
+  skeptic,
   spec,
-  story
+  story,
+  validator
 } from '../fixtures/agent-outputs';
+import { AgentInvocation } from '../../runner/invoke-agent';
+import { issueKey } from '../../harness/verification';
 import { fakeChangeTracker } from '../fixtures/changes';
 import { decisions, passingScript, runToEnd, scriptedInvoker, tempProject, TempProject } from '../fixtures/harness-run';
 
@@ -80,6 +85,9 @@ function plantedLine(text: string): number {
   expect(text.split(RLO)).toHaveLength(2);
   return holders[0];
 }
+
+/** The CRITICAL a skeptic judges in the AC-127 case: in the builder's file, so an upheld one is routed. */
+const SKEPTIC_ISSUE = { severity: 'CRITICAL' as const, file: 'src/a.ts', line: 1, message: 'Route has no auth check', suggestion: 'Add the guard', canFix: true };
 
 const documentCheckFindings = (state: FeatureState) =>
   (state.importantFindings ?? []).filter(finding => finding.source === DOCUMENT_CHECK_SOURCE);
@@ -273,6 +281,50 @@ describe('the document check on every harness write path', () => {
       const findings = documentCheckFindings(state);
       expect(findings.map(f => f.message)).toEqual([findingFor(name, plantedLine(onDisk))]);
       // What was returned is what is on disk: the record holds it too.
+      expect(documentCheckFindings(loadState(project.dir, state.featureId)!)).toEqual(findings);
+    },
+    RUN_TIMEOUT_MS
+  );
+
+  it.each<[string, (script: Record<string, any>) => { name: string; content: string }]>([
+    [
+      'VALIDATION_FOLLOWUP.md',
+      script => {
+        const output = followup({ files: ['test/a.test.ts'] });
+        const content = planted(output.details.artifacts[0].content!);
+        output.details.artifacts[0].content = content;
+        script['07b-validator-followup'] = output;
+        return { name: 'VALIDATION_FOLLOWUP.md', content };
+      }
+    ],
+    [
+      'a SKEPTIC_ document',
+      script => {
+        const content = planted('# Skeptic Review\n\nUPHELD: The issue stands as stated.');
+        script['07-validator'] = (_call: AgentInvocation, n: number) =>
+          n === 1 ? validator({ status: 'FAIL', issues: [SKEPTIC_ISSUE] }) : validator();
+        script['07c-validator-skeptic'] = (call: AgentInvocation) => {
+          const output = skeptic()(call);
+          if (call.prompt.includes('You are skeptic A.')) output.details.artifacts[0].content = content;
+          return output;
+        };
+        return { name: `SKEPTIC_E1_${issueKey('07-validator', SKEPTIC_ISSUE)}_A.md`, content };
+      }
+    ]
+  ])(
+    'AC-127 AC-107 %s containing U+202E is stored byte-identical with exactly one IMPORTANT finding',
+    async (_label, plant) => {
+      const script = uiScript();
+      const expected = plant(script);
+      const invoker = scriptedInvoker(script, { cwd: project.dir });
+
+      const state = await runToEnd({ cwd: project.dir, invoke: invoker.invoke, changes: fakeChangeTracker({ changed: ['test/a.test.ts'] }) });
+      expect(state.completionStatus).toBe('SUCCESS');
+
+      const onDisk = readFileSync(join(project.dir, '.factory', state.featureId, expected.name), 'utf8');
+      expect(onDisk).toBe(expected.content);
+      const findings = documentCheckFindings(state);
+      expect(findings.map(f => f.message)).toEqual([findingFor(expected.name, plantedLine(onDisk))]);
       expect(documentCheckFindings(loadState(project.dir, state.featureId)!)).toEqual(findings);
     },
     RUN_TIMEOUT_MS

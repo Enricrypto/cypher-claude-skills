@@ -553,6 +553,52 @@ export interface ValidatorOutput extends FeatureFactoryAgentOutput {
 export type ValidatorIssue = ValidatorOutput['details']['issues'][number];
 
 // ============================================================================
+// STAGE 4: VALIDATOR FOLLOW-UP OUTPUT (PR B-2, D-6)
+// ============================================================================
+
+/**
+ * The scoped follow-up review of exactly the test files the Test Verifier changed in this cycle,
+ * measured against the project as it was before it ran. Its issues have the Validator's shape; it has no security block
+ * (security is the main Validator's).
+ */
+export interface ValidatorFollowupOutput extends FeatureFactoryAgentOutput {
+  stage: 4;
+  agent: '07b-validator-followup';
+
+  details: {
+    summary: string;
+    artifacts: ArtifactRef[];
+    /** Project-relative paths: exactly the files the prompt listed. */
+    filesReviewed: string[];
+    issues: ValidatorIssue[];
+  };
+}
+
+// ============================================================================
+// STAGE 4: SKEPTIC OUTPUT (PR B-2, D-4, D-6)
+// ============================================================================
+
+/** A skeptic's verdict on one CRITICAL issue. UPHELD is the default; DISPROVED needs evidence. */
+export const SKEPTIC_VERDICTS = ['DISPROVED', 'UPHELD'] as const;
+export type SkepticVerdict = typeof SKEPTIC_VERDICTS[number];
+
+export interface SkepticOutput extends FeatureFactoryAgentOutput {
+  stage: 4;
+  agent: '07c-validator-skeptic';
+
+  details: {
+    summary: string;
+    artifacts: ArtifactRef[];
+    /** The key of the issue the prompt gave, echoed exactly (C-4: bound to the issue judged). */
+    issueKey: string;
+    verdict: SkepticVerdict;
+    reason: string;
+    /** file:line evidence from the tree the skeptic read. At least one entry when DISPROVED. */
+    evidence: Array<{ file: string; line?: number; note: string }>;
+  };
+}
+
+// ============================================================================
 // STAGE 5: FEATURE CONSOLIDATOR OUTPUT
 // ============================================================================
 
@@ -741,6 +787,19 @@ export function validateOutputSchema(
       }
       break;
 
+    case '07b-validator-followup':
+      if (!Array.isArray(output.details.filesReviewed)) {
+        errors.push('Follow-up must report a filesReviewed array (the files it was given)');
+      }
+      if (!Array.isArray(output.details.issues)) {
+        errors.push('Follow-up must report an issues array (empty is a valid finding)');
+      }
+      break;
+
+    case '07c-validator-skeptic':
+      errors.push(...skepticErrors(output.details));
+      break;
+
     case '08-feature-consolidator':
       if (!output.details.executionMetrics) {
         errors.push('Consolidator missing executionMetrics');
@@ -757,6 +816,32 @@ export function validateOutputSchema(
     valid: errors.length === 0,
     errors
   };
+}
+
+/**
+ * A skeptic's verdict fields (D-6, I-12). Fail closed: a verdict outside the enum, a blank reason,
+ * a DISPROVED without evidence or a blank issue key is a schema failure, so the issue it judged is
+ * never treated as disproved on a malformed answer.
+ */
+function skepticErrors(details: Record<string, unknown>): string[] {
+  const errors: string[] = [];
+  const nonBlank = (value: unknown) => typeof value === 'string' && value.trim().length > 0;
+
+  if (!(SKEPTIC_VERDICTS as readonly unknown[]).includes(details.verdict)) {
+    errors.push(`Skeptic verdict must be one of ${SKEPTIC_VERDICTS.join(', ')}, got ${String(details.verdict)}`);
+  }
+  if (!nonBlank(details.reason)) {
+    errors.push('Skeptic reason missing or blank');
+  }
+  if (!Array.isArray(details.evidence)) {
+    errors.push('Skeptic evidence must be an array');
+  } else if (details.verdict === 'DISPROVED' && details.evidence.length === 0) {
+    errors.push('Skeptic verdict DISPROVED needs at least one evidence entry (file:line)');
+  }
+  if (!nonBlank(details.issueKey)) {
+    errors.push('Skeptic issueKey missing or blank: it must echo the key the prompt gave');
+  }
+  return errors;
 }
 
 /**

@@ -10,6 +10,7 @@ import { join } from 'path';
 import {
   CheckpointPresentationError,
   CP2_FILE_LIST_SEPARATOR,
+  CP3_FOLLOWUP_DOCUMENT,
   presentationFor,
   presentBrief,
   presentChange,
@@ -209,6 +210,53 @@ describe('CP3 presentation (D-4, step 5)', () => {
     expect(presentationFor(3, runDir, { findings, change: { ...CHANGE, text: `${CHANGE.text} ` } }).sha256).not.toBe(rebuilt.sha256);
     writeFileSync(join(runDir, 'VALIDATION_REPORT.md'), `${REPORT}edited\n`);
     expect(presentationFor(3, runDir, { findings, change: CHANGE }).sha256).not.toBe(rebuilt.sha256);
+  });
+
+  const FOLLOWUP = '# Validation Follow-up\n\nThe new test cannot fail: it asserts nothing.\n';
+
+  it('AC-122 presentChange with the follow-up presents both documents in full and hashes both; without it the text is byte-identical to before', () => {
+    writeFileSync(join(runDir, 'VALIDATION_REPORT.md'), REPORT);
+    writeFileSync(join(runDir, CP3_FOLLOWUP_DOCUMENT), FOLLOWUP);
+    const findings = [finding(4, '07b-validator-followup', '[test/a.test.ts:3] The test asserts nothing')];
+
+    const withFollowup = presentationFor(3, runDir, { findings, change: CHANGE, followup: true });
+
+    expect(CP3_FOLLOWUP_DOCUMENT).toBe('VALIDATION_FOLLOWUP.md');
+    expect(withFollowup.text).toBe(
+      `${REPORT}\n\n---\n\n## VALIDATION_FOLLOWUP.md\n\n${FOLLOWUP}` +
+        `\n\n---\n\n## IMPORTANT findings (1)\n\n` +
+        '- [Stage 4 · 07b-validator-followup] [test/a.test.ts:3] The test asserts nothing\n' +
+        `\n---\n\n## Change (source: git)\n\n${CHANGE.text}`
+    );
+    expect(withFollowup.sha256).toBe(sha256Hex(withFollowup.text));
+    expect(withFollowup.artifactPaths).toEqual([join(runDir, 'VALIDATION_REPORT.md'), join(runDir, CP3_FOLLOWUP_DOCUMENT)]);
+    expect(withFollowup).toEqual(presentChange(runDir, findings, CHANGE, undefined, true));
+
+    // The hash covers the follow-up: one byte of it changes the hash.
+    writeFileSync(join(runDir, CP3_FOLLOWUP_DOCUMENT), `${FOLLOWUP} `);
+    expect(presentationFor(3, runDir, { findings, change: CHANGE, followup: true }).sha256).not.toBe(withFollowup.sha256);
+
+    // Without it: exactly the text before PR B-2, though the document is in the run directory.
+    const without = presentationFor(3, runDir, { findings, change: CHANGE });
+    expect(without.text).toBe(
+      `${REPORT}\n\n---\n\n## IMPORTANT findings (1)\n\n` +
+        '- [Stage 4 · 07b-validator-followup] [test/a.test.ts:3] The test asserts nothing\n' +
+        `\n---\n\n## Change (source: git)\n\n${CHANGE.text}`
+    );
+    expect(without).toEqual(presentChange(runDir, findings, CHANGE));
+    expect(without.artifactPaths).toEqual([join(runDir, 'VALIDATION_REPORT.md')]);
+  });
+
+  it('AC-122 with the follow-up, a missing VALIDATION_FOLLOWUP.md throws CheckpointPresentationError naming it (fails closed)', () => {
+    writeFileSync(join(runDir, 'VALIDATION_REPORT.md'), REPORT);
+    let thrown: unknown;
+    try {
+      presentationFor(3, runDir, { findings: [], change: CHANGE, followup: true });
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(CheckpointPresentationError);
+    expect((thrown as CheckpointPresentationError).missing).toEqual([join(runDir, CP3_FOLLOWUP_DOCUMENT)]);
   });
 
   it('AC-52 presentationFor(3) without the findings and the change is refused (fails closed)', () => {

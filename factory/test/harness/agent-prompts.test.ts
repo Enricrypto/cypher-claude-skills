@@ -4,7 +4,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
-import { mkdirSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
 import { join } from 'path';
 
 import {
@@ -12,9 +12,12 @@ import {
   CheckpointRework,
   checkpointReworkBriefing,
   consolidatorPrompt,
+  followupPrompt,
   PromptContext,
   researcherPrompt,
   retryBriefing,
+  skepticPrompt,
+  SkepticPromptInput,
   specPrompt,
   storyPrompt,
   testVerifierPrompt,
@@ -23,6 +26,11 @@ import {
 } from '../../harness/agent-prompts';
 import { ARCHIVE_RULE, UpstreamArtifact } from '../../harness/upstream-artifacts';
 import { tempProject, TempProject } from '../fixtures/harness-run';
+import { echoedIssueKey, skeptic } from '../fixtures/agent-outputs';
+import { ValidatorIssue } from '../../harness/agent-output-schema';
+import { describeIssue } from '../../harness/validator-routing';
+import type { ReviewSource } from '../../harness/state-tracker';
+import { TEST_DIRECTORY_NAMES, TEST_FILE_NAME_PATTERNS } from '../../harness/test-paths';
 
 let project: TempProject;
 let ctx: PromptContext;
@@ -44,6 +52,20 @@ function onDisk(...names: UpstreamArtifact[]): void {
 
 const abs = (name: string) => join(project.dir, '.factory/run-1', name);
 
+/** A review copy beside the project (PR B-2 D-3): a snapshot source unless `source` is given. */
+const SNAPSHOT_SOURCE: ReviewSource = {
+  kind: 'snapshot',
+  n: 2,
+  ref: 'refs/factory/run-1/stage3-2',
+  commit: 'a'.repeat(40),
+  tree: 'b'.repeat(40)
+};
+const review = (source: ReviewSource = SNAPSHOT_SOURCE) => {
+  const dir = `${project.dir}-review`;
+  mkdirSync(dir, { recursive: true });
+  return { dir, source };
+};
+
 describe('agent prompts', () => {
   it('every prompt carries the run-directory rules, even with nothing upstream on disk', () => {
     const prompts = [
@@ -53,7 +75,7 @@ describe('agent prompts', () => {
       builderPrompt(ctx, 'backend', 1),
       builderPrompt(ctx, 'frontend', 1),
       testVerifierPrompt(ctx),
-      validatorPrompt(ctx),
+      validatorPrompt(ctx, review()),
       consolidatorPrompt(ctx)
     ];
     for (const prompt of prompts) {
@@ -118,10 +140,12 @@ describe('agent prompts', () => {
     expect(prompt).toContain('details.testing missing');
   });
 
-  it('AC-90 AC-91 the builder prompt says run only related tests, Gate 2 runs the full suite, and never commit, push, switch branches or write under .git/ or .factory/', () => {
+  it('AC-90 AC-91 D-B2-4 the builder prompt says run only related tests, Gate 2 runs the full suite, never commit, push, switch branches or write under .git/ or .factory/, and the harness snapshots the work', () => {
     // B2 is an instruction (AC-91): the prompt tells the builder; Gate 2's full suite enforces.
+    // D-B2-4: these rules are the program's only, so the prompt carries them, not contracts 04 and 05.
     const relatedTests = 'Run only the tests related to the files you changed; the harness runs the full suite in Gate 2.';
     const neverGit = 'Never commit, push or switch branches, and never write under .git/ or .factory/.';
+    const snapshots = 'The harness snapshots your work itself.';
     const prompts = [
       builderPrompt(ctx, 'backend', 1),
       builderPrompt(ctx, 'frontend', 1),
@@ -136,7 +160,7 @@ describe('agent prompts', () => {
       // Both lines follow the scope line, before any briefing.
       const scope = lines.findIndex(line => /^(Your scope ends at the API contract|The backend is already built)/.test(line));
       expect(scope).toBeGreaterThanOrEqual(0);
-      expect(lines.slice(scope + 1, scope + 3)).toEqual([relatedTests, neverGit]);
+      expect(lines.slice(scope + 1, scope + 4)).toEqual([relatedTests, neverGit, snapshots]);
     }
   });
 
@@ -153,16 +177,76 @@ describe('agent prompts', () => {
     expect(prompt).not.toContain('API_CONTRACT.md');
   });
 
+  it('D-B2-4 N-3 I-4 the Test Verifier prompt carries the test-path rule from test-paths.ts, and that a change outside a test path escalates', () => {
+    // The rule left contract 06 (by hand there is no measurement); the prompt states it from the
+    // one definition, so the list cannot drift from isTestPath.
+    const prompt = testVerifierPrompt(ctx);
+    const text = prompt.replace(/\n/g, ' ');
+
+    expect(prompt).toContain('Where you may write: test paths only.');
+    expect(text).toContain(`a directory in it (not the file name) is one of ${TEST_DIRECTORY_NAMES.join(', ')};`);
+    expect(text).toContain(`or the file name matches ${TEST_FILE_NAME_PATTERNS.join(', ')}.`);
+    expect(text).toContain('A directory named e2e/ alone does not make a path a test path.');
+    expect(text).toContain(
+      'If you change any file outside a test path (a deletion counts), the run escalates and names the files; ' +
+        'a human must revert them before the run can continue.'
+    );
+    expect(text).toContain('The test files you change are then reviewed by a follow-up reviewer.');
+  });
+
+  it('D-B2-4 the main Validator prompt says it gets no test report, that Gate 2 runs the full suite and that a follow-up review covers the new tests', () => {
+    const prompt = validatorPrompt(ctx, review());
+
+    expect(prompt).toContain(
+      'You get no test report: the Test Verifier runs at the same time as you. Gate 2 runs the full suite, ' +
+        'and a separate follow-up review covers the tests the Test Verifier writes.'
+    );
+    expect(prompt).not.toContain('TEST_REPORT.md');
+  });
+
   it('the Validator prompt marks the harness-generated summaries as derived, not as the builders\' claims verified', () => {
     onDisk('USER_STORY.md', 'TECHNICAL_BRIEF.md', 'BACKEND_SUMMARY.md', 'API_CONTRACT.md', 'TEST_REPORT.md');
 
-    const prompt = validatorPrompt(ctx);
+    const prompt = validatorPrompt(ctx, review());
 
     expect(prompt).toContain(abs('BACKEND_SUMMARY.md'));
-    expect(prompt).toContain(abs('TEST_REPORT.md'));
+    expect(prompt).not.toContain('TEST_REPORT.md');
     expect(prompt).toMatch(/harness-generated/i);
     expect(prompt).toMatch(/VALIDATION_REPORT\.md/);
     expect(prompt).not.toContain('FRONTEND_SUMMARY.md');
+  });
+
+  it('AC-120 the main Validator prompt names the copy as a read-only snapshot, names only paths that exist, and never TEST_REPORT.md', () => {
+    onDisk('USER_STORY.md', 'TECHNICAL_BRIEF.md', 'BACKEND_SUMMARY.md', 'TEST_REPORT.md');
+    const copy = review();
+
+    const prompt = validatorPrompt(ctx, copy);
+
+    expect(prompt).toContain(
+      `Review the implementation in ${copy.dir}. It is a READ-ONLY SNAPSHOT of the project taken after the Stage 3 gate passed: ` +
+        `stage3-2, refs/factory/run-1/stage3-2, commit ${'a'.repeat(40)}. It is your working directory.`
+    );
+    expect(prompt).toContain(`not the live project at ${project.dir}`);
+    expect(prompt).toContain('Do not run anything.');
+    expect(prompt).toContain(`Report file paths relative to ${copy.dir}.`);
+    expect(prompt).not.toContain('TEST_REPORT.md');
+    // Every absolute path the prompt names exists now (AC-24 holds).
+    const paths = prompt.match(/\/[^\s,()]+/g) ?? [];
+    const named = paths.map(path => path.replace(/[.:]$/, '')).filter(path => path.startsWith(project.dir));
+    expect(named.length).toBeGreaterThan(0);
+    for (const path of named) expect({ path, exists: existsSync(path) }).toEqual({ path, exists: true });
+  });
+
+  it('AC-120 AC-126 with the fallback copy the prompt names it as a read-only copy of the working tree made before the Test Verifier started, with the reason', () => {
+    const copy = review({ kind: 'working-tree', reason: 'not a git work tree' });
+
+    const prompt = validatorPrompt(ctx, copy);
+
+    expect(prompt).toContain(
+      `Review the implementation in ${copy.dir}. It is a read-only copy of the working tree made before the Test Verifier started (not a git work tree). It is your working directory.`
+    );
+    expect(prompt).not.toMatch(/SNAPSHOT/);
+    expect(() => validatorPrompt(ctx, { dir: 'relative/copy', source: SNAPSHOT_SOURCE })).toThrow(RangeError);
   });
 
   it('the Consolidator prompt lists every run-dir document including VALIDATION_REPORT.md', () => {
@@ -295,5 +379,166 @@ describe('checkpoint rework briefing (D-5, AC-75)', () => {
     expect(second).toMatch(/attempt 2 of 3\./);
 
     expect(builderPrompt(ctx, 'backend', 1)).not.toMatch(/REWORK/);
+  });
+});
+
+describe('follow-up prompt (PR B-2, D-5)', () => {
+  const files = [
+    { path: 'test/login.test.ts', deleted: false },
+    { path: 'src/__tests__/old.test.ts', deleted: true }
+  ];
+
+  it('AC-121 lists exactly the given files as absolute paths in the live project, and marks the deleted ones', () => {
+    const prompt = followupPrompt(ctx, files);
+    const listed = prompt.split('\n').filter((line: string) => line.startsWith('  - ') && !line.includes('.factory'));
+
+    expect(listed).toEqual([
+      `  - ${join(project.dir, 'test/login.test.ts')}`,
+      `  - ${join(project.dir, 'src/__tests__/old.test.ts')} (deleted)`
+    ]);
+    expect(prompt).toContain(`in the live project at ${project.dir}`);
+    expect(prompt).toContain('The Test Verifier wrote or changed exactly these files in this verification cycle, each measured against the project as it was before the Test Verifier ran.');
+  });
+
+  it('AC-121 includes TEST_REPORT.md when it is on disk, and names no document that is not', () => {
+    onDisk('USER_STORY.md', 'TECHNICAL_BRIEF.md', 'TEST_REPORT.md');
+
+    const prompt = followupPrompt(ctx, files);
+
+    expect(prompt).toContain(abs('TEST_REPORT.md'));
+    expect(prompt).toContain(abs('USER_STORY.md'));
+    expect(prompt).not.toContain('FRONTEND_SUMMARY.md');
+    expect(prompt).not.toContain('VALIDATION_REPORT.md');
+  });
+
+  it('AC-121 without TEST_REPORT.md on disk the prompt does not name it', () => {
+    onDisk('USER_STORY.md');
+
+    expect(followupPrompt(ctx, files)).not.toContain('TEST_REPORT.md');
+  });
+
+  it('AC-121 names VALIDATION_FOLLOWUP.md and the filesReviewed rule with the project-relative paths', () => {
+    const prompt = followupPrompt(ctx, files);
+
+    expect(prompt).toContain('Return VALIDATION_FOLLOWUP.md');
+    expect(prompt).toContain(
+      '`filesReviewed` lists exactly these project-relative paths: test/login.test.ts, src/__tests__/old.test.ts.'
+    );
+  });
+
+  it('AC-28 the follow-up prompt ends with the run-directory rules', () => {
+    const prompt = followupPrompt(ctx, files);
+
+    expect(prompt).toContain(ARCHIVE_RULE);
+    expect(prompt.endsWith(`ignore it completely: do not\nread it, do not reconcile it, do not treat it as a revision.`)).toBe(true);
+  });
+
+  it('refuses an empty file list: a follow-up runs only on files the Test Verifier changed', () => {
+    expect(() => followupPrompt(ctx, [])).toThrow(RangeError);
+  });
+});
+
+describe('skeptic prompt (PR B-2, D-5, D-11)', () => {
+  const issue: ValidatorIssue = {
+    severity: 'CRITICAL',
+    message: 'the token is compared with ==, not in constant time',
+    suggestion: 'use crypto.timingSafeEqual',
+    canFix: true,
+    file: 'src/auth.ts',
+    line: 42
+  };
+  const treeDir = '/tmp/factory-review-run-1-e1-abc';
+  const input = (instance: 'A' | 'B', extra: Partial<SkepticPromptInput> = {}): SkepticPromptInput => ({
+    instance,
+    issueKey: '0123456789ab',
+    origin: '07-validator',
+    issue,
+    treeDir,
+    ...extra
+  });
+
+  it('AC-128 the A and B prompts differ only in the instance letter', () => {
+    onDisk('USER_STORY.md', 'TECHNICAL_BRIEF.md');
+    const a = skepticPrompt(ctx, input('A')).split('\n');
+    const b = skepticPrompt(ctx, input('B')).split('\n');
+
+    expect(a).toHaveLength(b.length);
+    const differing = a.map((line: string, i: number) => [line, b[i]] as const).filter(([x, y]) => x !== y);
+    expect(differing).toEqual([['You are skeptic A.', 'You are skeptic B.']]);
+  });
+
+  it('AC-128 contains the issue as describeIssue renders it, its severity and the Echo issueKey line', () => {
+    const prompt = skepticPrompt(ctx, input('A'));
+
+    expect(prompt).toContain(describeIssue(issue));
+    expect(prompt).toContain('Severity: CRITICAL');
+    expect(prompt.split('\n')).toContain('Echo issueKey `0123456789ab`.');
+  });
+
+  it('AC-132 names the tree as the working directory, read-only, and the reviewer that reported the issue', () => {
+    const prompt = skepticPrompt(ctx, input('A'));
+
+    expect(prompt).toContain(`reported by 07-validator about the code in ${treeDir} (your working directory; read-only)`);
+    const followup = skepticPrompt(ctx, input('A', { origin: '07b-validator-followup', treeDir: project.dir }));
+    expect(followup).toContain(
+      `reported by 07b-validator-followup about the code in ${project.dir} (your working directory; read-only)`
+    );
+  });
+
+  it('AC-128 holds no recorded verdict: DISPROVED and UPHELD appear only in the instruction, and no other skeptic document is named', () => {
+    // A skeptic document and a validation report already in the run directory, as after skeptic A.
+    onDisk('USER_STORY.md', 'TECHNICAL_BRIEF.md', 'VALIDATION_REPORT.md');
+    writeFileSync(
+      join(project.dir, ctx.artifactDir, 'SKEPTIC_E1_0123456789ab_A.md'),
+      '# Skeptic Review\n\nDISPROVED: skeptic A found the guard at src/auth.ts:40'
+    );
+
+    const prompt = skepticPrompt(ctx, input('B'));
+
+    expect(prompt.match(/DISPROVED/g)).toHaveLength(1);
+    expect(prompt.match(/UPHELD/g)).toHaveLength(1);
+    expect(prompt).toContain('Default to UPHELD. Return DISPROVED only when');
+    expect(prompt).not.toMatch(/SKEPTIC_E\d/);
+    expect(prompt).not.toContain('skeptic A found');
+    expect(prompt).not.toContain('VALIDATION_REPORT.md');
+  });
+
+  it('IMPORTANT-3 tells both skeptics not to read state.json or any SKEPTIC_* document, in the prompt and in contract 07c', () => {
+    const rule = "Do not read this run's `state.json` or any `SKEPTIC_*` document: decide without the other skeptic's verdict.";
+    for (const instance of ['A', 'B'] as const) expect(skepticPrompt(ctx, input(instance)).split('\n')).toContain(rule);
+
+    const contract = readFileSync(join(__dirname, '..', '..', 'feature', 'agents', '07c-validator-skeptic.md'), 'utf8');
+    expect(contract).toMatch(/Do not read the run's `state\.json` or any `SKEPTIC_\*` document/);
+  });
+
+  it('D-5 names only the user story and the technical brief as upstream documents, and ends with the run-directory rules', () => {
+    onDisk('RESEARCHER_REPORT.md', 'USER_STORY.md', 'TECHNICAL_BRIEF.md', 'FILE_LIST.md', 'TEST_REPORT.md');
+
+    const prompt = skepticPrompt(ctx, input('A'));
+
+    expect(prompt).toContain(abs('USER_STORY.md'));
+    expect(prompt).toContain(abs('TECHNICAL_BRIEF.md'));
+    for (const name of ['RESEARCHER_REPORT.md', 'FILE_LIST.md', 'TEST_REPORT.md']) {
+      expect(prompt).not.toContain(name);
+    }
+    expect(prompt).toContain(ARCHIVE_RULE);
+    expect(prompt.endsWith(`ignore it completely: do not\nread it, do not reconcile it, do not treat it as a revision.`)).toBe(true);
+  });
+
+  it('AC-134 the step-1 skeptic fixture echoes the key it reads from a real skeptic prompt', () => {
+    const prompt = skepticPrompt(ctx, input('A'));
+
+    expect(echoedIssueKey(prompt)).toBe('0123456789ab');
+    const output = skeptic()({ stage: 4, agent: '07c-validator-skeptic', prompt });
+    expect(output.details.issueKey).toBe('0123456789ab');
+  });
+
+  it.each([
+    ['a non-CRITICAL issue', { issue: { ...issue, severity: 'IMPORTANT' as const } }],
+    ['an empty issue key', { issueKey: '' }],
+    ['an issue key with a backtick', { issueKey: 'ab`c' }],
+    ['a relative tree directory', { treeDir: 'review-copy' }]
+  ])('AC-128 refuses %s', (_name, extra) => {
+    expect(() => skepticPrompt(ctx, input('A', extra as Partial<SkepticPromptInput>))).toThrow(RangeError);
   });
 });

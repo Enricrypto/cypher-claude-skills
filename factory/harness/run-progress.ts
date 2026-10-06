@@ -39,10 +39,11 @@ import type {
 } from './state-tracker';
 import type { BackendBuilderOutput, FrontendBuilderOutput, ValidatorIssue } from './agent-output-schema';
 import { criticalIssues, mergeBuilderOutput, routeCriticalIssues } from './validator-routing';
+import { standingIssues } from './verification';
 
 type BuilderOutputs = Pick<StageOutputs, 'backend' | 'frontend'>;
 
-/** Which StageOutputs slot each agent's output fills. */
+/** Which StageOutputs slot each agent's output fills. 07c has none: skeptic verdicts are not steps (D-7). */
 const OUTPUT_SLOT: Readonly<Record<string, keyof StageOutputs>> = {
   '01-researcher': 'researcher',
   '02-story-writer': 'story',
@@ -51,6 +52,7 @@ const OUTPUT_SLOT: Readonly<Record<string, keyof StageOutputs>> = {
   '05-frontend-builder': 'frontend',
   '06-test-verifier': 'test',
   '07-validator': 'validator',
+  '07b-validator-followup': 'validatorFollowup',
   '08-feature-consolidator': 'consolidator'
 };
 
@@ -165,8 +167,13 @@ export interface PendingValidatorRound {
  *
  * Round r (= validatorRoundsCompleted, r > 0) is unfinished while no Gate 2 evaluation for round r
  * is recorded and the latest Validator step is the FAIL that opened it. Its routing is recomputed
- * from that FAIL's CRITICAL issues against the builders' claims from BEFORE the round (what the
- * routing saw when the round was opened), with routeCriticalIssues. A routing that no longer
+ * against the builders' claims from BEFORE the round (what the routing saw when the round was
+ * opened), with routeCriticalIssues, from the issues the round was opened on:
+ *  - PR B-2: the standing issues of the evaluation that FAIL decided (matched by the Validator's
+ *    invocation timing, which the step carries): its merged issues, the main review's paths mapped
+ *    out of its review copy, minus what both skeptics disproved (verification.ts standingIssues);
+ *  - a FAIL recorded before B-2, with no such evaluation: that FAIL's raw CRITICAL issues.
+ * A routing that no longer
  * routes everything is not a pending round: the resume starts the loop again with Gate 2 and the
  * Validator. The orchestrator skips a routed builder that already has a PASS for round r, and
  * always re-runs the round's gates.
@@ -185,9 +192,16 @@ export function pendingValidatorRound(state: FeatureState, cwd: string): Pending
     step => step.phase === 'stage3' || step.phase === 'rework' || (step.phase === 'validator-round' && (step.round ?? 0) < round),
     cwd
   );
-  const issues = (opener.output as { details?: { issues?: ValidatorIssue[] } }).details?.issues;
+  const decidedBy = (state.validatorEvaluations ?? []).find(
+    evaluation =>
+      evaluation.validator !== undefined &&
+      evaluation.validator.timing.startedAt === opener.startedAt &&
+      evaluation.validator.timing.completedAt === opener.completedAt
+  );
+  const standing = decidedBy ? standingIssues(decidedBy, cwd) : undefined;
+  const issues = standing ?? criticalIssues((opener.output as { details?: { issues?: ValidatorIssue[] } }).details?.issues);
   const routing = routeCriticalIssues(
-    criticalIssues(issues),
+    issues,
     {
       backend: (before.backend?.details.filesModified ?? []).map(file => file.path),
       frontend: (before.frontend?.details.filesModified ?? []).map(file => file.path)
@@ -277,6 +291,12 @@ export function activeRework(state: FeatureState): ReworkCycle | undefined {
   const started = latest?.rejection.rework;
   if (!latest || !started) return undefined;
   return approvedAfter(state, latest.rejection.checkpointId, started.startedAt) ? undefined : latest;
+}
+
+/** The verification evaluation cycle (PR B-2 D-7): the active CHECKPOINT 3 rework cycle, else 0. */
+export function currentReworkCycle(state: FeatureState): number {
+  const rework = activeRework(state);
+  return rework !== undefined && rework.rejection.checkpointId === 3 ? rework.cycle : 0;
 }
 
 /**

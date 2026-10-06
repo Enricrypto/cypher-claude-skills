@@ -55,11 +55,10 @@ Three PRs:
   (MINOR-8), suite time, escaping of invisible and direction-control characters, and the factual
   doc fixes (eight stale docs archived, the README stages section corrected).
 - **B-2:** B1 and B5. Binding entry condition: a crash or SDK/API error during the Test Verifier
-  leaves no record, so a resume re-takes the rework snapshot `stage3-<k>` with the Test
-  Verifier's partial writes, and B1's Validator copy is extracted from that ref. B-2's story must
-  carry an AC that closes this: record a "verification started" marker before invoking the Test
-  Verifier (preferred), or treat a recorded rework entry as final. Source:
-  [B_DECISIONS.md](factory-runs/phase-b/B_DECISIONS.md).
+  left no record, so a resume re-took the rework snapshot `stage3-<k>` with the Test Verifier's
+  partial writes, and B1's Validator copy would have been extracted from that ref. Closed by
+  AC-157: a "verification started" marker is saved before the Test Verifier is invoked, and a
+  resume keeps `stage3-<k>`. Source: [B_DECISIONS.md](factory-runs/phase-b/B_DECISIONS.md).
 - **B-3:** C5, GAP-3, GAP-5 and B4.
 
 Run records: [docs/factory-runs/phase-b/](factory-runs/phase-b/).
@@ -88,6 +87,8 @@ SKILL.md.
 - The operator's persistent-memory server made optional for other users.
 - CI that runs typecheck, tests and the doc-drift test, and tagged releases.
 - An optional Claude Code plugin with a `/factory` command.
+- Link `~/.claude/agents` and the skills to a stable copy (a clone on `main`, or a release tag),
+  so unmerged work never reaches other projects (B_DECISIONS D-B2-4).
 - The README restructure.
 
 ---
@@ -121,3 +122,7 @@ SKILL.md.
 - **Cleanup of `refs/factory/*` snapshot refs.** Every passing Stage 3 gate adds a snapshot under
   `refs/factory/<id>/`, and nothing deletes them yet, so they accumulate. A snapshot holds every
   non-ignored file, so one may hold a stray `.env` that is not in `.gitignore`. Not in PR B-1.
+- **Cleanup of review copies.** Every verification evaluation makes a read-only review copy
+  `factory-review-<id>-e<e>-XXXXXX` in the OS temp directory, and the harness never deletes one
+  (PR B-2), so they accumulate until the OS cleans its temp directory. Clean them up together with
+  the `refs/factory/` snapshot refs.

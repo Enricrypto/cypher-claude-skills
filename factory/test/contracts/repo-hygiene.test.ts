@@ -14,7 +14,7 @@ import { join, relative, resolve, sep } from 'path';
 import { DEFAULT_GATES } from '../../feature/workflows/feature-factory-orchestrator';
 import { auditInfrastructure, parseJsonc } from '../../harness/infrastructure-gates';
 import { auditExecution } from '../../harness/execution-gates';
-import { GIT_READ_SUBCOMMANDS, GIT_SNAPSHOT_SUBCOMMANDS } from '../../harness/change-diff';
+import { GIT_EXTRACTION_SUBCOMMANDS, GIT_READ_SUBCOMMANDS, GIT_SNAPSHOT_SUBCOMMANDS } from '../../harness/change-diff';
 import { DIRECTION_CHARACTER_RANGES, isDirectionCharacter } from '../../harness/direction-characters';
 import { code } from '../fixtures/source-code';
 
@@ -293,32 +293,58 @@ describe('repo hygiene', () => {
     expect(errorCategories).toMatch(/export function getFixCodeTemplate\b/);
   });
 
-  it('AC-90 contracts 04 and 05 say never commit, push or switch branches, and never write under .git/ or .factory/', () => {
+  it('AC-90 D-B2-4 contracts 04 and 05 leave the no-commit and snapshot rule to the builder prompt', () => {
+    // By hand (other projects), builders commit per step and no harness snapshots anything, so
+    // the rule lives only in builderPrompt; agent-prompts.test.ts pins the prompt's lines.
     for (const name of ['04-backend-builder.md', '05-frontend-builder.md']) {
       const contract = readFileSync(join(factoryRoot, 'feature', 'agents', name), 'utf-8');
 
-      expect(contract).toContain(
-        '- Never commit, push or switch branches, and never write under `.git/` or `.factory/`. The harness snapshots your work itself.'
-      );
+      expect(contract).not.toMatch(/never commit/i);
+      expect(contract).not.toMatch(/snapshots your work/i);
+      expect(contract).not.toContain('`.factory/`');
     }
   });
 
-  it('AC-91 contracts 04 and 05 tell the builder to run only the tests related to its changes and say the full suite runs in Gate 2', () => {
-    // An instruction only: no test checks which tests a builder ran. Gate 2's full suite enforces.
+  it('AC-91 D-B2-4 contracts 04 and 05 tell the builder to run the tests related to its changes, with no mention of Gate 2', () => {
+    // An instruction only: no test checks which tests a builder ran. In the program, builderPrompt
+    // adds that Gate 2 runs the full suite (pinned in agent-prompts.test.ts).
     for (const name of ['04-backend-builder.md', '05-frontend-builder.md']) {
       const contract = readFileSync(join(factoryRoot, 'feature', 'agents', name), 'utf-8');
       const beforeDone = /## Before Declaring Done\n([\s\S]*?)\n## /.exec(contract);
       expect(beforeDone).not.toBeNull();
 
       expect(beforeDone![1]).toContain(
-        '3. Tests: run only the tests related to the files you changed (for example `jest --findRelatedTests <files>` or `vitest related <files> --run`). All must pass. The full suite runs in Gate 2 after you finish.'
+        '3. Tests: run the tests related to the files you changed (for example `jest --findRelatedTests <files>` or `vitest related <files> --run`), and anything else your session asks for. All must pass.'
       );
+      expect(beforeDone![1]).not.toMatch(/Gate 2/);
       // The old item 3 asked for a whole suite.
       expect(beforeDone![1]).not.toMatch(/test suite — all must pass/);
     }
   });
 
-  it('AC-45 AC-80 git is spawned only by change-diff.ts with one spawnSync, the subcommands are exactly GIT_READ_SUBCOMMANDS and GIT_SNAPSHOT_SUBCOMMANDS, no forbidden subcommand appears in any literal, and the only refs/factory/ literal is in factoryRef', () => {
+  it('D-B2-4 the shared contracts 04, 05, 06 and 07 contain no program-only rule', () => {
+    // ~/.claude/agents/ links to these files, and by-hand runs in other projects read them: no
+    // harness, no snapshot, no review copy, no Gate 2. Program-only rules live in agent-prompts.ts.
+    const programOnly: ReadonlyArray<readonly [string, RegExp]> = [
+      ['the harness snapshot', /harness snapshots/i],
+      ['Gate 2', /Gate 2/i],
+      ['the review copy', /review copy/i],
+      ['the read-only copy', /read-only copy/i],
+      ['the test-path rule', /test paths? only/i],
+      ['the test-path section', /Where you may write/i],
+      ['the review-copy section', /Where you review/i],
+      ['no test report', /no test report/i],
+      ['the no-commit rule', /never commit/i],
+      ['.factory/', /\.factory\/`?(?!_archive)/]
+    ];
+    const offenders = ['04-backend-builder.md', '05-frontend-builder.md', '06-test-verifier.md', '07-validator.md'].flatMap(name => {
+      const contract = readFileSync(join(factoryRoot, 'feature', 'agents', name), 'utf-8');
+      return programOnly.filter(([, pattern]) => pattern.test(contract)).map(([label]) => `${name}: ${label}`);
+    });
+    expect(offenders).toEqual([]);
+  });
+
+  it('AC-45 AC-80 git is spawned only by change-diff.ts with one spawnSync, the subcommands are exactly GIT_READ_SUBCOMMANDS, GIT_SNAPSHOT_SUBCOMMANDS and GIT_EXTRACTION_SUBCOMMANDS, no forbidden subcommand appears in any literal, and the only refs/factory/ literal is in factoryRef', () => {
     const scanned = ['feature/workflows', 'runner', 'harness', 'contracts'].flatMap(dir =>
       readdirSync(join(factoryRoot, dir))
         .filter(name => name.endsWith('.ts'))
@@ -357,18 +383,19 @@ describe('repo hygiene', () => {
     // The subcommand passed to spawnSync is the typed parameter, never a literal.
     expect(changeDiff).toMatch(/spawnSync\('git', \[\.\.\.SAFE_GIT_CONFIG, subcommand, \.\.\.args\]/);
 
-    // The allow-list is exactly the two arrays, and the type is built from them.
+    // The allow-list is exactly the three arrays, and the type is built from them.
     expect(changeDiff).toMatch(/export const GIT_READ_SUBCOMMANDS = \['rev-parse', 'diff', 'ls-files'\] as const;/);
     expect(changeDiff).toMatch(/export const GIT_SNAPSHOT_SUBCOMMANDS = \['add', 'write-tree', 'commit-tree', 'update-ref'\] as const;/);
+    expect(changeDiff).toMatch(/export const GIT_EXTRACTION_SUBCOMMANDS = \['ls-tree', 'cat-file'\] as const;/);
     expect(changeDiff).toMatch(
-      /type GitSubcommand = \(typeof GIT_READ_SUBCOMMANDS\)\[number\] \| \(typeof GIT_SNAPSHOT_SUBCOMMANDS\)\[number\];/
+      /type GitSubcommand = \(typeof GIT_READ_SUBCOMMANDS\)\[number\] \| \(typeof GIT_SNAPSHOT_SUBCOMMANDS\)\[number\] \| \(typeof GIT_EXTRACTION_SUBCOMMANDS\)\[number\];/
     );
-    expect([...GIT_READ_SUBCOMMANDS, ...GIT_SNAPSHOT_SUBCOMMANDS]).toEqual([
-      'rev-parse', 'diff', 'ls-files', 'add', 'write-tree', 'commit-tree', 'update-ref'
+    expect([...GIT_READ_SUBCOMMANDS, ...GIT_SNAPSHOT_SUBCOMMANDS, ...GIT_EXTRACTION_SUBCOMMANDS]).toEqual([
+      'rev-parse', 'diff', 'ls-files', 'add', 'write-tree', 'commit-tree', 'update-ref', 'ls-tree', 'cat-file'
     ]);
     // Every call site of git() and its two wrappers names its subcommand as a literal.
     const subcommands = [...changeDiff.matchAll(/\b(?:git|gitOrThrow|snapshotStep)\(\s*\w+\s*,\s*'([^']+)'/g)].map(m => m[1]);
-    expect(new Set(subcommands)).toEqual(new Set([...GIT_READ_SUBCOMMANDS, ...GIT_SNAPSHOT_SUBCOMMANDS]));
+    expect(new Set(subcommands)).toEqual(new Set([...GIT_READ_SUBCOMMANDS, ...GIT_SNAPSHOT_SUBCOMMANDS, ...GIT_EXTRACTION_SUBCOMMANDS]));
 
     // No production file other than change-diff.ts imports its git() choke point.
     const importsGit = scanned
@@ -451,6 +478,52 @@ describe('repo hygiene', () => {
     expect(mentions).toHaveLength(2);
     expect(orchestrator).toMatch(new RegExp(`^\\s*${option}\\?:`, 'm'));
     expect(orchestrator).toMatch(new RegExp(`options\\.${option}\\s*\\?\\?\\s*saveState\\b`));
+  });
+
+  it('D-20 no production call site passes reviewRoot', () => {
+    // The review root is a test-only option (PR B-2 D-20, C-26): production code (everything under
+    // factory/ but test/) never names it, so production review copies always go to the OS temp
+    // directory. The orchestrator declares it and resolves it in exactly one place. The name is
+    // built by concatenation so this file does not match itself.
+    const option = 'review' + 'Root';
+    const orchestratorPath = join(factoryRoot, 'feature', 'workflows', 'feature-factory-orchestrator.ts');
+    const productionTs = (dir: string): string[] =>
+      readdirSync(dir, { withFileTypes: true }).flatMap(entry => {
+        const full = join(dir, entry.name);
+        if (entry.isDirectory()) return full === testRoot ? [] : productionTs(full);
+        return entry.name.endsWith('.ts') ? [full] : [];
+      });
+
+    const sources = productionTs(factoryRoot);
+    expect(sources).toContain(orchestratorPath);
+
+    const holders = sources.filter(file => new RegExp(`\\b${option}\\b`).test(code(readFileSync(file, 'utf-8'))));
+    expect(holders.map(file => relative(repoRoot, file))).toEqual([relative(repoRoot, orchestratorPath)]);
+
+    const orchestrator = code(readFileSync(orchestratorPath, 'utf-8'));
+    expect(orchestrator.match(new RegExp(`\\b${option}\\b`, 'g')) ?? []).toHaveLength(2);
+    expect(orchestrator).toMatch(new RegExp(`^\\s*${option}\\?:\\s*string;`, 'm'));
+    expect(orchestrator).toMatch(new RegExp(`options\\.${option}\\s*\\?\\?\\s*realpathSync\\(tmpdir\\(\\)\\)`));
+  });
+
+  it('AC-119 no source file uses git worktree and no agent sandbox is a worktree', () => {
+    // D-5: the Validator reviews a read-only copy extracted from the snapshot ref, never a git
+    // worktree. No production source names one in code (comments aside), and git() cannot run it.
+    const word = 'work' + 'tree';
+    const productionTs = (dir: string): string[] =>
+      readdirSync(dir, { withFileTypes: true }).flatMap(entry => {
+        const full = join(dir, entry.name);
+        if (entry.isDirectory()) return full === testRoot ? [] : productionTs(full);
+        return entry.name.endsWith('.ts') ? [full] : [];
+      });
+
+    const sources = productionTs(factoryRoot);
+    expect(sources.length).toBeGreaterThan(10);
+    const users = sources.filter(file => new RegExp(`\\b${word}\\b`, 'i').test(code(readFileSync(file, 'utf-8'))));
+    expect(users.map(file => relative(repoRoot, file))).toEqual([]);
+
+    const subcommands: readonly string[] = [...GIT_READ_SUBCOMMANDS, ...GIT_SNAPSHOT_SUBCOMMANDS, ...GIT_EXTRACTION_SUBCOMMANDS];
+    expect(subcommands).not.toContain(word);
   });
 
   it('AC-100 cli.ts makes no description comparison and no DESCRIPTION_* decision, and reads the description only for its banner', () => {
@@ -695,5 +768,19 @@ describe('repo hygiene', () => {
     expect(consolidate).toMatch(
       /persistArtifacts\([\s\S]*addImportantFindingsOnce\(\s*state,\s*STAGE,\s*DOCUMENT_CHECK_SOURCE,\s*documentFindings\(/
     );
+  });
+
+  it('AC-117 AC-118 AC-132 the SDK invoker runs each agent in call.cwd ?? config.cwd and in no other directory', () => {
+    // D-4: the main Validator and its skeptics are pointed at the review copy by the call; a
+    // regression to `cwd: config.cwd` would silently run them in the live project.
+    const invokeAgent = code(readFileSync(join(factoryRoot, 'runner', 'invoke-agent.ts'), 'utf-8'));
+    const invocation = invokeAgent.match(/export interface AgentInvocation\s*\{([^}]*)\}/);
+    expect(invocation).not.toBeNull();
+    expect(invocation![1]).toMatch(/\bcwd\?\s*:\s*string\s*;/);
+
+    expect(invokeAgent).toContain('call.cwd ?? config.cwd');
+    // One `cwd:` value in the module (type annotations aside): the SDK options'.
+    expect(invokeAgent.match(/\bcwd\??\s*:(?!\s*string\b)/g)).toHaveLength(1);
+    expect(invokeAgent).toMatch(/\bcwd\s*:\s*call\.cwd \?\? config\.cwd\b/);
   });
 });

@@ -11,9 +11,13 @@
  *      holding USER_STORY.md, TECHNICAL_BRIEF.md and FILE_LIST.md. The brief declares the
  *      securitySurface below: auth, sqlDatabase and htmlRendering ABSENT; userInput and secrets
  *      PRESENT;
- *   3. it invokes ONLY 07-validator, through the production createSdkInvoker (so the real
- *      agentOutputSchema('07-validator') is the outputFormat), with the production validatorPrompt;
- *   4. it judges the answer with the harness's own validateOutputSchema and evaluateSecurityChecks.
+ *   3. PR B-2 (S-1): it makes the Validator's read-only review copy of the fixture as the harness
+ *      does without a snapshot (copyWorkingTree, then sealReadOnly, into a fresh createReviewDir
+ *      under the OS temp directory; `.factory/` is not copied);
+ *   4. it invokes ONLY 07-validator, through the production createSdkInvoker (so the real
+ *      agentOutputSchema('07-validator') is the outputFormat), with `cwd` = the copy and the
+ *      production validatorPrompt naming that copy (source: the working tree);
+ *   5. it judges the answer with the harness's own validateOutputSchema and evaluateSecurityChecks.
  *
  * Pass criteria, each printed:
  *   P1  no AgentInvocationError; structured output came back (the SDK accepted the anyOf schema)
@@ -21,9 +25,11 @@
  *   P3  each of the 5 checks is exactly true, false or "not_applicable"
  *   P4  at least one check is "not_applicable" with a non-blank notApplicableReasons[check]
  *   P5  evaluateSecurityChecks(security, fixture surface) has no blocker for any "not_applicable" check
+ *   P6  every issue's `file` (if any) maps under the copy with mapReviewPath (a copy-relative path),
+ *       and no tool was denied: the Validator worked in its copy with its read-only tools
  *
  * Exit codes:
- *   0  PASS          P1-P5 hold: "I-13 PASS".
+ *   0  PASS          P1-P6 hold: "I-13 PASS".
  *   1  FAIL          a criterion failed. If P1 failed on the schema, apply the A-1 §13 fallback shape
  *                    { type: ['boolean', 'string'], enum: [true, false, 'not_applicable'] } and re-run.
  *                    Also used when the script refuses to run (usage, non-empty --cwd): nothing was
@@ -36,23 +42,33 @@
  *   npx ts-node factory/runner/smoke-validator.ts --cwd /private/tmp/ff-smoke-validator
  *
  * Never part of `npm test`, never run in CI, and imported by nothing: repo-hygiene.test.ts checks
- * that statically. It writes only inside --cwd.
+ * that statically. It writes only inside --cwd, plus the review copy under the OS temp directory
+ * (printed; the harness never deletes review copies either).
  */
 
-import { lstatSync, mkdirSync, readdirSync, writeFileSync } from 'fs';
-import { dirname, join, resolve } from 'path';
+import { lstatSync, mkdirSync, readdirSync, realpathSync, writeFileSync } from 'fs';
+import { tmpdir } from 'os';
+import { dirname, isAbsolute, join, resolve } from 'path';
 
 import { AgentInvocationError, createSdkInvoker } from './invoke-agent';
 import { agentOutputSchema } from './output-schemas';
 import { PromptContext, validatorPrompt } from '../harness/agent-prompts';
 import { SECURITY_CHECKS, SecurityCheckName, SecuritySurfaceDeclaration, validateOutputSchema } from '../harness/agent-output-schema';
 import { evaluateSecurityChecks } from '../harness/security-checks';
+import { copyWorkingTree, createReviewDir, mapReviewPath, sealReadOnly } from '../harness/review-copy';
+import type { ReviewSource } from '../harness/state-tracker';
 
 const EXIT = { PASS: 0, FAIL: 1, INCONCLUSIVE: 2 } as const;
 type ExitCode = (typeof EXIT)[keyof typeof EXIT];
 
 /** The fixture's run directory, relative to --cwd. */
 const ARTIFACT_DIR = '.factory/smoke-validator';
+
+/** The run id the review copy's directory is named after. */
+const RUN_ID = 'smoke-validator';
+
+/** What the copy is made from: the working tree, as for a run with no snapshot (AC-126). */
+const COPY_SOURCE: ReviewSource = { kind: 'working-tree', reason: 'the S-1 smoke fixture has no snapshot' };
 
 /** What the fixture's TECHNICAL_BRIEF.md declares, and what P5 judges "not_applicable" against. */
 const FIXTURE_SURFACE: SecuritySurfaceDeclaration = {
@@ -195,7 +211,7 @@ function findProperty(schema: unknown, key: string): unknown {
 }
 
 interface Criterion {
-  id: 'P1' | 'P2' | 'P3' | 'P4' | 'P5';
+  id: 'P1' | 'P2' | 'P3' | 'P4' | 'P5' | 'P6';
   holds: boolean;
   detail: string;
 }
@@ -215,9 +231,13 @@ async function main(argv: string[]): Promise<ExitCode> {
   }
 
   writeFixture(project);
+  const copy = createReviewDir(realpathSync(tmpdir()), RUN_ID, 1);
+  const leaves = copyWorkingTree(project, copy);
+  sealReadOnly(copy);
   console.log('=== I-13 LIVE SMOKE CHECK: 07-validator ===');
   console.log(`project: ${project}`);
   console.log(`fixture run directory: ${join(project, ARTIFACT_DIR)}`);
+  console.log(`review copy (read-only, the Validator's working directory): ${copy} (${leaves.entries} entries)`);
   console.log(`schema under test (authImplemented): ${JSON.stringify(findProperty(agentOutputSchema('07-validator'), 'authImplemented'))}\n`);
 
   const denials: string[] = [];
@@ -232,11 +252,16 @@ async function main(argv: string[]): Promise<ExitCode> {
   const started = Date.now();
   let output: any;
   try {
-    output = await invoke({ stage: 4, agent: '07-validator', prompt: validatorPrompt(ctx) });
+    output = await invoke({
+      stage: 4,
+      agent: '07-validator',
+      prompt: validatorPrompt(ctx, { dir: copy, source: COPY_SOURCE }),
+      cwd: copy
+    });
   } catch (error) {
     const detail = error instanceof AgentInvocationError ? [error.message, ...error.detail].join(' | ') : String(error);
     print({ id: 'P1', holds: false, detail: `the invocation failed: ${detail}` });
-    console.log('P2-P5 not evaluated.');
+    console.log('P2-P6 not evaluated.');
     console.log(
       `\nI-13 FAIL. If the failure is the outputFormat schema, apply the A-1 §13 fallback shape ` +
         `{ type: ['boolean', 'string'], enum: [true, false, 'not_applicable'] } and re-run on a fresh empty directory.`
@@ -295,13 +320,30 @@ async function main(argv: string[]): Promise<ExitCode> {
           : `blockers: ${naBlockers.join(' | ')}`
   };
 
+  // P6: the Validator reported its paths from the copy, and was denied no tool.
+  const issueFiles: string[] = (Array.isArray(output?.details?.issues) ? output.details.issues : [])
+    .map((issue: { file?: unknown }) => issue?.file)
+    .filter((file: unknown): file is string => typeof file === 'string');
+  const outsideCopy = issueFiles.filter(file => {
+    const mapped = mapReviewPath(file, copy);
+    return mapped === '' || isAbsolute(mapped);
+  });
+  const p6: Criterion = {
+    id: 'P6',
+    holds: outsideCopy.length === 0 && denials.length === 0,
+    detail:
+      `${issueFiles.length} issue file(s)` +
+      (outsideCopy.length > 0 ? `; not under the copy: ${outsideCopy.join(', ')}` : ', all under the copy') +
+      `; tool denials: ${denials.length === 0 ? 'none' : denials.join(', ')}`
+  };
+
   console.log('');
-  for (const criterion of [p1, p2, p3, p4, p5]) print(criterion);
+  for (const criterion of [p1, p2, p3, p4, p5, p6]) print(criterion);
   console.log(`\nall security blockers (informational): ${evaluation.blockers.length === 0 ? 'none' : evaluation.blockers.join(' | ')}`);
   console.log(`status: ${String(output?.status)}; summary: ${String(output?.details?.summary ?? '').slice(0, 400)}`);
   console.log(`tool denials: ${denials.length === 0 ? 'none' : denials.join(', ')}`);
 
-  if (!p1.holds || !p2.holds || !p3.holds) {
+  if (!p1.holds || !p2.holds || !p3.holds || !p6.holds) {
     console.log('\nI-13 FAIL.');
     return EXIT.FAIL;
   }

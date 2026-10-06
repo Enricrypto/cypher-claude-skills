@@ -24,7 +24,8 @@ import {
 import { harnessGeneratedLabel, HARNESS_RENDERED_ARTIFACTS } from '../../harness/harness-documents';
 import { FeatureFactoryAgent, AGENT_STAGE } from '../../runner/agent-registry';
 import { AgentInvocation, AgentInvoker } from '../../runner/invoke-agent';
-import { backend, frontend, researcher, spec, validator } from '../fixtures/agent-outputs';
+import { backend, followup, frontend, researcher, spec, validator } from '../fixtures/agent-outputs';
+import { fakeChangeTracker } from '../fixtures/changes';
 import { passingScript, runToEnd, scriptedInvoker, tempProject, TempProject } from '../fixtures/harness-run';
 
 let project: TempProject;
@@ -197,8 +198,12 @@ describe('upstream artifacts in prompts', () => {
     const state = await runToEnd({ cwd: project.dir, invoke: invoker.invoke });
 
     expect(state.completionStatus).toBe('SUCCESS');
-    // Every agent but the Consolidator runs in the run (AC-44).
-    expect([...new Set(invoker.agents())].sort()).toEqual(ALL_AGENTS.filter(a => a !== '08-feature-consolidator').sort());
+    // Every agent but the Consolidator runs in the run (AC-44), except the two PR B-2 Stage 4
+    // reviewers this run has no work for: 07b runs only when the Test Verifier changed test files,
+    // and 07c only on a CRITICAL issue. This run has neither.
+    expect([...new Set(invoker.agents())].sort()).toEqual(
+      ALL_AGENTS.filter(a => !['08-feature-consolidator', '07b-validator-followup', '07c-validator-skeptic'].includes(a)).sort()
+    );
     expect(ARCHIVE_RULE).toContain('.factory/_archive/');
     const runDir = resolve(project.dir, '.factory', state.featureId);
     for (const prompt of invoker.calls.map(c => c.prompt)) {
@@ -212,6 +217,44 @@ describe('upstream artifacts in prompts', () => {
     expect(consolidatorPrompt).not.toContain(ARCHIVE_RULE);
     expect(consolidatorPrompt).toContain(runDir);
     expect(consolidatorPrompt).toMatch(/only directory/i);
+  });
+});
+
+describe('the follow-up and skeptic prompts (PR B-2, AC-24, AC-28)', () => {
+  it('AC-24 AC-28 the 07b and 07c prompts name every existing upstream document of theirs, each on disk at invocation, and carry the archive rule', async () => {
+    const observations: PromptObservation[] = [];
+    const script = {
+      ...uiScript(),
+      '07-validator': (_call: AgentInvocation, n: number) =>
+        n === 1
+          ? validator({ status: 'FAIL', issues: [{ severity: 'CRITICAL', file: 'src/a.ts', line: 1, message: 'No guard', suggestion: 'Add it', canFix: true }] })
+          : validator(),
+      '07b-validator-followup': followup({ files: ['test/a.test.ts'] })
+    };
+    const base = scriptedInvoker(script, { cwd: project.dir });
+    // The script holds functions (the Validator, the skeptic), so the prompts are observed around the invoker.
+    const observe = observing({ '07b-validator-followup': {}, '07c-validator-skeptic': {} }, observations);
+    const invoke: AgentInvoker = async call => {
+      if (call.agent in observe) observe[call.agent](call);
+      return base.invoke(call);
+    };
+
+    const state = await runToEnd({ cwd: project.dir, invoke, changes: fakeChangeTracker({ changed: ['test/a.test.ts'] }) });
+
+    expect(state.completionStatus).toBe('SUCCESS');
+    const runDir = resolve(project.dir, '.factory', state.featureId);
+    for (const agent of ['07b-validator-followup', '07c-validator-skeptic'] as const) {
+      const seen = observations.filter(o => o.agent === agent);
+      expect(seen.length).toBeGreaterThan(0);
+      for (const { named, prompt } of seen) {
+        expect([...new Set(named.map(n => n.name))].sort()).toEqual([...UPSTREAM_FOR_AGENT[agent]].sort());
+        for (const n of named) {
+          expect(n.path).toBe(join(runDir, n.name));
+          expect(n.existedAtInvocation).toBe(true);
+        }
+        expect(prompt).toContain(ARCHIVE_RULE);
+      }
+    }
   });
 });
 
@@ -297,7 +340,12 @@ describe('upstream-artifacts helpers', () => {
     expect(UPSTREAM_FOR_AGENT['04-backend-builder']).toEqual([RR, US, TB, FL]);
     expect(UPSTREAM_FOR_AGENT['05-frontend-builder']).toEqual([RR, US, TB, FL, BS, AC]);
     expect(UPSTREAM_FOR_AGENT['06-test-verifier']).toEqual([RR, US, TB, FL, BS, AC, FS]);
-    expect(UPSTREAM_FOR_AGENT['07-validator']).toEqual([RR, US, TB, FL, BS, AC, FS, TR]);
+    // AC-120: the Validator runs alongside the Test Verifier, so it never gets TEST_REPORT.md.
+    expect(UPSTREAM_FOR_AGENT['07-validator']).toEqual([RR, US, TB, FL, BS, AC, FS]);
+    // The follow-up runs after the Test Verifier and reviews its files; a skeptic judges one issue
+    // against the story and the brief only (D-5).
+    expect(UPSTREAM_FOR_AGENT['07b-validator-followup']).toEqual([RR, US, TB, FL, BS, AC, FS, TR]);
+    expect(UPSTREAM_FOR_AGENT['07c-validator-skeptic']).toEqual([US, TB]);
     expect(UPSTREAM_FOR_AGENT['08-feature-consolidator']).toEqual([RR, US, TB, FL, BS, AC, FS, TR, VR]);
     expect(Object.keys(UPSTREAM_FOR_AGENT).sort()).toEqual([...ALL_AGENTS].sort());
   });

@@ -249,8 +249,13 @@ describe('validator loop-back (orchestrator)', () => {
 
     expect(state.completionStatus).toBe('SUCCESS');
     const firstValidator = events.indexOf('07-validator');
+    // PR B-2 (D-8, D-11): Gate 2 runs after the parallel Test Verifier and Validator, then the two
+    // skeptics on the CRITICAL issue before it is routed.
     expect(events.slice(firstValidator)).toEqual([
       '07-validator',
+      'gate-2',
+      '07c-validator-skeptic',
+      '07c-validator-skeptic',
       '04-backend-builder',
       'gate-1.5',
       'gate-2',
@@ -293,8 +298,13 @@ describe('validator loop-back (orchestrator)', () => {
     expect(escalations(state)).toEqual([]);
     expect(state.completionStatus).toBe('SUCCESS');
     const firstValidator = events.indexOf('07-validator');
+    // PR B-2 (D-8, D-11): Gate 2 runs after the parallel Test Verifier and Validator, then the two
+    // skeptics on the CRITICAL issue before it is routed.
     expect(events.slice(firstValidator)).toEqual([
       '07-validator',
+      'gate-2',
+      '07c-validator-skeptic',
+      '07c-validator-skeptic',
       '04-backend-builder',
       'gate-1.5',
       'gate-2',

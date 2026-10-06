@@ -14,7 +14,9 @@
  *    change itself (change-diff.ts: the git diff since the run started, or a labelled manifest of
  *    the claimed files). CP3's text is built from files, state and the change, never from what an
  *    agent says about them. From PR B-1 a run with snapshot records also shows them, with the
- *    pre-existing-changes note, between the findings and the change (D-13, D-6).
+ *    pre-existing-changes note, between the findings and the change (D-13, D-6). From PR B-2, when
+ *    the run's follow-up review reviewed the Test Verifier's files, `<runDir>/VALIDATION_FOLLOWUP.md`
+ *    follows the report under its own heading (D-16, AC-122); without one the text is unchanged.
  *
  * INVISIBLE AND DIRECTION-CONTROL CHARACTERS (PR B-1, D-13, AC-108). The text is built as an ordered
  * list of parts, some labelled with what they show (a document, the findings, the snapshot notes,
@@ -92,6 +94,9 @@ export const CP2_FILE_LIST_SEPARATOR = '\n\n---\n\n## FILE_LIST.md\n\n';
 /** Between the parts of the CP3 text. Part of what is hashed. */
 export const CP3_SECTION_SEPARATOR = '\n\n---\n\n';
 
+/** The follow-up review's document (PR B-2, D-16): presented after the report when the follow-up reviewed files. */
+export const CP3_FOLLOWUP_DOCUMENT = 'VALIDATION_FOLLOWUP.md';
+
 /** The full USER_STORY.md of the run in `runDirAbs` (CP1). */
 export function presentStory(runDirAbs: string): CheckpointPresentation {
   const [story] = readDocuments(runDirAbs, CHECKPOINT_DOCUMENTS[1], 'CHECKPOINT 1');
@@ -118,20 +123,27 @@ export function presentBrief(runDirAbs: string): CheckpointPresentation {
  * `## Change (source: git | claimed-files)` and the change's text. `changedFiles` is the change's
  * file list, kept with a pause so a rejection can route the rework (D-5).
  *
- * Throws CheckpointPresentationError when the report cannot be presented, or when `change` is not
- * a well-formed ChangeSet: nothing is approved that was not shown in full.
+ * With `followup` (PR B-2, D-16), `## VALIDATION_FOLLOWUP.md` and that document's full text follow
+ * the report, before the findings, and it is the second artifact path; the hash covers both
+ * documents. Without it the text is byte-identical to the text before PR B-2.
+ *
+ * Throws CheckpointPresentationError when the report (or, with `followup`, the follow-up document)
+ * cannot be presented, or when `change` is not a well-formed ChangeSet: nothing is approved that
+ * was not shown in full.
  */
 export function presentChange(
   runDirAbs: string,
   findings: readonly ImportantFinding[],
   change: ChangeSet,
-  snapshots?: SnapshotPresentationInput
+  snapshots?: SnapshotPresentationInput,
+  followup?: boolean
 ): CheckpointPresentation {
   const problem = changeSetProblem(change);
   if (problem) {
     throw new CheckpointPresentationError(`CHECKPOINT 3 cannot be presented: the change is ${problem}.`, []);
   }
-  const [report] = readDocuments(runDirAbs, CHECKPOINT_DOCUMENTS[3], 'CHECKPOINT 3');
+  const names = followup ? [...CHECKPOINT_DOCUMENTS[3], CP3_FOLLOWUP_DOCUMENT] : CHECKPOINT_DOCUMENTS[3];
+  const [report, followupDocument] = readDocuments(runDirAbs, names, 'CHECKPOINT 3');
 
   const lines = findings.map(f => `- [Stage ${f.stage} · ${f.source}] ${String(f.message).replace(/\r?\n/g, ' ')}`);
   // The parts joined are exactly the CP3 text before PR B-1 (plus the snapshot section when given).
@@ -139,6 +151,12 @@ export function presentChange(
   // and the banner is the warning for it (N-16).
   const parts: PresentationPart[] = [
     { label: 'VALIDATION_REPORT.md', text: report.content },
+    ...(followupDocument
+      ? [
+          { text: `${CP3_SECTION_SEPARATOR}## ${CP3_FOLLOWUP_DOCUMENT}\n\n` },
+          { label: CP3_FOLLOWUP_DOCUMENT, text: followupDocument.content }
+        ]
+      : []),
     { text: `${CP3_SECTION_SEPARATOR}## IMPORTANT findings (${findings.length})\n\n` },
     { label: 'the IMPORTANT findings', text: lines.length > 0 ? lines.join('\n') : 'None.' },
     { text: CP3_SECTION_SEPARATOR },
@@ -149,7 +167,8 @@ export function presentChange(
     { label: 'the change', text: change.text }
   ];
 
-  return { ...presentation(parts, [report.path]), changedFiles: [...change.files] };
+  const artifactPaths = followupDocument ? [report.path, followupDocument.path] : [report.path];
+  return { ...presentation(parts, artifactPaths), changedFiles: [...change.files] };
 }
 
 /** Why `change` is not a ChangeSet that can be presented, or undefined when it is one. */
@@ -172,11 +191,16 @@ export interface SnapshotPresentationInput {
   base?: ChangeBase;
 }
 
-/** What CP3 is built from besides VALIDATION_REPORT.md: the run's IMPORTANT findings, the collected change and, from PR B-1, the snapshots. */
+/**
+ * What CP3 is built from besides VALIDATION_REPORT.md: the run's IMPORTANT findings, the collected
+ * change, from PR B-1 the snapshots and, from PR B-2, whether the follow-up document is presented
+ * (set only when the run's latest first-pass evaluation reviewed files, D-16).
+ */
 export interface ChangePresentationInput {
   findings: readonly ImportantFinding[];
   change: ChangeSet;
   snapshots?: SnapshotPresentationInput;
+  followup?: true;
 }
 
 /** The reason a snapshot is skipped outside git (D-5); the section then says no snapshot was taken (AC-87). */
@@ -243,7 +267,7 @@ function snapshotSection({ entries, base }: SnapshotPresentationInput): string {
 export function presentationFor(id: CheckpointId, runDirAbs: string, change?: ChangePresentationInput): CheckpointPresentation {
   if (id === 1) return presentStory(runDirAbs);
   if (id === 2) return presentBrief(runDirAbs);
-  if (id === 3 && change) return presentChange(runDirAbs, change.findings, change.change, change.snapshots);
+  if (id === 3 && change) return presentChange(runDirAbs, change.findings, change.change, change.snapshots, change.followup);
   throw new CheckpointPresentationError(
     `CHECKPOINT ${String(id)} cannot be re-built without the findings and the change it presented.`,
     []

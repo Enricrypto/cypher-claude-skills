@@ -23,7 +23,7 @@ If a test fails, the feature doesn't satisfy the story. You report which criteri
 Your prompt lists this run's upstream documents by absolute path — only those that exist. Read them from those paths; do not search for them, and do not read any other run's directory or anything under `.factory/_archive/`.
 1. Read the approved User Story — specifically every acceptance criterion.
 2. Read the approved Technical Brief.
-3. Read the backend summary and API contract, and the frontend summary if your prompt lists one. These are **harness-generated** from the builders' structured output: they say what the builders reported, not that it is true.
+3. Read the backend summary and API contract, and the frontend summary if your prompt lists one. These are **generated from the builders' structured reports**: they say what the builders reported, not that it is true.
 4. Read the project's `CLAUDE.md` for the test runner, test file conventions, and commands.
 5. Read your assigned skills from the feature-factory skill table at `~/.claude/skills/software/feature-factory/SKILL.md`. Load each assigned skill using the Skill loading protocol above, then follow it.
 6. Check if the project's `CLAUDE.md` has an `## Active Skills` override.

@@ -19,12 +19,16 @@ import {
   ResearcherOutput,
   SecurityCheckName,
   SecuritySurfaceDeclaration,
+  SkepticOutput,
+  SkepticVerdict,
   SpecWriterOutput,
   StoryWriterOutput,
   TestVerifierOutput,
+  ValidatorFollowupOutput,
   ValidatorOutput
 } from '../../harness/agent-output-schema';
 import { FeatureSpec } from '../../contracts/feature-spec';
+import type { AgentInvocation } from '../../runner/invoke-agent';
 
 const now = () => new Date().toISOString();
 
@@ -329,6 +333,90 @@ export function validator({
       ...(regressions ? { regressions } : {})
     }
   };
+}
+
+/**
+ * A follow-up review (07b) of the files the Test Verifier changed. Defaults: PASS, no file
+ * reviewed, no issues. A test that makes the Test Verifier change files passes the same `files`.
+ */
+export function followup({
+  files = [],
+  issues = [],
+  status = 'PASS'
+}: {
+  files?: string[];
+  issues?: ValidatorIssueFixture[];
+  status?: ValidatorFollowupOutput['status'];
+} = {}): ValidatorFollowupOutput {
+  return {
+    stage: 4,
+    agent: '07b-validator-followup',
+    timestamp: now(),
+    status,
+    details: {
+      summary: 'Reviewed the test files the Test Verifier changed.',
+      artifacts: [
+        {
+          name: 'VALIDATION_FOLLOWUP.md',
+          path: 'VALIDATION_FOLLOWUP.md',
+          description: 'Follow-up review',
+          content: '# Validation Follow-up\n\nNo issues in the listed files.'
+        }
+      ],
+      filesReviewed: [...files],
+      issues: structuredClone(issues)
+    }
+  };
+}
+
+/**
+ * The issue key a skeptic prompt asks the skeptic to echo: the key in its "Echo issueKey `<k>`"
+ * line (D-5), or '' when the prompt has no such line. An empty key fails the skeptic's schema, so
+ * a prompt that forgot the line cannot pass by accident.
+ */
+export function echoedIssueKey(prompt: string): string {
+  return /Echo issueKey `([^`\n]+)`/.exec(prompt)?.[1] ?? '';
+}
+
+/**
+ * A skeptic (07c), as a function of its invocation: by default it echoes the key its prompt gave
+ * it, so the harness's key check passes. Defaults: PASS with verdict UPHELD and no evidence; a
+ * DISPROVED verdict defaults to one file:line evidence entry (the schema requires at least one).
+ */
+export function skeptic({
+  verdict = 'UPHELD',
+  reason = verdict === 'DISPROVED' ? 'The code shows the issue as stated is not real.' : 'The issue stands as stated.',
+  evidence = verdict === 'DISPROVED' ? [{ file: 'src/a.ts', line: 1, note: 'the guard the issue says is missing' }] : [],
+  status = 'PASS',
+  issueKey = call => echoedIssueKey(call.prompt)
+}: {
+  verdict?: SkepticVerdict;
+  reason?: string;
+  evidence?: SkepticOutput['details']['evidence'];
+  status?: SkepticOutput['status'];
+  issueKey?: (call: AgentInvocation) => string;
+} = {}): (call: AgentInvocation) => SkepticOutput {
+  return call => ({
+    stage: 4,
+    agent: '07c-validator-skeptic',
+    timestamp: now(),
+    status,
+    details: {
+      summary: `Skeptic verdict: ${verdict}.`,
+      artifacts: [
+        {
+          name: 'SKEPTIC_REVIEW.md',
+          path: 'SKEPTIC_REVIEW.md',
+          description: 'Skeptic review',
+          content: `# Skeptic Review\n\n${verdict}: ${reason}`
+        }
+      ],
+      issueKey: issueKey(call),
+      verdict,
+      reason,
+      evidence: structuredClone(evidence)
+    }
+  });
 }
 
 /** A Consolidator report that satisfies its schema. */

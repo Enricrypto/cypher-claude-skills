@@ -34,3 +34,25 @@
 | 2026-10-05 16:13–16:27 | CP3 fix round (IMPORTANT-1, MINOR-1..7, FOLLOWUP-1..5) + session checks + AC-103 re-measure | 04 backend-builder + session | 9.3 + 4.5 | — | 58 tool calls; 1291 tests (+14); durable share 87% → 47% |
 | 2026-10-05 16:28–16:32 | Re-check of the fix round | 07 validator (scoped) | 3.9 | — | 13/13 RESOLVED; 2 NEW-MINOR; residual (TV crash) → B-2; PASS |
 | 2026-10-05 16:49–16:56 | NEW-MINOR-1/2 + ROADMAP B-2 condition | 04 backend-builder + session check | 4.9 + 1.5 | — | 1295 tests (+4) |
+| 2026-10-05 17:36–17:41 | Feature Consolidator (B-1) | 08 feature-consolidator (by hand) | 5.3 | — | 25 tool calls; P-21..P-28, C-24..C-33, 10 anti-patterns; hand-back held a real U+202E (replaced on save) |
+| 2026-10-05 17:43–18:07 | Spec Writer, PR B-2 brief and file list | 03 spec-writer (by hand) | 24.5 | — | 92 tool calls; PASS; 8 builder steps + 3 session steps, 30 issues, AC-157 proposed; bidi scan clean |
+| 2026-10-05 18:09 | CHECKPOINT 2 (B-2) approved | Operator | — | not timed | brief sha256 2bbd0b79360eee2229194d7900f005e08508635f1184682aa98f538a6452143d; file list sha256 b2b571088e9997dcbb36b1b5646366bb796177859110329af43aca2198ddf402 |
+| 2026-10-05 18:10–18:12 | S-0 (B-2): Jest dot-dir, rg, cat-file probes + baseline | Session | 3.5 | — | I-2 confirmed by Jest; rg claim corrected; baseline 94 s |
+| 2026-10-05 18:14–18:24 | Step 1 (B-2): agents and schemas — STOPPED on 2 assertions | 04 backend-builder | 10.3 | — | 68 tool calls; 1325 tests, 2 failing pending operator decision |
+| 2026-10-05 18:39–19:03 | Step 2 (B-2): git extraction + measurement | 04 backend-builder + session check | 18.6 + 2 | — | 46 tool calls; 1361 tests (+36); suite 85 → 101 s |
+| 2026-10-05 19:05–19:16 | Step 3 (B-2): review-copy.ts + test-paths.ts | 04 backend-builder + session check | 9.8 + 2 | — | 29 tool calls; 1464 tests (+103) |
+| 2026-10-05 19:18–19:34 | Step 4 (B-2): state, verdict, gate input, AC-157 clause, D-B2-2 digest | 04 backend-builder + session check | 14 + 2 | — | 66 tool calls; 1574 tests (+110); suite 111 s |
+| 2026-10-05 19:36–19:54 | Step 5 (B-2): per-call cwd + follow-up/skeptic prompts | 04 backend-builder + session check | 7.4 + 2 | — | 41 tool calls; 1598 tests (+24) |
+| 2026-10-05 19:56–20:31 | Step 6 (B-2): verification() core — STOPPED on 1 unlisted assertion | 04 backend-builder | 35 | — | 96 tool calls; 1627 tests, 1 failing pending operator |
+| 2026-10-05 | D-B2-3 applied + step 6 session check | 04 backend-builder + session | 2 + 2 | — | 1627 tests, all green |
+| 2026-10-05 21:22–21:59 | Step 7 (B-2): follow-up, merge, skeptics, verdict, CP3 | 04 backend-builder + session check | 24.7 + 3 | — | 97 tool calls; 1673 tests (+46) |
+| 2026-10-06 07:20–07:29 | Step 8a (B-2, D-B2-4): mode-neutral shared contracts | 04 backend-builder + session check | 5.3 + 2 | — | 1677 tests (+4); first 8a run interrupted 10-05 22:09 after writing RED tests only |
+| 2026-10-06 07:31–07:42 | Step 8b (B-2): docs | 04 backend-builder + session check | 8 + 2 | — | 53 tool calls; 1679 tests (+2). BUILD COMPLETE (8 steps + 8a) |
+| 2026-10-06 08:05–08:12 | 08 contract wording fix + S-1 live smoke (PASS, $1.42) + S-2 | Session | 7 | — | BUILD COMPLETE for PR B-2 |
+| 2026-10-06 08:22–08:34 | Validator (B-2, on the read-only copy, ∥ TV) | 07 validator | 12 | — | 76 tool calls; FAIL: 1 CRITICAL / 4 IMPORTANT / 8 MINOR; 28 doc claims, 24 true |
+| 2026-10-06 08:23–10:05 | Test Verifier (B-2, real tree, ∥ Validator) | 06 test-verifier | 102 | — | 166 mutants: 145 caught, 17 killed by 17 gap tests, 4 equivalent; 0 defects; 1696 tests |
+| 2026-10-06 10:08–10:14 | Follow-up review of the B-2 gap tests | 07 validator (scoped) | 5.5 | — | 17 tests kill their mutants; 3 FOLLOWUP-IMPORTANT, 8 MINOR; PASS |
+| 2026-10-06 10:33–11:11 | CP3 fix round part 1 (code) + session check | 04 backend-builder + session | 35 + 3 | — | 127 tool calls; 1744 tests (+48) |
+| 2026-10-06 11:11–11:30 | CP3 fix round part 2 (tests/docs) + session check | 04 backend-builder + session | 17 + 2.5 | — | 74 tool calls; 1744 tests |
+| 2026-10-06 11:31–11:39 | Re-check of the B-2 fix round | 07 validator (scoped) | 7.2 | — | 23/23 RESOLVED, MINOR-7 deferred; 3 NEW-MINOR; PASS |
+| 2026-10-06 11:45 | NEW-MINOR-1/2 text fixes + D-B2-5 ratification | Session | 3 | — | prompt + comment only |

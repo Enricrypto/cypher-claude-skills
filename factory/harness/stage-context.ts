@@ -25,6 +25,7 @@ import { existsSync, readFileSync, readdirSync, statSync } from 'fs';
 import { basename, isAbsolute, join, relative, resolve, sep } from 'path';
 
 import { ExecutionMeasurement, Stage4Metadata, StageContext } from './stage-gates';
+import type { ValidationVerdict } from './state-tracker';
 import { evaluateSecurityChecks } from './security-checks';
 import { HARNESS_RENDERED_ARTIFACTS } from './harness-documents';
 import { MAX_BUILDER_ATTEMPTS } from './loop-rules';
@@ -42,6 +43,8 @@ import {
   FrontendBuilderOutput,
   TestVerifierOutput,
   ValidatorOutput,
+  ValidatorFollowupOutput,
+  SkepticOutput,
   FeatureConsolidatorOutput
 } from './agent-output-schema';
 
@@ -53,6 +56,10 @@ export interface StageOutputs {
   frontend?: FrontendBuilderOutput;
   test?: TestVerifierOutput;
   validator?: ValidatorOutput;
+  /** The follow-up review of the Test Verifier's files (PR B-2): its own slot, never `validator`. */
+  validatorFollowup?: ValidatorFollowupOutput;
+  /** Transient: one skeptic output, set only to persist its document. Skeptics have no step (D-7). */
+  skeptic?: SkepticOutput;
   consolidator?: FeatureConsolidatorOutput;
 }
 
@@ -74,9 +81,15 @@ export interface BuildStageContextInput {
   artifactDir?: string;
   /**
    * What the HARNESS measured, passed by the orchestrator and never by an agent (D-5): the latest
-   * Gate 2 measurement and the regression reference it is judged against.
+   * Gate 2 measurement and the regression reference it is judged against, and (PR B-2) the
+   * validation verdict after the skeptics.
    */
-  harness?: { execution?: ExecutionMeasurement; regressionReferenceCount?: number };
+  harness?: {
+    execution?: ExecutionMeasurement;
+    regressionReferenceCount?: number;
+    /** PR B-2 (D-12, AC-131): the typed validation verdict the Stage 4 gate reads. */
+    validation?: ValidationVerdict;
+  };
 }
 
 /**
@@ -161,6 +174,8 @@ const HARNESS_PERSISTED_AGENTS = new Set([
   '02-story-writer',
   '03-spec-writer',
   '07-validator',
+  '07b-validator-followup',
+  '07c-validator-skeptic',
   '08-feature-consolidator'
 ]);
 
@@ -457,9 +472,6 @@ export function buildStageContext(input: BuildStageContextInput): StageContext {
   if (outputs.validator) {
     const details = outputs.validator.details;
 
-    stage4.criticalIssuesCount =
-      details.issues?.filter(issue => issue.severity === 'CRITICAL').length ?? 0;
-
     // Tri-state, judged against the brief's declared surface (AC-67, AC-68). A false check, an
     // unearned "not_applicable", a missing check and every listed issue each count as one.
     const security = evaluateSecurityChecks(details.security, outputs.spec?.details.securitySurface);
@@ -473,6 +485,17 @@ export function buildStageContext(input: BuildStageContextInput): StageContext {
   // Harness-side: the orchestrator's Gate 2 measurement and the reference it is judged against.
   stage4.executionMeasurement = input.harness?.execution;
   stage4.regressionReferenceCount = input.harness?.regressionReferenceCount;
+
+  // "Validation Passed" reads the harness's typed verdict (D-12, AC-131), never a count from the
+  // raw issue list: a CRITICAL both skeptics disproved is still in that list.
+  const validation = input.harness?.validation;
+  if (validation) {
+    stage4.validationVerdict = {
+      passed: validation.passed,
+      standing: validation.standing.length,
+      disproved: validation.disproved.length
+    };
+  }
 
   for (const [key, value] of Object.entries(stage4)) {
     if (value !== undefined) metadata[key] = value;

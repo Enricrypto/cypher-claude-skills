@@ -958,8 +958,8 @@ describe('AC-75 rework after a rejection', () => {
     });
 
     expect(state.completionStatus).toBe('SUCCESS');
-    // I-10 order: rework builders → Gate 1 (→ Stage 3 gate) → Gate 1.5 → Test Verifier → Gate 2 → Validator → (Stage 4 gate) → CP3.
-    expect(run.events).toEqual(['04-backend-builder', 'gate-1', 'gate-1.5', '06-test-verifier', 'gate-2', '07-validator', 'CP3']);
+    // I-10 order: rework builders → Gate 1 (→ Stage 3 gate) → Gate 1.5 → Test Verifier ∥ Validator → Gate 2 → (Stage 4 gate) → CP3.
+    expect(run.events).toEqual(['04-backend-builder', 'gate-1', 'gate-1.5', '06-test-verifier', '07-validator', 'gate-2', 'CP3']);
 
     const supersededDir = join(runDir, '_superseded', '1');
     expect(readdirSync(supersededDir).sort()).toEqual(['TEST_REPORT.md', 'VALIDATION_REPORT.md']);

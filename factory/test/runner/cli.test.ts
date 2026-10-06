@@ -38,6 +38,7 @@ import {
   passingScript,
   scriptedInvoker,
   seedRun,
+  removeTmpReviewCopies,
   tempProject,
   TempProject
 } from '../fixtures/harness-run';
@@ -813,6 +814,7 @@ describe('D-11 exit codes and next-step hints', () => {
     ];
 
     for (const [label, start, extra, message] of cases) {
+      removeTmpReviewCopies(project.dir);
       rmSync(join(project.dir, '.factory'), { recursive: true, force: true });
       const id = await start();
       const before = stateBytes(id);

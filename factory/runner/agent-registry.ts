@@ -20,6 +20,8 @@ export type FeatureFactoryAgent =
   | '05-frontend-builder'
   | '06-test-verifier'
   | '07-validator'
+  | '07b-validator-followup'
+  | '07c-validator-skeptic'
   | '08-feature-consolidator';
 
 export const AGENT_STAGE: Record<FeatureFactoryAgent, 1 | 2 | 3 | 4 | 5> = {
@@ -30,6 +32,8 @@ export const AGENT_STAGE: Record<FeatureFactoryAgent, 1 | 2 | 3 | 4 | 5> = {
   '05-frontend-builder': 3,
   '06-test-verifier': 4,
   '07-validator': 4,
+  '07b-validator-followup': 4,
+  '07c-validator-skeptic': 4,
   '08-feature-consolidator': 5
 };
 
@@ -42,6 +46,10 @@ export const AGENT_TOOLS: Record<FeatureFactoryAgent, string[]> = {
   '05-frontend-builder': ['Read', 'Write', 'Edit', 'Bash'],
   '06-test-verifier': ['Read', 'Write', 'Edit', 'Bash'],
   '07-validator': ['Read', 'Grep', 'Glob'],
+  // The follow-up and the skeptics review what a reviewer reviewed, with exactly its read-only
+  // tools (AC-132): a skeptic that could edit the tree could make the issue it judges disappear.
+  '07b-validator-followup': ['Read', 'Grep', 'Glob'],
+  '07c-validator-skeptic': ['Read', 'Grep', 'Glob'],
   '08-feature-consolidator': ['Read', 'Grep']
 };
 
@@ -90,6 +98,12 @@ export const AGENT_COST: Record<FeatureFactoryAgent, AgentCost> = {
   // CRITICAL is the failure this whole chain exists to prevent — but no writing, so fewer turns.
   '07-validator': { model: 'claude-opus-5', effort: 'high', maxTurns: 25 },
 
+  // The follow-up reviews only the test files the Test Verifier changed; a skeptic judges one
+  // CRITICAL issue. Narrower jobs than the Validator's, so fewer turns, but the same model and
+  // effort: a wrong DISPROVED drops a real CRITICAL to IMPORTANT.
+  '07b-validator-followup': { model: 'claude-opus-5', effort: 'high', maxTurns: 20 },
+  '07c-validator-skeptic': { model: 'claude-opus-5', effort: 'high', maxTurns: 15 },
+
   // Reads memories after the fact and extracts patterns. Nothing depends on it within the run.
   '08-feature-consolidator': { model: 'claude-haiku-4-5-20251001', effort: 'low', maxTurns: 15 }
 };
@@ -119,8 +133,31 @@ export const REQUIRED_ARTIFACTS: Record<FeatureFactoryAgent, string[]> = {
   // Stage 4 requires it. The Validator is read-only, so it returns the text and the harness
   // writes it into the run directory.
   '07-validator': ['VALIDATION_REPORT.md'],
+  // Their own documents, never VALIDATION_REPORT.md: a follow-up must not overwrite the main
+  // report (D-5). The harness renames each skeptic document per issue and instance (D-6).
+  '07b-validator-followup': ['VALIDATION_FOLLOWUP.md'],
+  '07c-validator-skeptic': ['SKEPTIC_REVIEW.md'],
   '08-feature-consolidator': ['CONSOLIDATION_REPORT.md', 'PATTERNS.md']
 };
+
+/**
+ * Required documents that no gate reads (PR B-2, I-22): the follow-up's review is presented at
+ * CHECKPOINT 3 beside the Validator's report, and each skeptic's document is kept as the evidence
+ * for its verdict. The Stage 4 gate reads the typed verdict instead.
+ */
+export const REVIEW_DOCUMENTS: readonly string[] = Object.freeze([
+  ...REQUIRED_ARTIFACTS['07b-validator-followup'],
+  ...REQUIRED_ARTIFACTS['07c-validator-skeptic']
+]);
+
+/**
+ * Whether every document `agent` must return is a review document: no gate reads any of them, so
+ * neither its output contract nor its output schema may say a gate looks them up.
+ */
+export function returnsOnlyReviewDocuments(agent: FeatureFactoryAgent): boolean {
+  const required = REQUIRED_ARTIFACTS[agent];
+  return required.length > 0 && required.every(name => REVIEW_DOCUMENTS.includes(name));
+}
 
 /** Mutating tools. Explicitly denied to any agent whose grant omits them. */
 const MUTATING_TOOLS = ['Write', 'Edit', 'Bash', 'NotebookEdit'];

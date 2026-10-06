@@ -1,8 +1,8 @@
 # Feature Factory
 
-An 8-agent chain that takes a feature description to tested, validated code, behind gates that
+A 10-agent chain that takes a feature description to tested, validated code, behind gates that
 are code rather than prose. This document describes what the program does in this version
-(Phase B, PR B-1). Where the code and this file disagree, the code is right and this file is a
+(Phase B, PR B-2). Where the code and this file disagree, the code is right and this file is a
 bug: `factory/test/contracts/doc-drift.test.ts` checks the claims below against the code. What
 comes next is in [docs/ROADMAP.md](../../docs/ROADMAP.md).
 
@@ -19,8 +19,11 @@ npm run factory -- --feature "add an endpoint to update a user's email" --cwd /p
 `factory/runner/cli.ts` parses the flags and calls the library: `runFeatureFactory` in
 `factory/feature/workflows/feature-factory-orchestrator.ts` runs Stages 1 to 4, the gates and the
 three checkpoints. Agents run through the Claude Agent SDK with the tool grants in
-`factory/runner/agent-registry.ts`; each agent's system prompt is its contract file in
-`factory/feature/agents/`.
+`factory/runner/agent-registry.ts`. Each agent's system prompt is its contract file in
+`factory/feature/agents/`, followed by the program's output contract (`outputContract` in
+`factory/runner/invoke-agent.ts`). The program also sends a per-run prompt
+(`factory/harness/agent-prompts.ts`): the feature, the paths of this run's upstream documents,
+and the rules that hold only in the program (D-B2-4; see below).
 
 ### 2. By hand, in a session
 
@@ -98,6 +101,8 @@ presented text, before this terminal escaping.
 | 05 | `05-frontend-builder.md` | 3 Execute | Read, Write, Edit, Bash | Yes |
 | 06 | `06-test-verifier.md` | 4 Verify | Read, Write, Edit, Bash | Yes (tests) |
 | 07 | `07-validator.md` | 4 Verify | Read, Grep, Glob | No |
+| 07b | `07b-validator-followup.md` | 4 Verify | Read, Grep, Glob | No |
+| 07c | `07c-validator-skeptic.md` | 4 Verify | Read, Grep, Glob | No |
 | 08 | `08-feature-consolidator.md` | 5 Deliver | Read, Grep | No |
 
 Other files in `factory/feature/agents/` (the audit and remediation agents) are not part of this
@@ -114,9 +119,13 @@ Feature description
            05 Frontend Builder (up to 3 attempts; only if the brief calls for UI)
            Gate 1 (materialization) ................. Stage 3 gate
   Stage 4  Gate 1.5 (infrastructure)
-           06 Test Verifier
+           06 Test Verifier (real tree)  ∥  07 Validator (read-only copy of stage3-<n>)
            Gate 2 (execution)
-           07 Validator  ── CRITICAL issue on a builder's file → validator round (max 2)
+           07b Follow-up (only if 06 changed test files)
+           merge of both reviews
+           07c Skeptics A and B together, per CRITICAL issue
+           standing CRITICAL issue on a builder's file → validator round (max 2):
+             builder fix, Gate 1, Stage 3 gate, Gate 1.5, Gate 2, 07 alone on a fresh copy, 07c
            Stage 4 gate
            ⏸ CHECKPOINT 3: Approve the validated change
   SUCCESS  .factory/baseline.json written
@@ -130,11 +139,15 @@ Those objects are its own snapshots (see [Snapshots after Stage 3](#snapshots-af
 What happens to an approved change next (a commit on your branch, a push, a review) is yours to
 do; the factory does none of it.
 
-Builders are told to run only the tests related to their change; that is an instruction, not
-enforced, and nothing checks which tests a builder ran. Gate 2's full suite is the enforcement.
-Builders are told never to commit, push, switch branches or write under `.git/` or `.factory/`.
-That too is an instruction; the HEAD check before each snapshot detects a commit or a branch
-switch (`HEAD_MOVED`).
+The program's builder prompt (`builderPrompt` in `factory/harness/agent-prompts.ts`) tells builders
+to run only the tests related to their change; that is an instruction, not enforced, and nothing
+checks which tests a builder ran. Gate 2's full suite is the enforcement. The same prompt tells
+builders never to commit, push, switch branches or write under `.git/` or `.factory/`, because the
+harness snapshots their work itself. That too is an instruction; the HEAD check before each
+snapshot detects a commit or a branch switch (`HEAD_MOVED`). These rules live only in the
+program's prompts, as do the Test Verifier's test-path rule (`testVerifierPrompt`) and the main
+Validator's review copy (`validatorPrompt`): contracts 04 to 07 are shared with by-hand runs,
+where builders may commit per step and there is no snapshot, review copy or Gate 2 (D-B2-4).
 
 Any agent from 01 to 05 that returns `ESCALATE` (01 to 03 also on `FAIL`) is believed: the run
 escalates. Any output that fails its schema escalates, except a builder's, which is retried.
@@ -149,7 +162,7 @@ The orchestrator exports `CHECKPOINTS`; there are three.
 |---|---|---|
 | CHECKPOINT 1: Approve the story | After the story passes its part of the Stage 2 gate, before the Spec Writer runs. | The full `USER_STORY.md`. |
 | CHECKPOINT 2: Approve the technical brief | After the brief passes its part of the Stage 2 gate, before any builder runs. | The full `TECHNICAL_BRIEF.md`, then the full `FILE_LIST.md`. |
-| CHECKPOINT 3: Approve the validated change | After the Stage 4 gate passes. Approving it ends the run SUCCESS. | The full `VALIDATION_REPORT.md`, every IMPORTANT finding the run recorded, and the change (below). |
+| CHECKPOINT 3: Approve the validated change | After the Stage 4 gate passes. Approving it ends the run SUCCESS. | The full `VALIDATION_REPORT.md`, then the full `VALIDATION_FOLLOWUP.md` when the follow-up reviewed files, every IMPORTANT finding the run recorded, and the change (below). |
 
 A checkpoint presents whole documents, never an agent's summary of them, and an approval is
 recorded, and saved before the next agent runs, with the SHA-256 of the exact text presented. A
@@ -157,8 +170,8 @@ document that cannot be presented (missing, empty, a symlink) escalates the run 
 anyone. A story or brief that fails its part of the Stage 2 gate is never presented.
 
 **Invisible characters in what is presented.** A checkpoint is built from parts: its documents
-(`USER_STORY.md`, `TECHNICAL_BRIEF.md`, `FILE_LIST.md`, `VALIDATION_REPORT.md`) and, at
-CHECKPOINT 3, `the IMPORTANT findings`, `the snapshot notes` and `the change`. When no part holds
+(`USER_STORY.md`, `TECHNICAL_BRIEF.md`, `FILE_LIST.md`, `VALIDATION_REPORT.md`,
+`VALIDATION_FOLLOWUP.md`) and, at CHECKPOINT 3, `the IMPORTANT findings`, `the snapshot notes` and `the change`. When no part holds
 a character of the shared set (see
 [Invisible and direction-control characters](#invisible-and-direction-control-characters)), the
 text is exactly what it was before PR B-1. When any part does, the presentation starts with a
@@ -209,8 +222,16 @@ uncommitted when the run started appear too. An untracked file is listed with it
 SHA-256, and its text is shown unless it is binary or larger than 256 KiB. Outside a git work
 tree the change is instead a manifest of the files the builders claimed, labelled as not a git
 diff. The harness runs exactly these git subcommands and no others: the reads `rev-parse`, `diff`
-and `ls-files`, and the snapshot writes `add`, `write-tree`, `commit-tree` and `update-ref`
-(below), all from one function in `factory/harness/change-diff.ts`.
+and `ls-files`; the snapshot writes `add`, `write-tree`, `commit-tree` and `update-ref` (below);
+and the extraction of the Validator's review copy, `ls-tree` and `cat-file` (see
+[Verification in Stage 4](#verification-in-stage-4)), all from one function in
+`factory/harness/change-diff.ts`. Measuring what the Test Verifier changed runs `diff` with
+`diff.relative` set to false on the call itself, so that a repository's `diff.relative` setting
+cannot narrow it. That setting exists only in git ≥ 2.28; an older git ignores it and has nothing
+to narrow with, so the harness needs no minimum git version. The tree the Test Verifier is
+measured against, and the tree of the working tree it is compared with, are written the way a
+snapshot's tree is, with `add` and `write-tree` in a temporary index: git objects only, no commit
+and no ref.
 
 ### Snapshots after Stage 3
 
@@ -227,8 +248,9 @@ commit at `refs/factory/<id>/stage3-<n>`, with `n` counting from 1 in each run.
   temporary index in its own temporary directory outside the repository, never `.git/index`;
   `commit-tree` makes the commit and a compare-and-swap `update-ref` moves the ref. Every git call
   runs with hooks off (`core.hooksPath=/dev/null`, which a repository's own `core.hooksPath`
-  cannot override), no signing, no reflog and stdin closed, so no hook runs and nothing waits for
-  input. The author and committer are the harness's own identity,
+  cannot override), no signing and no reflog, so no hook runs. Nothing waits for input: stdin is
+  closed, except for the review copy's `cat-file` batch requests, which are written to it before
+  it is closed. The author and committer are the harness's own identity,
   `Feature Factory <feature-factory@localhost.invalid>`, so no git identity needs to be configured.
   Filter drivers (git-lfs, say) do run during `add`, as they do during the CHECKPOINT 3 `git diff`:
   an accepted risk (A-2 MINOR-3 in [docs/ROADMAP.md](../../docs/ROADMAP.md)). A huge non-ignored tree
@@ -238,14 +260,14 @@ commit at `refs/factory/<id>/stage3-<n>`, with `n` counting from 1 in each run.
 - **Idempotent on resume:** a gate re-evaluated in the same phase (Stage 3, validator round r or
   rework r) reuses that phase's `n`. An unchanged tree with the same parent reuses the existing
   commit; a changed tree replaces the ref. Only a different phase takes the next `n`. A CHECKPOINT 3
-  rework is the exception once the run has moved past its gate: when a `06-test-verifier` or
-  `07-validator` invocation that started, or a Gate 2 record, exists at or after the time of the
-  rework's snapshot, a resume does not re-run the rework's Stage 3 gate and keeps `stage3-<k>` as
-  it is. Before that, including a kill right after the ref write, the gate is evaluated again as
-  above. Known limit: an invocation is recorded only when it returns, so a crash or API error
-  during the Test Verifier leaves no record, and a resume re-takes the rework snapshot with the
-  Test Verifier's partial writes in it. PR B-2 closes this
-  ([docs/ROADMAP.md](../../docs/ROADMAP.md)).
+  rework is the exception once the run has moved past its gate: when a verification evaluation
+  started, a Stage 4 agent invocation (06, 07, 07b or 07c) started, or a Gate 2 record exists at
+  or after the time of the rework's snapshot, a resume does not re-run the rework's Stage 3 gate
+  and keeps `stage3-<k>` as it is. The evaluation's start is saved before the Test Verifier is
+  invoked, so a kill, a crash or an API error during the Test Verifier leaves it: the resume keeps
+  `stage3-<k>`, makes no snapshot for that phase, and extracts the Validator's copy from
+  `stage3-<k>`, which holds none of the Test Verifier's partial writes (AC-157). Before that (a
+  kill right after the ref write, or in Gate 1.5) the gate is evaluated again as above.
 - **Local:** refs under `refs/factory/` are not pushed by a normal push (a mirror push would push
   them). A snapshot holds every non-ignored file, so a stray `.env` that is not in `.gitignore`
   ends up in a local git object, just as it already appears in the CHECKPOINT 3 change.
@@ -270,6 +292,152 @@ commit at `refs/factory/<id>/stage3-<n>`, with `n` counting from 1 in each run.
   run started:" with the list, nothing when there were none, or, for a run started before PR B-1,
   which did not record them, that it is unknown. A run with no snapshot record shows no such
   section.
+
+### Verification in Stage 4
+
+Stage 4 is a sequence of **evaluations**. An evaluation is one main-Validator review with
+everything that hangs off it: its read-only copy, the Validator's output, in a first pass the
+Test Verifier's run, the measurement of what it changed and the follow-up, then the skeptics'
+verdicts and the decision. Each is recorded in `state.json` under `validatorEvaluations`, keyed by
+the CHECKPOINT 3 rework cycle (0 before any rework) and the validator round, and numbered `e` from
+1 across the run. The code is the orchestrator's `validatorLoop`, with
+`factory/harness/verification.ts` (the merge and the verdict), `review-copy.ts` (the copy) and
+`test-paths.ts` (the test-path rule).
+
+- **Which kind.** A *first pass* runs the Test Verifier (while it has no PASS) and the Validator
+  in parallel, then Gate 2.
+  A *validator round* runs Gate 2, then the Validator alone. The next evaluation's kind is, in
+  this order: the kind of the open evaluation of the same cycle and round, when one is being
+  continued; a first pass while the Test Verifier has no PASS (a fresh Stage 4, a CHECKPOINT 3
+  rework, or after a Stage 4 gate failure invalidated it); a validator round after a round's
+  builder fix, or once this cycle's first pass was decided; otherwise a first pass.
+- **The start is saved first.** An evaluation's start is saved before its copy is made and before
+  any of its agents is invoked. It is the "verification started" marker that keeps a CHECKPOINT 3
+  rework's snapshot after a kill, a crash or an API error during the Test Verifier (AC-157; see
+  [Snapshots after Stage 3](#snapshots-after-stage-3)).
+- **The review copy.** The main Validator never reviews the live project, where the Test Verifier
+  may be writing tests at the same moment. It reviews a read-only copy of the latest Stage 3
+  snapshot (`stage3-<n>`, the current phase's), extracted with `ls-tree` and `cat-file` (in batch mode),
+  each blob checked against its object id: never `git archive`, and never a git worktree. The copy
+  is its working directory, and the file paths it reports are mapped back to project paths.
+  - **Where, and why:** outside the project, in a new owner-only directory
+    `factory-review-<id>-e<e>-XXXXXX` under the OS temp directory (its realpath). A copy inside the
+    project would be collected by the project's test runner (Jest collects tests under a
+    dot-directory such as `.factory/`) in Gate 2, in the Test Verifier's runs and in your own
+    `npm test`. The snapshot ref is the
+    durable record; the copy is a view of it. `reviewRoot` in the orchestrator's options moves it,
+    for tests only.
+  - **Owner-only and read-only:** the directory is created 0700, then sealed: files 0400 (0500 if
+    executable) and directories 0500, the copy's root included. No group or other user can read
+    it, which matters because a copy made without a snapshot can hold a gitignored secret. The
+    seal is defence in depth against writes; the enforcement is the Validator's read-only tool
+    grant. The review root must be outside the project (otherwise the run escalates
+    `REVIEW_COPY_FAILED` before anything is created).
+  - **Checked before reuse:** the copy is recorded with its leaf count and a digest (sha256 of its
+    sorted leaf paths and types, not their contents), taken when it is made. It is reused only
+    while both still match. Otherwise (the OS cleaned its temp directory, a resume on another day)
+    it is re-extracted, into a new directory, from the same recorded snapshot.
+  - **Never deleted by the harness:** copies accumulate in the temp directory (a backlog item in
+    [docs/ROADMAP.md](../../docs/ROADMAP.md)).
+  - **No snapshot** (outside a git work tree, or a run started before PR B-1): the copy is a copy
+    of the working tree, made before the Test Verifier is invoked. It skips the top-level
+    `.factory` and every `.git` and `node_modules` at any depth, and recreates symlinks without
+    following them. It is also the baseline the Test Verifier is measured against. If it is lost
+    once the Test Verifier was invoked in its evaluation, or once the evaluation's measurement
+    baseline was recorded, it cannot be made again (the tree may now hold the Test Verifier's
+    writes), and the run escalates `REVIEW_COPY_FAILED`.
+  - **Gate 1:** a builder claim inside any recorded copy, including one a re-extraction replaced,
+    escalates `HALLUCINATION_DETECTED`. The copy is outside the project, so it is never in the
+    CHECKPOINT 3 change.
+- **In parallel, then decided in a fixed order (a first pass).** The Gate 2 reference is read
+  first, so a corrupt `.factory/baseline.json` escalates before any agent runs. The copy is made
+  or reused, and the Test Verifier's measurement baseline is recorded before it is invoked (see
+  the test-path rule). The Test Verifier (in the project, while it has no PASS) and the Validator
+  (in the copy) then start together, and the harness waits for both to settle, so no agent is left
+  running. What the Test Verifier changed is then measured, whatever either of them returned (a
+  failed verdict, a schema failure, a throw), so a write outside a test path escalates in the
+  evaluation that made it. Then, in order: a thrown invocation goes to the outer catch (the Test
+  Verifier's first); the Test Verifier's schema failure, then its failed verdict; the Validator's
+  schema failure; Gate 2 runs.
+- **The test-path rule.** What the Test Verifier changed is measured against a baseline that is
+  recorded in `state.json` before it is invoked in the evaluation. With a snapshot, the baseline
+  is the tree id of the working tree at that moment (the change tracker's `workingTreeId`), and
+  git's `diff` compares it with a tree of the working tree as it is now. Without one, it is the
+  evaluation's copy of the working tree, compared file by file. So a hand fix made between an
+  escalation and the resume is not blamed on the Test Verifier. The measurement runs before
+  Gate 2, so Gate 2's own writes are not counted either.
+  - **Carried over:** an earlier first pass of the same CHECKPOINT 3 cycle whose measurement did
+    not clear (it failed, or it found a change outside a test path and the run escalated) passes
+    its baseline on to the next first pass, also when the Test Verifier does not run again. The
+    earlier run's writes are measured again, so they stay flagged until they are reverted, even
+    where a new copy of the working tree would already hold them. Any other change made since
+    that baseline is flagged too, a hand fix included, until it is reverted.
+  - **Cleared:** a first pass whose Test Verifier does not run (it already passed) finds nothing
+    new once an earlier first pass of the cycle cleared. A run whose Test Verifier passed before
+    baselines were recorded is measured against the tree the Validator reviewed.
+
+  A path is a test path, compared in lower case, when a directory in it is
+  `test`, `tests`, `__tests__`, `spec`, `specs`, `__snapshots__` or `__mocks__`, or its file name
+  matches `*.test.*`, `*.spec.*`, `*.e2e.*`, `*.e2e-spec.*`, `*_test.*`, `test_*.py` or `*.snap`
+  (`e2e/` alone is not). Deletions count. A change outside a test path escalates
+  `CRITICAL_ISSUE`, naming the files. A measurement that fails, or a baseline tree id git cannot
+  give (before the Test Verifier runs), escalates `REVIEW_COPY_FAILED`. The rule is in the Test
+  Verifier's program prompt only: by hand nothing measures it.
+- **The main Validator's verdict on itself.** Its ESCALATE is believed, and a FAIL or LOOP_BACK
+  with no CRITICAL issue of its own escalates, as before; both are checked before the follow-up.
+- **The follow-up** (`07b-validator-followup`, read-only, first pass only). When the Test Verifier
+  changed test files in this CHECKPOINT 3 cycle, the follow-up reviewer reviews exactly those
+  files, in the project, with the test report; a deleted file is named as deleted. They are the
+  test files every first pass of the cycle so far measured, each once, in order, so a later first
+  pass still reviews what an earlier Test Verifier run wrote. Its `VALIDATION_FOLLOWUP.md` sits
+  beside `VALIDATION_REPORT.md` and never replaces it. When the Test Verifier changed no file, the
+  follow-up is recorded as skipped with the reason "the Test Verifier changed no file". A schema
+  failure escalates `SCHEMA_VALIDATION`; its ESCALATE is recorded as its step ESCALATED and
+  escalates `CRITICAL_ISSUE`. A `filesReviewed` list that differs from the files it was given is
+  one IMPORTANT finding, not a block. A validator round never runs the follow-up.
+- **The merge.** The main Validator's issues come first, their paths mapped out of its copy, then
+  the follow-up's; an exact duplicate is dropped and the main one wins. Each issue gets a key from
+  its content and the review that reported it. Routing, the Stage 4 gate and CHECKPOINT 3 all use
+  this merged list, and its IMPORTANT issues are recorded once, each under its review's source.
+  Then a follow-up FAIL or LOOP_BACK with no CRITICAL issue of its own escalates. An issue that
+  names the copy's root itself keeps its absolute path, so it routes to no builder and the run
+  escalates.
+- **The skeptics** (`07c-validator-skeptic`, read-only, two instances: skeptic A and skeptic B).
+  Every merged CRITICAL issue, in merged order, goes to both, started together (A first), so
+  neither is started after the other's verdict is on record; IMPORTANT and MINOR issues never go.
+  Each reads the tree its issue's reviewer read (the copy for a main-Validator issue, the project
+  for a follow-up issue), with the story and the brief. Its prompt holds the issue and its key,
+  never a verdict, and tells it not to read the run's `state.json` or any `SKEPTIC_*` document.
+  That is an instruction: nothing stops a read-only agent from reading a file it can name. A
+  skeptic defaults to UPHELD and returns DISPROVED only with file:line evidence. Each verdict is
+  recorded as it returns: its document saved as `SKEPTIC_E<e>_<issueKey>_<A|B>.md`, the verdict
+  committed. The harness waits for both, so no skeptic is left running, and then, A before B, a
+  thrown invocation goes to the outer catch, a schema failure or a wrong echoed key escalates
+  `SCHEMA_VALIDATION`, and any status other than PASS `CRITICAL_ISSUE`. When one of them fails,
+  the other still completes and its verdict is recorded, but the issue is not disproved. An issue
+  is disproved only when both returned DISPROVED. It then becomes one IMPORTANT finding, source `07c-validator-skeptic`
+  ("CRITICAL disproved by both skeptics (kept as IMPORTANT): <issue> | skeptic A: <reason> |
+  skeptic B: <reason>"), shown at CHECKPOINT 3, never routed and never dropped. Skeptics run in
+  every evaluation, first pass and validator round.
+- **The decision.** Each evaluation is decided with a typed verdict: passed exactly when no
+  CRITICAL issue stands, with the keys of the standing and the disproved issues. Passed: the
+  `07-validator` step is recorded PASS. Otherwise it is recorded FAIL, and the standing issues go
+  to the round bound (`MAX_LOOPS`) and the routing (an unroutable issue escalates), then a
+  validator round. The Stage 4 gate reads this verdict (see
+  [Stage 4 evidence](#stage-4-evidence-the-stage-4-gate)).
+- **CHECKPOINT 3** shows `VALIDATION_FOLLOWUP.md` after `VALIDATION_REPORT.md` when the run's
+  latest first pass reviewed files (that first pass's document is the one in the run directory,
+  since a CHECKPOINT 3 rework supersedes the old one). It is derived from `state.json` only, so
+  `--approve 3` and the resume check rebuild the same text. Without it the presentation is
+  byte-identical to PR B-1's, and a missing follow-up document escalates, as a missing report does.
+- **Only the schema-named document is saved** for 07b and 07c (`VALIDATION_FOLLOWUP.md`, and
+  `SKEPTIC_REVIEW.md` under its unique name); any other document they return is not written.
+- **`REVIEW_COPY_FAILED`** (CRITICAL): the copy could not be extracted, copied, re-made or
+  measured against; the escalation carries the error text, and a directory a failed attempt left
+  is removed. Fix the cause (disk space, permissions, the snapshot ref) and `--resume`.
+- **A re-extracted copy:** the directory it replaces stays on the evaluation's record. The main
+  Validator's absolute paths into it are still mapped to project paths (for the merge, the keys,
+  the routing and the findings), and Gate 1 still refuses a builder claim inside it.
 
 ---
 
@@ -320,8 +488,8 @@ closed (`--close <id>`) once before a new run can start.
 A plain `--resume <id>` of a run that ended on a rejection reopens it and starts the rework:
 - The rejected documents are moved, never deleted, into `.factory/<id>/_superseded/<n>/`, where
   `<n>` counts the run's rejections from 1: `USER_STORY.md` for CHECKPOINT 1, `TECHNICAL_BRIEF.md`
-  and `FILE_LIST.md` for CHECKPOINT 2, `TEST_REPORT.md` and `VALIDATION_REPORT.md` for
-  CHECKPOINT 3. A superseded document can never satisfy a gate.
+  and `FILE_LIST.md` for CHECKPOINT 2, `TEST_REPORT.md`, `VALIDATION_REPORT.md` and
+  `VALIDATION_FOLLOWUP.md` for CHECKPOINT 3 (the skeptics' documents have unique names and stay). A superseded document can never satisfy a gate.
 - **CHECKPOINT 1 or 2:** the Story Writer (or Spec Writer) runs again, briefed with the
   checkpoint, the notes and the path of the superseded document; then its gate, then the
   checkpoint again. Rejecting CHECKPOINT 2 keeps the CHECKPOINT 1 approval, which is hash-checked.
@@ -330,13 +498,12 @@ A plain `--resume <id>` of a run that ended on a rejection reopens it and starts
   document, and the run continues.
 - **CHECKPOINT 3:** the builders whose files are in the change (every builder that ran, if none
   is) run again, backend first, briefed with the notes, each with its own 3-attempt budget. Their
-  outputs are merged with the earlier ones. Then Gate 1, the Stage 3 gate, Gate 1.5, the Test
-  Verifier, Gate 2 and the Validator run again (validator rounds are not reset), then the Stage 4
-  gate, then CHECKPOINT 3 is presented again with a new hash. On a resume of the rework, its
-  Stage 3 gate and snapshot are kept, not re-run, once a Test Verifier or Validator invocation, or
-  a Gate 2 record, exists at or after the snapshot's time; before that (a kill after the ref write,
-  or before the Test Verifier) the gate is evaluated again. A crash or API error during the Test
-  Verifier records nothing, so a resume re-takes the rework snapshot; PR B-2 closes this.
+  outputs are merged with the earlier ones. Then Gate 1, the Stage 3 gate, Gate 1.5 and a new
+  first-pass verification on the rework's snapshot run (the Test Verifier, the Validator, the
+  follow-up and the skeptics run again; validator rounds are not reset), then the Stage 4 gate,
+  then CHECKPOINT 3 is presented again with a new hash. On a resume of the rework, its Stage 3
+  gate and snapshot are kept, not re-run, once its verification has started (AC-157, above); before
+  that (a kill after the ref write, or in Gate 1.5) the gate is evaluated again.
 
 ### Resuming
 
@@ -352,9 +519,10 @@ An archived run cannot be resumed (it is finished), and an unknown id is refused
   not yet approved. Once CHECKPOINT 1 or 2 is approved, its part of the Stage 2 gate is not run
   again: the approved-artifact hash check below takes its place. A gate failure invalidates the
   agent steps it judged (the Stage 1 gate the Researcher, the story gate the Story Writer, the spec
-  gate the Spec Writer, the Stage 4 gate the Test Verifier and Validator), so a resume re-runs
-  them. Only the Story Writer and Spec Writer re-runs are briefed with the gate's reason; the
-  Researcher, Test Verifier and Validator re-run without one. Builders are never invalidated.
+  gate the Spec Writer, the Stage 4 gate the Test Verifier, the Validator and the follow-up), so
+  a resume re-runs them. Only the Story Writer and Spec Writer re-runs are briefed with the gate's
+  reason; the Researcher, Test Verifier and Validator re-run without one. Builders are never
+  invalidated.
 - **Builder attempts come from state:** an attempt is counted before it starts, so one killed in
   flight is spent, and a run killed during its 2nd attempt gets exactly one more. A builder that
   exhausted its attempts is refused a plain resume; `--grant-attempts <n>` (1-3) gives exactly
@@ -364,12 +532,23 @@ An archived run cannot be resumed (it is finished), and an unknown id is refused
   stage 3; validator round r from one in stage 4, where r is the number of validator rounds the
   run completed, when that is at least 1. When nothing is inferred (stage 4 with no completed
   round), the run is not treated as out of attempts, as before.
-- An unfinished validator round re-enters at its builder fix, then re-runs its gates.
+- An unfinished validator round re-enters at its builder fix, then re-runs its gates. Its
+  builders are given the issues that still stood when the round was opened: the opening
+  evaluation's merged issues minus those both skeptics disproved, with the main Validator's paths
+  mapped out of that evaluation's copy.
+- **Verification resumes by evaluation** (see
+  [Verification in Stage 4](#verification-in-stage-4)). A kill leaves the evaluation open: the
+  resume continues it and runs only what it has not recorded (the Test Verifier without a PASS,
+  the Validator, the follow-up, each skeptic verdict), reusing the copy while it is intact. An
+  escalation closes every open evaluation, so the resume after it starts a new one and runs the
+  Validator again. Before closing, it records as findings the IMPORTANT issues of every open
+  evaluation that holds the main Validator's output (source `07-validator`, paths mapped, each
+  once), so they reach CHECKPOINT 3.
 - An ESCALATED run is reopened (IN_PROGRESS, the escalation marked resolved). A killed ACTIVE run
   just continues.
 - **Approved artifacts must be unchanged.** Every approved checkpoint is rebuilt and its hash
   compared before anything runs: `USER_STORY.md`, `TECHNICAL_BRIEF.md` and `FILE_LIST.md`, and for
-  an approved CHECKPOINT 3 its report, findings and the change as it is now. If any differs, the
+  an approved CHECKPOINT 3 its report (and follow-up), findings and the change as it is now. If any differs, the
   resume is refused with nothing written: nothing runs on a story, brief or change nobody
   approved. Restore it, or close the run.
 - A run whose CHECKPOINT 3 was approved writes the baseline and finishes SUCCESS without asking
@@ -410,8 +589,11 @@ then is the run finished SUCCESS; if the write fails, the run escalates, and a r
 and finishes.
 
 Every agent invocation is recorded in `state.json` as it completes, under `agentInvocations`
-(stage, agent, start, end, duration, and the builder phase, round and attempt), and added to
-`metrics.timePerStage`. The agent's step carries the same real start and end.
+(stage, agent, start, end, duration, the builder phase, round and attempt, and in Stage 4 the
+evaluation and the skeptic instance), and added to `metrics.timePerStage`. The agent's step
+carries the same real start and end. An invocation that throws (an SDK or API error) is recorded
+too, with `outcome: 'threw'` and the first line of the error (at most 500 characters), saved
+before the error escalates the run; with two agents running in parallel, both are on record.
 
 ---
 
@@ -446,7 +628,7 @@ any granted ones. Stage 5 is judged only by `--consolidate`, never inside a run.
 The claimed files are the builders' `filesModified` paths.
 1. Any claimed path inside `.factory/` is rejected outright, in any letter case (`.Factory/` too):
    only the harness writes there, so a builder cannot have written it. The run escalates
-   (`HALLUCINATION_DETECTED`).
+   (`HALLUCINATION_DETECTED`). So is any claimed path inside a recorded review copy.
 2. Every other claimed file must exist on disk as a regular file; a claimed directory counts as
    missing. Any missing file escalates. (Readability is reported, but only existence blocks.)
 
@@ -462,7 +644,7 @@ output.
   script; an `e2e/` directory without a `test:e2e` script; no `tsconfig.json`; strict mode off;
   no migrations directory; no `app/`, `components/` or `lib/` directory.
 
-### Gate 2: execution (after the Test Verifier, and every validator round)
+### Gate 2: execution (in a first pass after the Test Verifier and the Validator, and in every validator round before the Validator)
 
 `execution-gates.ts` runs the project's own scripts, one after another: `npm run build`,
 `npm run test`, `npm run dev`.
@@ -513,7 +695,11 @@ Every Gate 2 evaluation that completes, blocking or not, is recorded in
 - **Acceptance Tests Complete:** the Test Verifier's acceptance-criteria total must be above 0
   and equal the number of criteria in the approved story; every criterion must be tested or
   marked not coverable.
-- **Validation Passed:** the Validator reported no CRITICAL issue. No Validator output blocks.
+- **Validation Passed:** the typed verdict of the current cycle's latest decided evaluation (see
+  [Verification in Stage 4](#verification-in-stage-4)) passed: no CRITICAL issue stands. A CRITICAL
+  issue both skeptics disproved does not block, although it is still in the raw list. No verdict
+  blocks, and so does a cycle whose evaluations were never decided. A run whose Validator PASS was
+  recorded before PR B-2 has no evaluation, and is judged on its raw issue list: no CRITICAL issue.
 - **Security Audit Passed:** five checks (`authImplemented`, `inputValidated`,
   `noHardcodedSecrets`, `sqlInjectionProtected`, `xssProtected`), each `true`, `false` or
   `"not_applicable"`. `true` passes; `false` blocks. `"not_applicable"` passes only when the
@@ -558,15 +744,15 @@ attempt counts, it is never recorded as a pass, and the next attempt is briefed 
 own summary. A builder output that is not an object at all (`null`, say) is a schema failure and
 is retried the same way.
 
-**Validator rounds.** When the Validator reports CRITICAL issues and every one is pinned to a
-file a builder claimed, each issue goes to the builder that owns the file (a file both builders
-claimed goes to the frontend builder if it is a UI path, else the backend builder). If any issue
-is unroutable, the whole set escalates before any builder runs. In a round, the owning builder
-gets up to 3 attempts, briefed with the issues; its new output is merged with its earlier one;
-then Gate 1, the Stage 3 gate and Gate 1.5 re-run, and the loop returns to Gate 2 and the
-Validator. The run stays in Stage 4 throughout. If CRITICAL issues remain after 2 rounds, the run
-escalates `MAX_LOOPS`. Every Validator output's IMPORTANT issues are recorded as findings, each
-once.
+**Validator rounds.** When CRITICAL issues still stand after the skeptics and every one is pinned
+to a file a builder claimed, each issue goes to the builder that owns the file (a file both
+builders claimed goes to the frontend builder if it is a UI path, else the backend builder). If
+any issue is unroutable, the whole set escalates before any builder runs. In a round, the owning
+builder gets up to 3 attempts, briefed with the issues; its new output is merged with its earlier
+one; then Gate 1, the Stage 3 gate (with its snapshot) and Gate 1.5 re-run, and the loop returns
+to Gate 2 and the Validator, alone, on a fresh copy of the round's snapshot, then the skeptics. The
+run stays in Stage 4 throughout. If CRITICAL issues still stand after 2 rounds, the run escalates
+`MAX_LOOPS`. The IMPORTANT issues of the merged list are recorded as findings, each once.
 
 <!-- factory-claims -->
 ```json
@@ -579,6 +765,8 @@ once.
     "05-frontend-builder",
     "06-test-verifier",
     "07-validator",
+    "07b-validator-followup",
+    "07c-validator-skeptic",
     "08-feature-consolidator"
   ],
   "checkpoints": [1, 2, 3],
@@ -619,8 +807,10 @@ Each run has a directory, `<cwd>/.factory/<id>/`. It holds:
   snapshot and stage advance). A run that cannot save its record stops.
 - Documents written by read-only agents: they return the text and the harness writes it here:
   `RESEARCHER_REPORT.md`, `USER_STORY.md`, `TECHNICAL_BRIEF.md`, `FILE_LIST.md`,
-  `VALIDATION_REPORT.md`; and, after `--consolidate`, `CONSOLIDATION_REPORT.md` and `PATTERNS.md`.
-  Each must carry content, or the agent's output fails its schema.
+  `VALIDATION_REPORT.md`, `VALIDATION_FOLLOWUP.md` (the follow-up), one
+  `SKEPTIC_E<e>_<issueKey>_<A|B>.md` per skeptic invocation (the skeptic's `SKEPTIC_REVIEW.md`,
+  renamed so that nothing is overwritten); and, after `--consolidate`, `CONSOLIDATION_REPORT.md`
+  and `PATTERNS.md`. Each must carry content, or the agent's output fails its schema.
 - Documents the harness renders from structured output, each labelled "Harness-generated" on its
   first line and never a claimed file: `BACKEND_SUMMARY.md` and `API_CONTRACT.md` (from 04),
   `FRONTEND_SUMMARY.md` (from 05), `TEST_REPORT.md` (from 06). A resume renders them again from
@@ -643,8 +833,10 @@ Each prompt names, by absolute path, the upstream documents that exist in the ru
 | 04 | Researcher Report, User Story, Technical Brief, File List |
 | 05 | as 04, plus Backend Summary, API Contract |
 | 06 | as 05, plus Frontend Summary |
-| 07 | as 06, plus Test Report |
-| 08 | as 07, plus Validation Report, and the run's `state.json` for timings |
+| 07 | as 06 (it runs at the same time as 06) |
+| 07b | as 06, plus Test Report |
+| 07c | User Story, Technical Brief |
+| 08 | as 07b, plus Validation Report, and the run's `state.json` for timings |
 
 **Archive rule.** Every prompt says: do not read anything under `.factory/_archive/`, and ignore
 every other directory under `.factory/`; it belongs to an unrelated run. The one exception is
@@ -678,7 +870,9 @@ escaped under a warning banner (see [Checkpoints](#checkpoints)), and the termin
 ## Skill assignments
 
 These are the defaults for running the agents by hand. In program mode the SDK loads no user
-skills: each agent's prompt is its contract file only.
+skills: the system prompt is the contract file (plus the output contract), and the program adds a
+per-run prompt that carries the program-only rules (D-B2-4). The follow-up reviewer and the
+skeptic run only in the program, so they have no row here.
 
 **Loading rule (all agents and orchestrators):** skill files are often symlinks, and Glob /
 `find -type f` / `rg --files` skip symlinks, so a real skill can look missing. Load a skill ONLY

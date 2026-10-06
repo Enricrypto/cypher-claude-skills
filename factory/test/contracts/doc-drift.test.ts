@@ -19,7 +19,7 @@
 import { existsSync, readFileSync } from 'fs';
 import { dirname, join, resolve } from 'path';
 
-import { AGENT_STAGE } from '../../runner/agent-registry';
+import { AGENT_STAGE, AGENT_TOOLS } from '../../runner/agent-registry';
 import { CLI_FLAGS, EXIT_CODES, parseArgs } from '../../runner/cli';
 import {
   CHECKPOINTS,
@@ -109,7 +109,6 @@ const RETIRED_CLAIMS: ReadonlyArray<[string, RegExp]> = [
   ['memory tool calls', /retrieve_context|store_memory|memorykit/i],
   ['frontend → backend API routing', /routes?\s+back\s+to\s+(the\s+)?Backend Builder/i],
   ['frontend → backend API routing', /API mismatch/i],
-  ['"10-agent"', /\b10-agent\b/i],
   ['"All 7 agents"', /All 7 agents/i],
   ['"100% certainty"', /100% certainty/i],
   ['Gate 2 loops back to 06', /loops?\s+back\s+to\s+\[?06/i],
@@ -485,10 +484,10 @@ describe('doc drift: PR B-1 docs (AC-91, AC-93, AC-111 to AC-115)', () => {
     expect(stage5).toMatch(/only via `?--consolidate <id>`? on a SUCCESS run/);
   });
 
-  test('AC-115 SKILL.md documents PR B-1: version line, snapshots, the AC-45 sentence, instructed-not-enforced tests, Gate 2 fixes, .Factory, description refusals, MINOR-8, and the invisible-character rules', () => {
+  test('AC-115 SKILL.md carries the current version line (Phase B, PR B-2) and documents PR B-1: snapshots, the AC-45 sentence, instructed-not-enforced tests, Gate 2 fixes, .Factory, description refusals, MINOR-8, and the invisible-character rules', () => {
     const text = collapsed(skill);
     const required = [
-      'Phase B, PR B-1',
+      'Phase B, PR B-2',
       'refs/factory/<id>/stage3-<n>',
       'HEAD_MOVED',
       'SNAPSHOT_FAILED',
@@ -517,7 +516,98 @@ describe('doc drift: PR B-1 docs (AC-91, AC-93, AC-111 to AC-115)', () => {
 
     // The version line names this PR, not the last one.
     const intro = collapsed(skill.split('\n---')[0]);
-    expect(intro).toMatch(/\(Phase B, PR B-1\)/);
+    expect(intro).toMatch(/\(Phase B, PR B-2\)/);
     expect(intro).not.toMatch(/PR A-2/);
+  });
+});
+
+describe('doc drift: PR B-2 docs (AC-127)', () => {
+  /** The SKILL.md section under `heading` (a `##` or `###` heading), up to the next heading of the same or a higher level. */
+  const section = (text: string, heading: string): string => {
+    const level = heading.match(/^#+/)![0].length;
+    const start = text.indexOf(`\n${heading}\n`);
+    if (start < 0) return '';
+    const rest = text.slice(start + heading.length + 2);
+    const next = rest.search(new RegExp(`^#{1,${level}} `, 'm'));
+    return next < 0 ? rest : rest.slice(0, next);
+  };
+
+  test('AC-127 the follow-up and skeptic agents are in AGENT_STAGE, AGENT_TOOLS, the agent table, the chain diagram and the claims block, and SKILL.md documents PR B-2', () => {
+    const followup = '07b-validator-followup';
+    const skeptic = '07c-validator-skeptic';
+
+    // The registry: Stage 4, read-only, like the main Validator (AC-132).
+    expect(AGENT_STAGE[followup]).toBe(4);
+    expect(AGENT_STAGE[skeptic]).toBe(4);
+    expect(AGENT_TOOLS[followup]).toEqual(['Read', 'Grep', 'Glob']);
+    expect(AGENT_TOOLS[skeptic]).toEqual(['Read', 'Grep', 'Glob']);
+
+    // The agent table.
+    expect(skill).toMatch(/^\|\s*07b\s*\|\s*`07b-validator-followup\.md`\s*\|\s*4 Verify\s*\|\s*Read, Grep, Glob\s*\|\s*No\s*\|/m);
+    expect(skill).toMatch(/^\|\s*07c\s*\|\s*`07c-validator-skeptic\.md`\s*\|\s*4 Verify\s*\|\s*Read, Grep, Glob\s*\|\s*No\s*\|/m);
+
+    // The claims block: right after the main Validator.
+    const agents = factoryClaims(skill).agents;
+    expect(agents.slice(agents.indexOf('07-validator'), agents.indexOf('07-validator') + 3)).toEqual(['07-validator', followup, skeptic]);
+
+    // The chain diagram's Stage 4, in order: 06 and 07 in parallel, Gate 2, 07b, the merge, 07c, the Stage 4 gate.
+    const diagram = section(skill, '## The chain').match(/```\n([\s\S]*?)\n```/)?.[1] ?? '';
+    const stage4 = diagram.slice(diagram.indexOf('Stage 4'), diagram.indexOf('CHECKPOINT 3'));
+    const order = ['Gate 1.5', '06 Test Verifier', '07 Validator', 'Gate 2', '07b', 'merge', '07c', 'Stage 4 gate'];
+    const positions = order.map(label => stage4.indexOf(label));
+    expect({ order, positions: positions.map(p => p >= 0) }).toEqual({ order, positions: order.map(() => true) });
+    expect([...positions].sort((a, b) => a - b)).toEqual(positions);
+    expect(stage4).toMatch(/∥/);
+
+    // The new subsection, and what it must say.
+    const verification = collapsed(section(skill, '### Verification in Stage 4'));
+    const required = [
+      'read-only copy',
+      'outside the project',
+      'never a git worktree',
+      're-extracted',
+      'the follow-up',
+      'merged',
+      'skeptic A',
+      'DISPROVED',
+      '07c-validator-skeptic',
+      'typed verdict',
+      'REVIEW_COPY_FAILED',
+      'digest',
+      'evaluation',
+      'AC-157'
+    ];
+    expect(required.filter(phrase => !verification.includes(phrase))).toEqual([]);
+
+    // Elsewhere in SKILL.md: the extraction subcommands and their git floor, the two documents, throw recording.
+    const text = collapsed(skill);
+    for (const phrase of ['`ls-tree`', '`cat-file`', 'git ≥ 2.28', 'VALIDATION_FOLLOWUP.md', 'SKEPTIC_E<e>_<issueKey>_<A|B>.md', "outcome: 'threw'"]) {
+      expect({ phrase, documented: text.includes(phrase) }).toEqual({ phrase, documented: true });
+    }
+
+    // "Validation Passed" reads the typed verdict, not the raw list.
+    const validationPassed = prose(skill).split(/\n- \*\*/).find(item => item.startsWith('Validation Passed:'));
+    expect(collapsed(validationPassed ?? '')).toMatch(/typed verdict/);
+    expect(validationPassed).not.toMatch(/the Validator reported no CRITICAL/);
+
+    // The prompt table: 07 gets no Test Report; 07b and 07c have rows.
+    const row = (agent: string) => skill.split('\n').find(line => new RegExp(`^\\|\\s*${agent}\\s*\\|`).test(line) && !line.includes('.md`'));
+    expect(row('07')).toBeDefined();
+    expect(row('07')).not.toMatch(/Test Report/);
+    expect(row('07b')).toMatch(/Test Report/);
+    expect(row('07c')).toMatch(/User Story, Technical Brief/);
+
+    // The B-1 known limit is closed (AC-157), so its "PR B-2 closes this" sentences are gone.
+    expect(text).not.toMatch(/PR B-2 closes this/);
+    expect(text).not.toMatch(/each agent's prompt is its contract file/i);
+  });
+
+  test('AC-127 the README names the follow-up reviewer and the skeptic, and ROADMAP records the B-2 entry condition as closed by AC-157', () => {
+    expect(readme.split('\n').slice(0, 8).join('\n')).toMatch(
+      /with eight specialist agents, plus a follow-up reviewer and a skeptic in Stage 4/
+    );
+    const roadmap = readDoc('docs/ROADMAP.md');
+    const b2 = blocks(roadmap).find(block => block.startsWith('- **B-2:**'));
+    expect(b2).toMatch(/closed by AC-157/i);
   });
 });

@@ -182,6 +182,7 @@ describe('runFeatureFactory — Tier 1 is optional', () => {
       featureName: 'standalone',
       featureDescription: 'add a health check endpoint',
       cwd: projectDir,
+      reviewRoot: `${projectDir}-review`,
       changes: fakeChangeTracker(),
       invoke
     });
@@ -198,6 +199,7 @@ describe('runFeatureFactory — Tier 1 is optional', () => {
       featureName: 'add-2fa',
       featureDescription: 'Let a user enable 2FA',
       cwd: projectDir,
+      reviewRoot: `${projectDir}-review`,
       changes: fakeChangeTracker(),
       invoke,
       approveCheckpoint: async () => true,
@@ -220,6 +222,7 @@ describe('runFeatureFactory — Tier 1 is optional', () => {
       featureName: 'add-2fa',
       featureDescription: 'Let a user enable 2FA',
       cwd: projectDir,
+      reviewRoot: `${projectDir}-review`,
       changes: fakeChangeTracker(),
       logger: () => {},
       approveCheckpoint: async () => true,
@@ -253,6 +256,7 @@ describe('runFeatureFactory — Tier 1 is optional', () => {
       featureName: 'add-2fa',
       featureDescription: 'Let a user enable 2FA',
       cwd: projectDir,
+      reviewRoot: `${projectDir}-review`,
       changes: fakeChangeTracker(),
       invoke,
       preSuppliedSpec: spec

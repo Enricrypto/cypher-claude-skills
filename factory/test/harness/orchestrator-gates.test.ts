@@ -79,7 +79,10 @@ describe('orchestrator gates', () => {
     expect(state.escalations[0].stage).toBe(4);
     expect(state.escalations[0].context.message).toMatch(/spawn npm ENOENT/);
     expect(invoker.agents()).toContain('06-test-verifier');
-    expect(invoker.agents()).not.toContain('07-validator');
+    // PR B-2 (D-8): the Validator runs in parallel with the Test Verifier, before Gate 2; its review is never decided.
+    expect(invoker.agents().filter(a => a === '07-validator')).toHaveLength(1);
+    expect(state.stageHistory.filter(s => s.agent === '07-validator')).toEqual([]);
+    expect(state.checkpointApprovals.some(a => a.checkpointId === 3)).toBe(false);
     expect(state.loopBacks.filter(l => l.result === 'WARN')).toEqual([]);
   });
 
@@ -97,7 +100,10 @@ describe('orchestrator gates', () => {
     expect(context.failingTests).toEqual(['TotpService › rejects a reused code']);
     expect(context.passRate).toBeCloseTo(0.8);
     expect(invoker.agents().filter(a => a === '06-test-verifier')).toHaveLength(1);
-    expect(invoker.agents()).not.toContain('07-validator');
+    // PR B-2 (D-8): the Validator runs in parallel with the Test Verifier, before Gate 2; its review is never decided.
+    expect(invoker.agents().filter(a => a === '07-validator')).toHaveLength(1);
+    expect(state.stageHistory.filter(s => s.agent === '07-validator')).toEqual([]);
+    expect(state.checkpointApprovals.some(a => a.checkpointId === 3)).toBe(false);
     expect(recorded.calls.filter(c => c.gate === 'auditExecution')).toHaveLength(1);
   });
 
@@ -345,7 +351,7 @@ describe('orchestrator gates', () => {
     ['status LOOP_BACK', () => testVerifier({ status: 'LOOP_BACK' }), 'FAIL'],
     ['failed>0', () => testVerifier({ failed: 2 }), 'FAIL'],
     ['CRITICAL issue', () => testVerifier({ criticalIssue: true }), 'FAIL']
-  ])('AC-19 Test Verifier %s is not recorded PASS, escalates, Validator never invoked', async (_label, output, recordedAs) => {
+  ])('AC-19 Test Verifier %s is not recorded PASS, escalates, the Validator\'s review is never recorded PASS', async (_label, output, recordedAs) => {
     const invoker = scriptedInvoker({ ...passingScript(), '06-test-verifier': output }, { cwd: project.dir });
     const recorded = recordingGates();
 
@@ -355,7 +361,9 @@ describe('orchestrator gates', () => {
     expect(state.escalations.map(e => [e.stage, e.agent, e.reason])).toEqual([[4, '06-test-verifier', 'CRITICAL_ISSUE']]);
     const steps = state.stageHistory.filter(s => s.agent === '06-test-verifier').map(s => s.status);
     expect(steps).toEqual([recordedAs]);
-    expect(invoker.agents()).not.toContain('07-validator');
+    // PR B-2 (D-8): invoked once, in parallel with the Test Verifier; no 07-validator step is recorded.
+    expect(invoker.agents().filter(a => a === '07-validator')).toHaveLength(1);
+    expect(state.stageHistory.filter(s => s.agent === '07-validator')).toEqual([]);
     expect(recorded.calls.map(c => c.gate)).toEqual(['auditInfrastructure']);
     expect(existsSync(runDir(state, 'TEST_REPORT.md'))).toBe(false);
     expect(state.currentStage).toBe(4);
@@ -582,8 +590,9 @@ describe('orchestrator gates', () => {
 
     expect(state.completionStatus).toBe('SUCCESS');
     const firstExecution = events.indexOf('auditExecution');
+    // PR B-2 (D-8): Gate 2 runs after both parallel agents, the Test Verifier and the Validator.
     expect(firstExecution).toBeGreaterThan(events.indexOf('06-test-verifier'));
-    expect(firstExecution).toBeLessThan(events.indexOf('07-validator'));
+    expect(firstExecution).toBeGreaterThan(events.indexOf('07-validator'));
     expect(events.filter(e => e === 'auditExecution')).toHaveLength(state.executionGateHistory?.length ?? -1);
     expect(state.executionGateHistory).toHaveLength(1);
   });
