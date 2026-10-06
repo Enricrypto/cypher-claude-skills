@@ -56,3 +56,4 @@
 | 2026-10-06 11:11–11:30 | CP3 fix round part 2 (tests/docs) + session check | 04 backend-builder + session | 17 + 2.5 | — | 74 tool calls; 1744 tests |
 | 2026-10-06 11:31–11:39 | Re-check of the B-2 fix round | 07 validator (scoped) | 7.2 | — | 23/23 RESOLVED, MINOR-7 deferred; 3 NEW-MINOR; PASS |
 | 2026-10-06 11:45 | NEW-MINOR-1/2 text fixes + D-B2-5 ratification | Session | 3 | — | prompt + comment only |
+| 2026-10-06 | Feature Consolidator (B-2) | 08 feature-consolidator (by hand) | 5.2 | — | 23 tool calls; P-29..P-38, C-34..C-42, 11 anti-patterns |
