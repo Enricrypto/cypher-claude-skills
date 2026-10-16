@@ -28,6 +28,7 @@ import {
 } from '../feature/workflows/feature-factory-orchestrator';
 import { consolidateRun } from '../feature/workflows/consolidate-run';
 import { ChangeTracker } from '../harness/change-diff';
+import { KeepAwake } from '../harness/keep-awake';
 import { directionCharacterPattern, escapeCodePoint } from '../harness/direction-characters';
 import { assertNoFactoryCaseVariant, closeRun, findRun } from '../harness/run-directory';
 import {
@@ -106,6 +107,16 @@ export interface CliDependencies {
   gates?: Partial<OrchestrationGates>;
   /** Passed through to runFeatureFactory. Production leaves it unset: the real git tracker runs (reads, plus snapshots under refs/factory/<id>/). */
   changes?: Partial<ChangeTracker>;
+  /**
+   * Passed through to runFeatureFactory (PR R-1, R1 / AC-003). Production leaves it unset: the
+   * real `caffeinate` hold is taken on macOS and nothing is spawned anywhere else.
+   *
+   * The pass-through is REQUIRED, not cosmetic: AC-63 wraps a full `runCli` and asserts that no
+   * child process is spawned, and `jest.spyOn` without an implementation CALLS THROUGH — so
+   * without this, that test could not inject the explicit no-op double and would both fail and
+   * really hold the Jest worker's machine awake.
+   */
+  keepAwake?: KeepAwake;
 }
 
 /** C0 controls except \t and \n, DEL, and C1 controls (which include the 8-bit CSI). */
@@ -481,6 +492,7 @@ async function execute(argv: string[], deps: CliDependencies, out: Printer): Pro
         approveCheckpoint: checkpointApprover(command.yes, { ...deps, error: out.error }),
         gates: deps.gates,
         changes: deps.changes,
+        keepAwake: deps.keepAwake,
         logger
       });
       return report(state, command.cwd, out);

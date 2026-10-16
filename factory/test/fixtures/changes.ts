@@ -53,6 +53,11 @@ export interface FakeChangeTracker extends ChangeTracker {
   >;
   /** Every workingTreeId call (the measurement baseline, IMPORTANT-1): a separate log, so `reviewCalls` is what it was before. */
   baselineCalls: Array<{ cwd: string }>;
+  /**
+   * Every hideFactoryFromGit call (PR R-1, R8b): a separate log again, so every list above is
+   * what it was before. A test asserts the pre-flight called it, on a fresh run and a resume.
+   */
+  hideCalls: Array<{ cwd: string }>;
 }
 
 /**
@@ -81,7 +86,8 @@ export function fakeChangeTracker({
   snapshot,
   extract,
   changed,
-  baseline
+  baseline,
+  hide
 }: {
   files?: string[];
   source?: ChangeSet['source'];
@@ -92,11 +98,13 @@ export function fakeChangeTracker({
   extract?: ChangeTracker['extractSnapshot'];
   changed?: string[] | ChangeTracker['changedSince'];
   baseline?: string | ChangeTracker['workingTreeId'];
+  hide?: ChangeTracker['hideFactoryFromGit'];
 } = {}): FakeChangeTracker {
   const calls: FakeChangeTracker['calls'] = [];
   const snapshotCalls: FakeChangeTracker['snapshotCalls'] = [];
   const reviewCalls: FakeChangeTracker['reviewCalls'] = [];
   const baselineCalls: FakeChangeTracker['baselineCalls'] = [];
+  const hideCalls: FakeChangeTracker['hideCalls'] = [];
   const change: ChangeSet = {
     source,
     files: [...files],
@@ -116,6 +124,7 @@ export function fakeChangeTracker({
     snapshotCalls,
     reviewCalls,
     baselineCalls,
+    hideCalls,
     captureBase: async cwd => {
       calls.push({ method: 'captureBase', cwd });
       return structuredClone(base);
@@ -142,6 +151,19 @@ export function fakeChangeTracker({
       baselineCalls.push({ cwd });
       if (typeof baseline === 'function') return baseline(cwd);
       return { kind: 'tree', tree: baseline ?? FAKE_SNAPSHOT_TREE };
+    },
+    /**
+     * PR R-1, R8b. An EXPLICIT no-op, and that is REQUIRED, not tidiness (D-5): the orchestrator
+     * resolves each ChangeTracker member individually with `??`, so a fake that OMITTED this one
+     * would silently fall back to the REAL git implementation and every orchestrator and CLI test
+     * would start spawning git — breaking AC-1 and AC-63. Adding the member to the ChangeTracker
+     * interface makes an omission a compile error, which is the tripwire we want.
+     *
+     * It reports `present` by default: the quiet case, so no test's log changes unless it asks.
+     */
+    hideFactoryFromGit: async cwd => {
+      hideCalls.push({ cwd });
+      return hide ? hide(cwd) : { kind: 'present' };
     }
   };
 }

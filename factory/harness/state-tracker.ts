@@ -267,6 +267,22 @@ export interface AgentInvocationRecord {
   outcome?: 'threw';
   /** PR B-2 (I-16): the first line of what the invoker threw, at most 500 characters. */
   error?: string;
+  /**
+   * PR R-1 (R3): which attempt of this ONE invocation the record is — 1 = the first, 2 = the
+   * single retry. Set on BOTH records of a retried invocation; absent entirely when the
+   * invocation was not retried, so a record without it means exactly what it means today.
+   *
+   * Deliberately NOT `attempt` (above), which is the BUILDER attempt and passes through
+   * untouched on both records: a transport retry must never consume a builder attempt (AC-008).
+   */
+  invocationAttempt?: 1 | 2;
+  /**
+   * PR R-1 (R3): the transient signature that was matched, on the record of the attempt whose
+   * failure EARNED the retry — always `invocationAttempt: 1` (e.g. 'CONNECTION_CLOSED',
+   * 'HTTP_429'). Absent on every other record, the retry's own included, whether it succeeded or
+   * failed again.
+   */
+  transientSignal?: string;
 }
 
 export interface AgentStepRecord {

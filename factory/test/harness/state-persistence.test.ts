@@ -21,7 +21,7 @@ import { AgentInvocation } from '../../runner/invoke-agent';
 import { loadState, saveState, stateFilePath, StatePersistenceError } from '../../harness/state-store';
 import { createFeatureState, deserializeState, recordAgentStep, FeatureState, serializeState } from '../../harness/state-tracker';
 import { placeholder, researcher, story } from '../fixtures/agent-outputs';
-import { scriptedInvoker, tempProject, TempProject } from '../fixtures/harness-run';
+import { NO_OP_KEEP_AWAKE, scriptedInvoker, tempProject, TempProject } from '../fixtures/harness-run';
 import { fakeChangeTracker } from '../fixtures/changes';
 import { nonDurableStateWriter } from '../fixtures/state-writer';
 
@@ -49,6 +49,7 @@ function planningInvoker() {
 describe('a finished run leaves a record', () => {
   it('writes state.json when the run ESCALATES — the case you most need it for', async () => {
     const state = await runFeatureFactory({
+      keepAwake: NO_OP_KEEP_AWAKE,
       featureName: 'escalating-run',
       featureDescription: 'add 2FA',
       cwd: projectDir,
@@ -66,6 +67,7 @@ describe('a finished run leaves a record', () => {
 
   it('records WHY it stopped, not merely THAT it stopped', async () => {
     const state = await runFeatureFactory({
+      keepAwake: NO_OP_KEEP_AWAKE,
       featureName: 'why-it-stopped',
       featureDescription: 'add 2FA',
       cwd: projectDir,
@@ -83,6 +85,7 @@ describe('a finished run leaves a record', () => {
 
   it('persists the execution history, not just the final verdict', async () => {
     const state = await runFeatureFactory({
+      keepAwake: NO_OP_KEEP_AWAKE,
       featureName: 'history',
       featureDescription: 'add 2FA',
       cwd: projectDir,
@@ -106,6 +109,7 @@ describe('a finished run leaves a record', () => {
 
   it('writes the record beside that run\'s own documents', async () => {
     const state = await runFeatureFactory({
+      keepAwake: NO_OP_KEEP_AWAKE,
       featureName: 'colocated',
       featureDescription: 'add 2FA',
       cwd: projectDir,
@@ -138,6 +142,7 @@ describe('a finished run leaves a record', () => {
     };
 
     await runFeatureFactory({
+      keepAwake: NO_OP_KEEP_AWAKE,
       featureName: 'mid-run',
       featureDescription: 'add 2FA',
       cwd: projectDir,
@@ -165,6 +170,7 @@ describe('a finished run leaves a record', () => {
 
     await expect(
       runFeatureFactory({
+        keepAwake: NO_OP_KEEP_AWAKE,
         featureName: 'unsaveable',
         featureDescription: 'add 2FA',
         cwd: projectDir,
@@ -188,6 +194,7 @@ describe('a finished run leaves a record', () => {
     let returned: unknown = 'NOTHING RETURNED';
     try {
       returned = await runFeatureFactory({
+        keepAwake: NO_OP_KEEP_AWAKE,
         featureName: 'no-phantom-verdict',
         featureDescription: 'add 2FA',
         cwd: projectDir,
@@ -312,6 +319,7 @@ describe('the state writer seam', () => {
     /** The same run each time: CP1 and CP2 approved, then it escalates at the Spec Writer's placeholder. */
     const run = (cwd: string, extra: Partial<OrchestrationOptions> = {}) =>
       runFeatureFactory({
+        keepAwake: NO_OP_KEEP_AWAKE,
         featureName: 'state-writer-seam',
         featureDescription: 'add 2FA',
         cwd,

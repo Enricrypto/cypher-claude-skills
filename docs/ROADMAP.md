@@ -66,14 +66,20 @@ Three PRs:
 
 Run records: [docs/factory-runs/phase-b/](factory-runs/phase-b/).
 
-### Phase R — reliability hardening (next, before B-3)
+### Phase R — reliability hardening (in progress, before B-3)
 
 Found by the first real project (`cypher-agents`, 2026-10-15/16), which stopped 12 times before a
 checkpoint. Items R1–R10, binding decisions in
 [R_DECISIONS.md](factory-runs/phase-r/R_DECISIONS.md):
-- **R-1:** R1 keep the machine awake, R2 reply limit 64,000 tokens, R3 one retry on a transient
-  API error, R8 snapshots work when `.factory/` is ignored and the factory writes it to
-  `.git/info/exclude`.
+- **R-1 (done):** R1 keep the machine awake, R2 reply limit 64,000 tokens, R3 one retry on a
+  transient API error, R8 snapshots work when `.factory/` is ignored and the factory writes it to
+  `.git/info/exclude`. Four of the six causes behind those 12 stops. R1 holds
+  `caffeinate -dims -w <pid>` on macOS and is a no-op elsewhere, releasing itself with the
+  process; R2 sets `CLAUDE_CODE_MAX_OUTPUT_TOKENS` on top of the inherited environment, never in
+  place of it; R3 retries one transient failure once after 30 seconds and records both attempts
+  in `agentInvocations`, never spending a builder attempt on a dropped connection; R8 names the
+  project's non-ignored top-level entries in the snapshot `add` instead of a `:(exclude)`
+  pathspec, which git 2.39 refused once `.factory/` was ignored.
 - **R-2:** R4 `maxTurns` scaled to the file list, R5 a size warning at CHECKPOINT 2, R9
   proportionate effort (tidy-up / behaviour change / new feature).
 - **R-3:** R6 the story gate counts structured and document ACs, R7 invisible characters block in

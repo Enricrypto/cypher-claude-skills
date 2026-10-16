@@ -1125,13 +1125,18 @@ describe('PR B-2 the review copy against real git', () => {
       ...gitScript(dir),
       '06-test-verifier': () => {
         write(dir, PARTIAL, 'it("half a test", () => {\n');
-        throw new Error('SDK error: 529 overloaded');
+        // PR R-1 (R3): this placeholder used to read 'SDK error: 529 overloaded', which R3's
+        // classifier now — correctly, per AC-006 — reads as a transient HTTP 529 and retries
+        // once, giving this agent a second invocation record. This case is about what a
+        // STOPPED run leaves on disk for the resume below, not about retry classification, so
+        // the placeholder is now an error the allow-list does not recognise.
+        throw new Error('SDK error: malformed response envelope');
       }
     };
     const stopped = await runToEnd({ cwd: dir, invoke: scriptedInvoker(throwing, { cwd: dir }).invoke, resumeFromState: onDisk(), changes: realTracker() });
     expect(stopped.escalations.at(-1)).toMatchObject({ agent: 'orchestrator', reason: 'MANUAL' });
     const afterThrow = onDisk();
-    expect(afterThrow.agentInvocations!.filter(i => i.agent === '06-test-verifier').at(-1)).toMatchObject({ outcome: 'threw', error: 'SDK error: 529 overloaded' });
+    expect(afterThrow.agentInvocations!.filter(i => i.agent === '06-test-verifier').at(-1)).toMatchObject({ outcome: 'threw', error: 'SDK error: malformed response envelope' });
     const reworkBefore = written(afterThrow).find(s => s.at.phase === 'rework')!;
     expect(reworkBefore).toMatchObject({ n: 2, at: { phase: 'rework', round: 1 } });
     expect(stage3SnapshotPassedBy(afterThrow, reworkBefore.at)).toBe(true);

@@ -37,7 +37,7 @@ import {
 } from '../../harness/execution-gates';
 import { tempProject, TempProject } from '../fixtures/harness-run';
 
-const TEST_TIMEOUT = 20_000;
+const TEST_TIMEOUT = 60_000;
 /**
  * The dev window for tests whose dev script only has to be up (or absent) when the window ends.
  * Nothing in them depends on the script having started inside it, so it can stay short.
@@ -46,9 +46,13 @@ const DEV_TIMEOUT_MS = 1500;
 /**
  * The window for a script that must have STARTED and printed or spawned something before the window
  * ends, and then stays up (so every run pays the whole window). Under CPU load `npm run` alone can
- * take seconds to start a node script: 1.5 s made these tests flaky (B-1 step 3 FLAKE).
+ * take seconds to start a node script: 1.5 s made these tests flaky (B-1 step 3 FLAKE), and 5 s did
+ * too once PR R-1's real-git and whole-run suites joined the full run (a dev script had not yet
+ * spawned its grandchild when the window closed). 15 s leaves room for that load.
  */
-const STARTUP_WINDOW_MS = 5_000;
+const STARTUP_WINDOW_MS = 15_000;
+/** The longest a STARTUP_WINDOW_MS run may take: the window plus the kill's SIGTERM-to-SIGKILL grace. */
+const STARTUP_RUN_LIMIT_MS = STARTUP_WINDOW_MS + 10_000;
 /**
  * The window for a script that must EXIT (or print) before the window ends and then exits: the
  * command settles when it exits, so a long window costs nothing and no start-up delay under load
@@ -300,7 +304,7 @@ describe('execution gate', () => {
       const dev = result(audit, 'dev-server');
       expect(dev.timedOut).toBe(true);
       expect(dev.status).toBe('PASSED');
-      expect(elapsed).toBeLessThan(10_000);
+      expect(elapsed).toBeLessThan(STARTUP_RUN_LIMIT_MS);
 
       expect(existsSync(join(project.dir, 'grandchild.pid'))).toBe(true);
       for (const name of ['dev.pid', 'grandchild.pid']) {
@@ -326,7 +330,7 @@ describe('execution gate', () => {
       expect(test.status).toBe('FAILED');
       expect(decision.canAdvance).toBe(false);
       expect(decision.blockers.some(b => /timed out/.test(b))).toBe(true);
-      expect(elapsed).toBeLessThan(10_000);
+      expect(elapsed).toBeLessThan(STARTUP_RUN_LIMIT_MS);
       expect(isAlive(Number(readFileSync(join(project.dir, 'test.pid'), 'utf-8')))).toBe(false);
     },
     TEST_TIMEOUT

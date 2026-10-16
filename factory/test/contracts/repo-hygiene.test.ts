@@ -506,6 +506,92 @@ describe('repo hygiene', () => {
     expect(orchestrator).toMatch(new RegExp(`options\\.${option}\\s*\\?\\?\\s*realpathSync\\(tmpdir\\(\\)\\)`));
   });
 
+  /** Every production .ts under factory/ but test/. Shared by the three PR R-1 guards below. */
+  const productionSources = (): string[] => {
+    const walk = (dir: string): string[] =>
+      readdirSync(dir, { withFileTypes: true }).flatMap(entry => {
+        const full = join(dir, entry.name);
+        if (entry.isDirectory()) return full === testRoot ? [] : walk(full);
+        return entry.name.endsWith('.ts') ? [full] : [];
+      });
+    return walk(factoryRoot);
+  };
+
+  it('AC-003 caffeinate is spawned from exactly one site: keep-awake.ts, with one spawn call and its flags from a module constant', () => {
+    // PR R-1 (R1 / AC-003), mirroring the AC-45/AC-80 git guard above: the keep-awake hold has a
+    // single allow-listed spawn site, exactly as git() does. The four directories scanned are the
+    // same four. Comments are stripped first, so the orchestrator's and cli.ts's prose references
+    // to the hold do not count as spawn sites — only real code does.
+    const scanned = ['feature/workflows', 'runner', 'harness', 'contracts'].flatMap(dir =>
+      readdirSync(join(factoryRoot, dir))
+        .filter(name => name.endsWith('.ts'))
+        .map(name => join(factoryRoot, dir, name))
+    );
+    const keepAwakePath = join(factoryRoot, 'harness', 'keep-awake.ts');
+    expect(scanned).toContain(keepAwakePath);
+
+    // The binary is named in exactly one production file's code.
+    const binary = 'caffe' + 'inate';
+    const namers = scanned.filter(file => new RegExp(binary, 'i').test(code(readFileSync(file, 'utf-8'))));
+    expect(namers.map(file => relative(repoRoot, file))).toEqual([relative(repoRoot, keepAwakePath)]);
+
+    const keepAwake = code(readFileSync(keepAwakePath, 'utf-8'));
+    // Exactly one spawn, and no other way of starting a process.
+    expect(keepAwake.match(/\bspawn\(/g)).toHaveLength(1);
+    expect(keepAwake).not.toMatch(/\b(spawnSync|exec|execSync|execFile|execFileSync)\(/);
+    // No shell: a pid or a path can never be word-split or interpreted.
+    expect(keepAwake).not.toMatch(/shell\s*:/);
+    // The command and the flags are module constants, so argv and the documented flags cannot drift.
+    expect(keepAwake).toMatch(/export const CAFFEINATE_COMMAND = '\/usr\/bin\/caffeinate';/);
+    expect(keepAwake).toMatch(/export const CAFFEINATE_FLAGS = \['-dims'\] as const;/);
+    // The argv is built in code from those constants plus the pid — never a literal command line.
+    expect(keepAwake).toMatch(/spawn\(CAFFEINATE_COMMAND, \[\.\.\.CAFFEINATE_FLAGS, '-w', String\(pid\)\]/);
+    // The three load-bearing details (R1-4): detached, no inherited pipes, unref, 'error' listener.
+    expect(keepAwake).toMatch(/detached:\s*true/);
+    expect(keepAwake).toMatch(/stdio:\s*'ignore'/);
+    expect(keepAwake).toMatch(/\.unref\(\)/);
+    expect(keepAwake).toMatch(/\.on\('error'/);
+  });
+
+  it('R3 D-3 no production call site passes waitBeforeRetry', () => {
+    // PR R-1 (D-3), in the AC-104 / D-20 shape: the retry wait is a TEST-ONLY seam, so production
+    // always waits the real TRANSIENT_RETRY_WAIT_MS and no test ever sleeps 30 real seconds
+    // (R3-1; barriers.ts — "never a sleep"). The orchestrator declares it and resolves it in
+    // exactly one place, and cli.ts deliberately does NOT forward it (unlike keepAwake, which is
+    // a production seam). The name is built by concatenation so this file does not match itself.
+    const option = 'wait' + 'BeforeRetry';
+    const orchestratorPath = join(factoryRoot, 'feature', 'workflows', 'feature-factory-orchestrator.ts');
+    const sources = productionSources();
+    expect(sources).toContain(orchestratorPath);
+
+    const holders = sources.filter(file => new RegExp(`\\b${option}\\b`).test(code(readFileSync(file, 'utf-8'))));
+    expect(holders.map(file => relative(repoRoot, file))).toEqual([relative(repoRoot, orchestratorPath)]);
+
+    // In the orchestrator: the optional declaration, the one resolution, and the one await of it.
+    const orchestrator = code(readFileSync(orchestratorPath, 'utf-8'));
+    expect(orchestrator.match(new RegExp(`\\b${option}\\b`, 'g')) ?? []).toHaveLength(4);
+    expect(orchestrator).toMatch(new RegExp(`^\\s*${option}\\?:\\s*\\(ms: number\\) => Promise<void>;`, 'm'));
+    expect(orchestrator).toMatch(new RegExp(`const ${option} = options\\.${option}\\s*\\?\\?`));
+    expect(orchestrator).toMatch(new RegExp(`await ${option}\\(TRANSIENT_RETRY_WAIT_MS\\)`));
+  });
+
+  it('R8b git-exclude.ts neither spawns git nor imports the git() choke point', () => {
+    // PR R-1 (R8b, D-5): resolving WHICH directory to write is git's job and belongs behind the
+    // one allow-listed rev-parse in change-diff.ts; this module only writes the file. Keeping it
+    // free of git is what keeps the AC-45/AC-80 guard above true and the pinned subcommand
+    // allow-list unmoved (R8-5).
+    const excludePath = join(factoryRoot, 'harness', 'git-exclude.ts');
+    expect(existsSync(excludePath)).toBe(true);
+    const source = code(readFileSync(excludePath, 'utf-8'));
+
+    expect(source).not.toMatch(/\b(spawn|spawnSync|exec|execSync|execFile|execFileSync)\(/);
+    expect(source).not.toMatch(/import\s*\{[^}]*\bgit\b[^}]*\}\s*from\s*['"][^'"]*change-diff['"]/);
+    // It takes the already-resolved directory, so it never guesses `cwd + '/.git'` (R8-4).
+    expect(source).not.toMatch(/['"`][^'"`]*\/\.git['"`]/);
+    // P6: the write refuses a symlink rather than following one, on every open.
+    expect(source).toMatch(/O_NOFOLLOW/);
+  });
+
   it('AC-119 no source file uses git worktree and no agent sandbox is a worktree', () => {
     // D-5: the Validator reviews a read-only copy extracted from the snapshot ref, never a git
     // worktree. No production source names one in code (comments aside), and git() cannot run it.

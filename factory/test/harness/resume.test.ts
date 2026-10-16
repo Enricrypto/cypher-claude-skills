@@ -34,6 +34,7 @@ import { fakeChangeTracker } from '../fixtures/changes';
 import {
   decisions,
   killAt,
+  NO_OP_KEEP_AWAKE,
   passingScript,
   removeOnPersist,
   restoreSnapshot,
@@ -898,6 +899,7 @@ describe('AC-99 the library makes the description refusals, after checkResumeReq
       () => runToEnd({ cwd: project.dir, invoke: scriptedInvoker({ ...passingScript(), '06-test-verifier': testVerifier({ failed: 1 }) }, { cwd: project.dir }).invoke }),
       invoke =>
         runFeatureFactory({
+          keepAwake: NO_OP_KEEP_AWAKE,
           featureName: 'fixture-run',
           featureDescription: 'add SMS login',
           cwd: project.dir,
