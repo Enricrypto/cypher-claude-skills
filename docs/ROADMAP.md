@@ -10,9 +10,12 @@
 
 ## 1. Plan of record
 
-The work is organised in five phases, A to E. Phase A and Phase D are done. Phase B is in
-progress. The order from here is **B → C → E**: each phase ships as one or more PRs, and each PR
-is merged before the next one starts.
+The work is organised in phases A to E, plus Phase R. Phase A and Phase D are done. Phase B is in
+progress. The order from here is **Phase R first, then B → C → E** (B-3 is the remaining Phase B
+PR): each phase ships as one or more PRs, and each PR is merged before the next one starts. Phase R
+was added on 2026-10-16
+([R_DECISIONS.md](factory-runs/phase-r/R_DECISIONS.md)) and runs before B-3 because it blocks real
+use of the factory.
 
 ---
 
@@ -62,6 +65,23 @@ Three PRs:
 - **B-3:** C5, GAP-3, GAP-5 and B4.
 
 Run records: [docs/factory-runs/phase-b/](factory-runs/phase-b/).
+
+### Phase R — reliability hardening (next, before B-3)
+
+Found by the first real project (`cypher-agents`, 2026-10-15/16), which stopped 12 times before a
+checkpoint. Items R1–R10, binding decisions in
+[R_DECISIONS.md](factory-runs/phase-r/R_DECISIONS.md):
+- **R-1:** R1 keep the machine awake, R2 reply limit 64,000 tokens, R3 one retry on a transient
+  API error, R8 snapshots work when `.factory/` is ignored and the factory writes it to
+  `.git/info/exclude`.
+- **R-2:** R4 `maxTurns` scaled to the file list, R5 a size warning at CHECKPOINT 2, R9
+  proportionate effort (tidy-up / behaviour change / new feature).
+- **R-3:** R6 the story gate counts structured and document ACs, R7 invisible characters block in
+  the brief and file list, R10 a clear usage-limit message.
+
+Interim, merged in PR #9: `maxTurns` raised for the builders, Test Verifier and Validator.
+
+Run records: [docs/factory-runs/phase-r/](factory-runs/phase-r/).
 
 ### Phase C — traceability and test discipline
 
