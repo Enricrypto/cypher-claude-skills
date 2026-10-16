@@ -89,14 +89,17 @@ export const AGENT_COST: Record<FeatureFactoryAgent, AgentCost> = {
   '03-spec-writer': { model: 'claude-opus-5', effort: 'high', maxTurns: 30 },
 
   // Write real code against a real schema, run tests, and self-correct. The expensive ones, and
-  // the only agents where a loop-back costs a whole extra invocation.
-  '04-backend-builder': { model: 'claude-opus-5', effort: 'high', maxTurns: 40 },
-  '05-frontend-builder': { model: 'claude-opus-5', effort: 'high', maxTurns: 40 },
-  '06-test-verifier': { model: 'claude-opus-5', effort: 'high', maxTurns: 40 },
+  // the only agents where a loop-back costs a whole extra invocation. Raised from 40 to 80: every
+  // read, edit and test run costs a turn, and 40 ran out on a 15-file cleanup (cypher-agents,
+  // 2026-10-16). A bound scaled to FILE_LIST size is the planned replacement.
+  '04-backend-builder': { model: 'claude-opus-5', effort: 'high', maxTurns: 80 },
+  '05-frontend-builder': { model: 'claude-opus-5', effort: 'high', maxTurns: 80 },
+  '06-test-verifier': { model: 'claude-opus-5', effort: 'high', maxTurns: 80 },
 
   // Judges finished work against a written story and brief. High effort because a missed
   // CRITICAL is the failure this whole chain exists to prevent — but no writing, so fewer turns.
-  '07-validator': { model: 'claude-opus-5', effort: 'high', maxTurns: 25 },
+  // Raised from 25 to 50 for the same reason as the builders.
+  '07-validator': { model: 'claude-opus-5', effort: 'high', maxTurns: 50 },
 
   // The follow-up reviews only the test files the Test Verifier changed; a skeptic judges one
   // CRITICAL issue. Narrower jobs than the Validator's, so fewer turns, but the same model and
