@@ -100,6 +100,10 @@ function fakeDependencies(overrides: Partial<CliDependencies> = {}, script: Invo
     },
     gates: recorded.gates,
     changes: fakeChangeTracker(),
+    // PR R-1, R1 / AC-003: an EXPLICIT no-op hold, so AC-63's five spawn spies keep asserting
+    // something TRUE rather than something vacuous. `jest.spyOn` without an implementation calls
+    // through, so an un-injected `caffeinate` would really be spawned here.
+    keepAwake: () => ({ held: false, reason: 'test double' }),
     ...overrides
   };
 

@@ -94,6 +94,44 @@ export class AgentInvocationError extends Error {
 }
 
 /**
+ * The reply ceiling, raised from the SDK's 32k default (PR R-1, R2 / AC-004, AC-005).
+ *
+ * A reply that exceeded 32k was truncated, which stopped runs that had nothing wrong with them.
+ * This is a CEILING, not a target: a reply that already fitted is byte-identical under it
+ * (AC-005), so the only behaviour that changes is what happens to a reply that would have been
+ * cut off.
+ *
+ * It lives here, in `createSdkInvoker`, rather than in the CLI, because this is the one place
+ * `query()` is called — which is what makes it reach the two standalone smoke entry points under
+ * `runner/` too, since they build their own invoker. That is what "every agent invocation"
+ * (AC-004) means. Needing to edit those files would mean R2 was placed in the wrong layer.
+ *
+ * (Those two are named only indirectly here, on purpose: repo-hygiene S-1 asserts that no other
+ * file in the tree mentions the operator-only one of them by name.)
+ */
+export const MAX_OUTPUT_TOKENS_VAR = 'CLAUDE_CODE_MAX_OUTPUT_TOKENS';
+/** The ceiling itself, as the string an environment variable must be. */
+export const MAX_OUTPUT_TOKENS_VALUE = '64000';
+
+/**
+ * The environment every agent subprocess runs in (R2-1 — THE most consequential line in PR R-1).
+ *
+ * `options.env` REPLACES the subprocess environment entirely; the SDK does not merge it
+ * (sdk.d.ts:1395-1413: "When set, this value REPLACES the subprocess environment entirely…
+ * Spread `process.env` yourself"). Passing only `{ [MAX_OUTPUT_TOKENS_VAR]: '64000' }` would
+ * strip PATH, HOME and the SDK's subscription credentials and break EVERY invocation.
+ *
+ * So: THE SPREAD COMES FIRST and is not optional. The factory's ceiling is applied after it, so
+ * it wins over a value already set in the operator's shell (the story's own assumption) — the
+ * factory constructs this environment explicitly rather than merging on top of an inherited one.
+ * Read at call time, not at import time, so a variable set after this module loads is still
+ * inherited.
+ */
+function agentEnvironment(): Record<string, string> {
+  return { ...process.env, [MAX_OUTPUT_TOKENS_VAR]: MAX_OUTPUT_TOKENS_VALUE } as Record<string, string>;
+}
+
+/**
  * Used only when an agent has no entry in AGENT_COST — which, given the Record type, means
  * someone added an agent and TypeScript already refused to compile. Belt and braces: if it ever
  * happens at runtime, spend the SAFE amount rather than the cheap one.
@@ -186,6 +224,8 @@ export function createSdkInvoker(config: SdkInvokerConfig): AgentInvoker {
     const model = config.model ?? cost.model;
     const effort = config.effort ?? cost.effort;
     const maxTurns = config.maxTurns ?? cost.maxTurns;
+    // R2 / AC-004: the reply ceiling, plus the whole inherited environment it must never replace.
+    const env = agentEnvironment();
 
     let structuredOutput: unknown;
     let resultText = '';
@@ -201,6 +241,11 @@ export function createSdkInvoker(config: SdkInvokerConfig): AgentInvoker {
         effort,
         maxTurns,
         systemPrompt,
+
+        // R2 / AC-004. REPLACES the subprocess environment, so it carries the whole of
+        // `process.env` with it — see agentEnvironment() and R2-1. A ceiling, not a target:
+        // a reply that already fitted is unchanged (AC-005).
+        env,
 
         // The envelope is schema-forced; the SDK retries the model on a malformed response.
         outputFormat: { type: 'json_schema', schema: agentOutputSchema(agent) },

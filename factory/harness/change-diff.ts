@@ -77,6 +77,7 @@ import {
 import { tmpdir } from 'os';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'path';
 
+import { addFactoryToExcludeFile, HideFactoryResult } from './git-exclude';
 import { isSafeRunId } from './run-lifecycle';
 import { OBJECT_ID } from './state-tracker';
 import type { ChangeBase } from './state-tracker';
@@ -141,6 +142,17 @@ export interface ChangeTracker {
    * user's index.
    */
   workingTreeId(cwd: string): Promise<WorkingTreeId>;
+  /**
+   * Add `.factory/` to the project's git exclude file, so git ignores the harness's own directory
+   * (PR R-1, R8b / AC-010): local only, never committed, idempotent across a second and a resumed
+   * run. Never throws, and NEVER a stop — outside a git work tree, or with an exclude file that
+   * cannot be written, it returns `skipped` and the run proceeds.
+   *
+   * It is a member of this port rather than a seam of its own (D-5) because it needs a git lookup
+   * to find the git directory: called directly from the orchestrator's pre-flight it would spawn
+   * git inside EVERY orchestrator and CLI test and break AC-1 and AC-63.
+   */
+  hideFactoryFromGit(cwd: string): Promise<HideFactoryResult>;
 }
 
 /** The change could not be collected; CP3 cannot be presented. */
@@ -510,6 +522,65 @@ async function collect(cwd: string, base: ChangeBase, claimedFiles: string[]): P
 /** Tracked-but-ignored paths are force-added in chunks of this many, to keep each argv bounded. */
 const FORCE_ADD_CHUNK = 500;
 
+/** The harness's own directory, never named to `add` and so never in a snapshot (R8a / AC-009). */
+const FACTORY_DIR_NAME = '.factory';
+
+/**
+ * Which of the project's TOP-LEVEL entries step 5 names to `git add -A` (PR R-1, R8a / AC-009).
+ *
+ * WHY THIS EXISTS. Step 5 used to be `add -A -- . ':(exclude).factory'`. On git 2.39 that EXITS 1
+ * the moment `.factory` is ignored by the project, because `:(exclude).factory` counts as
+ * EXPLICITLY NAMING an ignored path and `git add` refuses to add one:
+ *
+ *     The following paths are ignored by one of your .gitignore files:
+ *     .factory
+ *     hint: Use -f if you really want to add them.
+ *
+ * (Reproduced on git 2.39.5 before this fix; see snapshot.test.ts's reproduction test.) R8b makes
+ * `.factory` ignored in EVERY project, so that was about to become every run, not an edge case.
+ *
+ * THE FIX: name the top-level entries instead, and never name `.factory` at all. `-A` still does
+ * all the walking, so deletions, sparse-checkout absence, skip-worktree entries and the silent
+ * skipping of ignored CONTENT behave exactly as they do today — which is the decisive advantage
+ * over an explicit full path list, which would have to re-implement all four. argv stays tiny
+ * (top-level entries only, no chunking), and with no `:(exclude)` pathspec left the failure
+ * cannot occur whatever its precise trigger.
+ *
+ * IGNORED TOP-LEVEL ENTRIES MUST BE DROPPED, because naming an ignored path explicitly is exactly
+ * what makes `add` exit 1. Dropping one loses nothing: its content is ignored, and any TRACKED
+ * file inside it is recovered by step 6's force-add.
+ *
+ * THE IGNORED SET IS ASKED WITH THE SNAPSHOT'S OWN (EMPTY) INDEX — `index`, not the user's. This
+ * is load-bearing and the brief's proposed query is not enough on its own. `ls-files --others`
+ * means "untracked", judged against whichever index git is given: asked with the USER's index it
+ * reports neither a tracked-and-ignored FILE nor an ignored DIRECTORY that has tracked content,
+ * so both would be named and `add` would exit 1 — which is precisely AC-009's named hazard. The
+ * `add` in step 5 runs against this same empty index, where nothing is tracked, so asking with it
+ * gives exactly the set of entries that `add` would refuse. `ls-files` never writes an index, and
+ * the file does not exist yet at this point: git reads a missing index as empty.
+ *
+ * Only TOP-LEVEL entries are dropped. A nested ignored path (`mixed/thing.log`) must NOT drop its
+ * top-level parent, which may hold plenty of non-ignored files.
+ */
+function topLevelEntriesToAdd(cwd: string, index: Record<string, string>): string[] {
+  const ignored = new Set(
+    nulSeparated(
+      snapshotStep(cwd, 'ls-files', ['--others', '--ignored', '--exclude-standard', '--directory', '-z'], index).stdout
+    )
+      // `--directory` collapses a fully-ignored directory to `<name>/`; normalise before matching.
+      .map(path => path.replace(/\/+$/, ''))
+      .filter(path => !path.includes('/'))
+  );
+
+  // Naming the top-level entries of `cwd` scopes the add exactly as `-- .` did, so a project in a
+  // SUBDIRECTORY of the repository is still captured from its own root. `.factory` is excluded by
+  // never being named — in all four combinations of tracked x ignored. A `.Factory` letter-case
+  // look-alike cannot be here: the run-start pre-flight refuses the run outright (AC-97).
+  return readdirSync(cwd)
+    .filter(name => name !== '.git' && name !== FACTORY_DIR_NAME && !ignored.has(name))
+    .sort();
+}
+
 /** One git step of the snapshot or the measurement. A failure throws git's first stderr line, which becomes `failed.error`. */
 function snapshotStep(
   cwd: string,
@@ -553,8 +624,16 @@ function workingTree(cwd: string): string {
   try {
     const index = { GIT_INDEX_FILE: join(tmp, 'index') };
 
-    // 5. Every non-ignored file in the project, tracked or untracked, except .factory/.
-    snapshotStep(cwd, 'add', ['-A', ...PATHSPEC], index);
+    // 5. Every non-ignored file in the project, tracked or untracked, except .factory/ — named as
+    //    the project's non-ignored top-level entries (R8a / AC-009), so no `:(exclude)` pathspec
+    //    is left for git 2.39 to refuse. GIT_LITERAL_PATHSPECS makes a hostile top-level name
+    //    (`-f`, `:x`, `*.log`, `:(glob)x`) the literal path it is and never a pattern or an
+    //    option; `--` keeps it out of option parsing. An empty list (an empty project, or every
+    //    top-level entry ignored) skips the add: step 7's empty-index → empty-tree logic covers it.
+    const names = topLevelEntriesToAdd(cwd, index);
+    if (names.length > 0) {
+      snapshotStep(cwd, 'add', ['-A', '--', ...names], { ...index, GIT_LITERAL_PATHSPECS: '1' });
+    }
 
     // 6. Tracked-but-ignored files, as the user's index lists them (read-only), if they still exist.
     const trackedIgnored = nulSeparated(
@@ -896,6 +975,49 @@ async function extractSnapshot(cwd: string, snap: { ref: string; commit: string;
   }
 }
 
+/**
+ * R8b / AC-010. Never throws: every failure is `skipped`, and the run proceeds.
+ *
+ * Resolving the git directory is the only part of this that is git's job, and it is why R8b sits
+ * behind this port at all (D-5). `.git` IS NOT ALWAYS A DIRECTORY (R8-4) — it is a FILE in a
+ * linked worktree and in a submodule, and the project may be a subdirectory of the repository —
+ * so the directory is always resolved with `rev-parse`, never by joining `cwd` with `.git`.
+ *
+ * `--git-common-dir` FIRST, because git resolves `info/exclude` through its shared-path list, so a
+ * linked worktree reads the COMMON directory's copy — writing the per-worktree one would leave the
+ * entry invisible to the worktree the operator is actually in. A git too old to know the option
+ * echoes it back verbatim, which the `isDirectory()` check below rejects; `--git-dir` is then
+ * tried. Both are already on GIT_READ_SUBCOMMANDS, so the pinned allow-list arrays, the
+ * nine-element union and SKILL.md's "exactly these git subcommands and no others" claim do not
+ * move (R8-5).
+ */
+async function hideFactoryFromGit(cwd: string): Promise<HideFactoryResult> {
+  try {
+    // 1. Outside a work tree there is nothing to hide `.factory/` from.
+    if (notAWorkTree(cwd) !== undefined) return { kind: 'skipped', reason: 'not a git work tree' };
+
+    // 2. The real git directory. An option a git too old does not know comes back as itself.
+    for (const option of ['--git-common-dir', '--git-dir']) {
+      const resolved = git(cwd, 'rev-parse', [option]);
+      if (!resolved.ok) continue;
+      const reported = resolved.stdout.trim();
+      if (reported.length === 0 || reported === option) continue;
+
+      const dir = resolve(cwd, reported);
+      try {
+        if (!lstatSync(dir).isDirectory()) continue;
+      } catch {
+        continue;
+      }
+      // 3-7: the write itself, in its own module, which never spawns git.
+      return addFactoryToExcludeFile(dir);
+    }
+    return { kind: 'skipped', reason: `the git directory of ${cwd} could not be resolved` };
+  } catch (error) {
+    return { kind: 'skipped', reason: error instanceof Error ? error.message : String(error) };
+  }
+}
+
 /** The real tracker. Production never passes `changes`, so this is what runs. */
 export const DEFAULT_CHANGE_TRACKER: Readonly<ChangeTracker> = Object.freeze({
   captureBase,
@@ -903,5 +1025,6 @@ export const DEFAULT_CHANGE_TRACKER: Readonly<ChangeTracker> = Object.freeze({
   snapshot,
   extractSnapshot,
   changedSince,
-  workingTreeId
+  workingTreeId,
+  hideFactoryFromGit
 });

@@ -131,6 +131,8 @@ import {
 } from '../../harness/infrastructure-gates';
 
 import { AgentInvocation, AgentInvoker } from '../../runner/invoke-agent';
+import { classifyInvocationError, TRANSIENT_RETRY_WAIT_MS } from '../../runner/transient-errors';
+import { KeepAwake, keepAwake as realKeepAwake } from '../../harness/keep-awake';
 import { REQUIRED_ARTIFACTS } from '../../runner/agent-registry';
 import {
   buildStageContext,
@@ -471,6 +473,26 @@ export interface OrchestrationOptions {
   changes?: Partial<ChangeTracker>;
 
   /**
+   * Hold the machine awake for the whole run (PR R-1, R1 / AC-001, D-1). Omitted = the real
+   * `keepAwake`, which spawns `caffeinate -dims -w <pid>` on macOS and nothing anywhere else.
+   *
+   * A PRODUCTION seam, not a test-only one: `cli.ts` forwards it exactly as `gates` and `changes`
+   * are forwarded, because AC-63 wraps a full `runCli` and has to be able to inject the explicit
+   * no-op double AC-003 demands. It lives in the orchestrator rather than the CLI so that
+   * `--resume` and library callers are covered too (AC-001: "when the orchestrator begins
+   * execution").
+   */
+  keepAwake?: KeepAwake;
+
+  /**
+   * How R3 waits before its single retry (PR R-1, D-3). TESTS ONLY; omitted = a real
+   * `TRANSIENT_RETRY_WAIT_MS` wait, which is what production always does. `barriers.ts`'s rule is
+   * "never a sleep", so every test injects a zero-delay double instead of spending 30 real
+   * seconds. A repo-hygiene test checks that no production code passes this.
+   */
+  waitBeforeRetry?: (ms: number) => Promise<void>;
+
+  /**
    * How the run's state is saved (AC-104). TESTS ONLY; omitted = the durable saveState
    * (state-store.ts: temp file, fsync, rename, fsync the directory), which is what production
    * always uses. Tests that never kill the machine pass a writer without the fsyncs
@@ -503,8 +525,15 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
     snapshot: options.changes?.snapshot ?? DEFAULT_CHANGE_TRACKER.snapshot,
     extractSnapshot: options.changes?.extractSnapshot ?? DEFAULT_CHANGE_TRACKER.extractSnapshot,
     changedSince: options.changes?.changedSince ?? DEFAULT_CHANGE_TRACKER.changedSince,
-    workingTreeId: options.changes?.workingTreeId ?? DEFAULT_CHANGE_TRACKER.workingTreeId
+    workingTreeId: options.changes?.workingTreeId ?? DEFAULT_CHANGE_TRACKER.workingTreeId,
+    hideFactoryFromGit: options.changes?.hideFactoryFromGit ?? DEFAULT_CHANGE_TRACKER.hideFactoryFromGit
   };
+
+  /** The keep-awake hold (R1 / AC-001, D-1): resolved here, in exactly one place, like every other seam (P3). */
+  const holdAwake: KeepAwake = options.keepAwake ?? realKeepAwake;
+
+  /** How R3 waits before its one retry (D-3). Resolved in exactly one place; tests inject a zero-delay double (R3-1). */
+  const waitBeforeRetry = options.waitBeforeRetry ?? ((ms: number) => new Promise<void>(done => setTimeout(done, ms)));
 
   const log = options.logger ?? ((message: string) => console.log(`[FF] ${message}`));
 
@@ -568,6 +597,23 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
     featureDescription = supplied;
   }
 
+  // ── Every refusal path above has now returned or thrown. Real work begins here. ────────────
+  //
+  // R1 / AC-001, AC-002: hold the machine awake. Deliberately NOT step 0: everything above runs
+  // nothing and writes nothing (a refused start, and the paused-run return above, which SKILL.md
+  // documents as "changes nothing: it exits 3"), so taking a hold for a run that does not run
+  // would be wrong — and on a long-lived library caller it would linger, because `-w <pid>`
+  // releases on the PROCESS, not the run. This is the first point at which the run really starts.
+  //
+  // One line either way, and NEVER an error or a warning: a missing hold is not a problem with
+  // the run (P2). There is no release, by design (R1-2) — `-w <pid>` is self-terminating.
+  const hold = holdAwake(process.pid);
+  log(
+    hold.held
+      ? `☕ Keeping the machine awake while this process (pid ${process.pid}) runs.`
+      : `☕ Not keeping the machine awake: ${hold.reason}.`
+  );
+
   const archivedRuns = resumed ? [] : prepareNewRunDirectory(cwd).archived;
   let state = resumed || createFeatureState(options.featureName, undefined, featureDescription);
 
@@ -577,6 +623,19 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
     state = recordFeatureDescription(state, featureDescription);
     save(cwd, state);
   }
+
+  // R8b / AC-010: add `.factory/` to the project's git exclude file, so git ignores the harness's
+  // own directory. Local only, never committed, idempotent, and NEVER a stop — an unwritable
+  // exclude file is a logged skip (P2).
+  //
+  // BEFORE captureBase, so the base is captured with `.factory` already excluded. On a RESUME too:
+  // "never duplicated on a second or resumed run" only means anything if resumes execute it.
+  // It goes through the `changes` port (D-5) rather than calling git directly, because a direct
+  // call would spawn git inside every orchestrator and CLI test and break AC-1 and AC-63.
+  const hidden = await changes.hideFactoryFromGit(cwd);
+  if (hidden.kind === 'added') log(`🙈 Added .factory/ to this project's git exclude file (local only, never committed).`);
+  // `present` is silent on purpose: it is the normal case on every resume and every second run.
+  if (hidden.kind === 'skipped') log(`🙈 Did not hide .factory/ from git: ${hidden.reason}. The run goes on.`);
 
   // A fresh run records where its change starts — HEAD now, before any agent writes anything — so
   // CP3 can show everything that changed since (D-8, I-4). Committed before the first agent runs.
@@ -807,8 +866,19 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
    * (AC-124). The error then reaches the outer catch, which escalates.
    */
   const timedInvoke = async (call: AgentInvocation, meta: InvocationMeta = {}): Promise<TimedInvocation> => {
-    const started = new Date();
-    const record = (completed: Date, failure?: { error: unknown }) =>
+    /**
+     * One record of one attempt. `retry` carries R3's two optional fields; absent on every record
+     * of an invocation that was not retried, so such a record means exactly what it meant before
+     * R-1 (P5). `meta` passes through UNTOUCHED — the builder attempt, phase, round, evaluation
+     * and skeptic instance are identical on both records of a retried invocation, which is what
+     * keeps a transport retry from consuming a builder attempt (AC-008).
+     */
+    const record = (
+      started: Date,
+      completed: Date,
+      failure?: { error: unknown },
+      retry?: { invocationAttempt: 1 | 2; transientSignal?: string }
+    ) =>
       recordAgentInvocation(state, {
         stage: call.stage,
         agent: call.agent,
@@ -820,19 +890,58 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
         ...(meta.attempt !== undefined ? { attempt: meta.attempt } : {}),
         ...(meta.evaluation !== undefined ? { evaluation: meta.evaluation } : {}),
         ...(meta.instance !== undefined ? { instance: meta.instance } : {}),
-        ...(failure ? { outcome: 'threw' as const, error: invocationError(failure.error) } : {})
+        ...(failure ? { outcome: 'threw' as const, error: invocationError(failure.error) } : {}),
+        ...(retry ? { invocationAttempt: retry.invocationAttempt } : {}),
+        ...(retry?.transientSignal !== undefined ? { transientSignal: retry.transientSignal } : {})
       });
 
-    let output: unknown;
-    try {
-      output = await invokeAgent(call);
-    } catch (error) {
-      state = commit(record(new Date(), { error }));
-      throw error;
+    // R3 / AC-006: at most two attempts at this ONE invocation. The bound is 1 and is NOT
+    // configurable — no flag, no env var, no state field. The retry is in-memory, so nothing
+    // resumes "into" it: a run killed mid-wait resumes with the failed attempt on record and
+    // re-invokes from the step level, exactly as a run killed mid-invocation does today.
+    for (let invocationAttempt: 1 | 2 = 1; ; invocationAttempt = 2) {
+      // Each attempt has its OWN start, so both durations are real and metrics.timePerStage
+      // stays meaningful.
+      const started = new Date();
+      let output: unknown;
+
+      try {
+        output = await invokeAgent(call);
+      } catch (error) {
+        const verdict = classifyInvocationError(error);
+        const willRetry = invocationAttempt === 1 && verdict.kind === 'transient';
+
+        // BOTH records of a retried invocation carry `invocationAttempt`, including when the retry
+        // ALSO fails — otherwise the second record would be indistinguishable from a
+        // never-retried failure, and state-tracker.ts's field comment, brief §2 and SKILL.md
+        // ("they carry `invocationAttempt` 1 and 2") would all be false on that path (AC-011).
+        // `transientSignal` belongs only to the attempt whose failure EARNED the retry.
+        const marker = willRetry
+          ? { invocationAttempt, transientSignal: verdict.kind === 'transient' ? verdict.signal : undefined }
+          : invocationAttempt === 2
+            ? { invocationAttempt }
+            : undefined;
+
+        // The failed record is COMMITTED BEFORE THE WAIT: a kill inside the 30-second window must
+        // still leave the failed attempt on record.
+        state = commit(record(started, new Date(), { error }, marker));
+
+        // Not transient, or already the retry: rethrow the ORIGINAL error, unchanged, so the
+        // outer catch escalates byte-identically to today (AC-007).
+        if (!willRetry) throw error;
+
+        // Before the wait, so the operator never sees 30 seconds of unexplained silence.
+        log(`⏳ ${call.agent}: ${verdict.kind === 'transient' ? verdict.signal : 'transient'} — retrying once in 30s`);
+        await waitBeforeRetry(TRANSIENT_RETRY_WAIT_MS);
+        continue;
+      }
+
+      const completed = new Date();
+      // On a retried invocation the successful record carries the marker too, so both attempts of
+      // one invocation are identifiable; on a first-attempt success it is absent entirely.
+      state = commit(record(started, completed, undefined, invocationAttempt > 1 ? { invocationAttempt } : undefined));
+      return { output, timing: { startedAt: started.toISOString(), completedAt: completed.toISOString() } };
     }
-    const completed = new Date();
-    state = commit(record(completed));
-    return { output, timing: { startedAt: started.toISOString(), completedAt: completed.toISOString() } };
   };
 
   /** Render a harness document into the run dir (only) and log where it went. */

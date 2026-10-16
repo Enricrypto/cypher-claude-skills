@@ -28,7 +28,7 @@ import { loadState, loadStateFrom, saveState, saveStateIn, stateFilePath, stateF
 import { createFeatureState, FeatureState } from '../../harness/state-tracker';
 import { runFeatureFactory } from '../../feature/workflows/feature-factory-orchestrator';
 import { researcher, story } from '../fixtures/agent-outputs';
-import { scriptedInvoker, SEEDED_DOCUMENT, seedRun, tempProject, TempProject } from '../fixtures/harness-run';
+import { NO_OP_KEEP_AWAKE, scriptedInvoker, SEEDED_DOCUMENT, seedRun, tempProject, TempProject } from '../fixtures/harness-run';
 import { fakeChangeTracker } from '../fixtures/changes';
 import { plantFactoryCaseVariant, tempFileSystemIsCaseInsensitive, treeSnapshot } from '../fixtures/factory-case-variant';
 
@@ -435,6 +435,7 @@ describe('runFeatureFactory uses the lifecycle on a fresh start (§4 pre-flight)
     writeFileSync(join(cwd, '.factory', 'baseline.json'), '{"schemaVersion":1}');
 
     const state = await runFeatureFactory({
+      keepAwake: NO_OP_KEEP_AWAKE,
       featureName: 'fresh',
       featureDescription: 'add 2FA',
       cwd,
@@ -455,6 +456,7 @@ describe('runFeatureFactory uses the lifecycle on a fresh start (§4 pre-flight)
 
     await expect(
       runFeatureFactory({
+        keepAwake: NO_OP_KEEP_AWAKE,
         featureName: 'blocked',
         featureDescription: 'add 2FA',
         cwd,
@@ -476,6 +478,7 @@ describe('runFeatureFactory uses the lifecycle on a fresh start (§4 pre-flight)
     saveState(cwd, pinned);
 
     await runFeatureFactory({
+      keepAwake: NO_OP_KEEP_AWAKE,
       featureName: 'resumed',
       featureDescription: 'add 2FA',
       cwd,
@@ -628,6 +631,7 @@ describe('AC-97 a .factory case variant is refused before any write', () => {
 
       await expect(
         runFeatureFactory({
+          keepAwake: NO_OP_KEEP_AWAKE,
           featureName: resumeFromState ? resumeFromState.featureName : 'case-variant',
           featureDescription: 'add 2FA',
           cwd,

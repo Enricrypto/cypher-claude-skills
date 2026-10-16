@@ -132,6 +132,17 @@ const RETIRED_CLAIMS: ReadonlyArray<[string, RegExp]> = [
   ['PR review outside the program (CP3 is in it)', /PR review[^.\n]*outside the program/i]
 ];
 
+/**
+ * PR R-1 (R8b, AC-011): what SKILL.md now claims about git writes. R8b appends `.factory/` to
+ * `<git dir>/info/exclude`, so the old sentence — which ended at "only under `refs/factory/<id>/`."
+ * — became false the moment the harness wrote a file inside `.git/`. Pinned verbatim here, and
+ * asserted below to trip none of the RETIRED_CLAIMS patterns.
+ */
+const R1_GIT_WRITE_CLAIM =
+  'The factory never touches your branch, index or working tree, never pushes, and writes git ' +
+  'objects only under `refs/factory/<id>/`; the one file it writes inside `.git/` is ' +
+  '`info/exclude`, where it adds `.factory/` locally so git ignores the harness\'s own directory.';
+
 /** README only (AC-114): the program runs Stages 1-4; Stage 5 runs only via --consolidate. */
 const README_RETIRED_CLAIMS: ReadonlyArray<[string, RegExp]> = [['"five stages" (AC-114: Stages 1–4, Stage 5 only via --consolidate)', /five stages/i]];
 
@@ -484,14 +495,14 @@ describe('doc drift: PR B-1 docs (AC-91, AC-93, AC-111 to AC-115)', () => {
     expect(stage5).toMatch(/only via `?--consolidate <id>`? on a SUCCESS run/);
   });
 
-  test('AC-115 SKILL.md carries the current version line (Phase B, PR B-2) and documents PR B-1: snapshots, the AC-45 sentence, instructed-not-enforced tests, Gate 2 fixes, .Factory, description refusals, MINOR-8, and the invisible-character rules', () => {
+  test('AC-115 SKILL.md carries the current version line (Phase R, PR R-1) and documents PR B-1: snapshots, the AC-45 sentence, instructed-not-enforced tests, Gate 2 fixes, .Factory, description refusals, MINOR-8, and the invisible-character rules', () => {
     const text = collapsed(skill);
     const required = [
-      'Phase B, PR B-2',
+      'Phase R, PR R-1',
       'refs/factory/<id>/stage3-<n>',
       'HEAD_MOVED',
       'SNAPSHOT_FAILED',
-      'The factory never touches your branch, index or working tree, never pushes, and writes git objects only under `refs/factory/<id>/`.',
+      R1_GIT_WRITE_CLAIM,
       'not enforced',
       'ambiguous test summary',
       'SKIPPED',
@@ -509,15 +520,35 @@ describe('doc drift: PR B-1 docs (AC-91, AC-93, AC-111 to AC-115)', () => {
       'FACTORY_DIR_CASE_CONFLICT',
       'DESCRIPTION_REQUIRED',
       'APPROVED_ARTIFACT_CHANGED',
-      'is inferred'
+      'is inferred',
+      // PR R-1 (AC-011): one literal per behaviour change in this PR, so prose and code
+      // cannot drift apart. R1 the keep-awake hold, R2 the output ceiling, R8b the exclude
+      // file, R3 the head of the transient list.
+      'caffeinate',
+      'CLAUDE_CODE_MAX_OUTPUT_TOKENS',
+      '64000',
+      'info/exclude',
+      'Connection closed'
     ];
     const missing = required.filter(phrase => !text.includes(phrase));
     expect(missing).toEqual([]);
 
     // The version line names this PR, not the last one.
     const intro = collapsed(skill.split('\n---')[0]);
-    expect(intro).toMatch(/\(Phase B, PR B-2\)/);
-    expect(intro).not.toMatch(/PR A-2/);
+    expect(intro).toMatch(/\(Phase R, PR R-1\)/);
+    expect(intro).not.toMatch(/PR B-2/);
+  });
+
+  test('AC-011 the reworded git-write sentence (R8b) retires no claim the factory still makes', () => {
+    // R8-2: rewording SKILL.md:137 is the one edit in this PR that could trip a RETIRED_CLAIMS
+    // pattern — /makes no[^.\n]{0,60}\bcommit/i and /only ever asked to read/i are both within
+    // a sentence's reach of this topic. Assert the replacement text itself, not just the file,
+    // so a future rewording is caught here rather than in the whole-document sweep.
+    const tripped = RETIRED_CLAIMS.filter(([, pattern]) => pattern.test(R1_GIT_WRITE_CLAIM)).map(([label]) => label);
+    expect(tripped).toEqual([]);
+
+    // And it is really the sentence SKILL.md carries, not a stale copy of it.
+    expect(collapsed(skill)).toContain(R1_GIT_WRITE_CLAIM);
   });
 });
 

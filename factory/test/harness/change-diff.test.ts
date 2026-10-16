@@ -1451,3 +1451,424 @@ describe('changedSince: the Test Verifier measurement (D-2, AC-121)', () => {
     expect(result.kind === 'failed' && result.error.length).toBeGreaterThan(0);
   });
 });
+
+/**
+ * R8a / AC-009: the Stage 3 snapshot works whether or not the project ignores `.factory/`.
+ *
+ * Step 5 of `workingTree` used to be `add -A -- . ':(exclude).factory'`, which EXITS 1 on git 2.39
+ * as soon as `.factory` is ignored — and R8b makes it ignored in every project, so that was about
+ * to become every run rather than an unlucky edge case (R8-1). The reproduction below is written
+ * first, deliberately, so AC-009 has teeth: it proves the premise on the git actually installed.
+ *
+ * The LOAD-BEARING test here is the content-equivalence one. R8 changes robustness, not what gets
+ * captured, so the same project must snapshot to the SAME TREE ID with and without `.factory/`
+ * ignored. The pinned snapshot-content assertions elsewhere in this file pass UNTOUCHED, which is
+ * the other half of that proof: needing to edit one would mean the mechanism is wrong.
+ */
+describe('R8a the snapshot with .factory/ ignored (AC-009)', () => {
+  let restoreEnv: () => void;
+
+  beforeEach(() => {
+    restoreEnv = isolateHarnessGit();
+  });
+
+  afterEach(() => {
+    restoreEnv();
+  });
+
+  /** The paths a tree holds, sorted. */
+  function treePaths(tree: string, root = project.dir): string[] {
+    return git(root, 'ls-tree', '-r', '--name-only', tree)
+      .split('\n')
+      .filter(line => line.length > 0)
+      .sort();
+  }
+
+  /** The working tree's tree id through the real tracker, failing the test loudly if git refused. */
+  async function treeId(root = project.dir): Promise<string> {
+    const result = await DEFAULT_CHANGE_TRACKER.workingTreeId(root);
+    expect(result).toEqual({ kind: 'tree', tree: expect.stringMatching(/^[0-9a-f]{40,64}$/) as unknown as string });
+    return (result as { kind: 'tree'; tree: string }).tree;
+  }
+
+  /** Harness state, as a run would leave it. */
+  function withFactoryState(root = project.dir): void {
+    write('.factory/run1/state.json', '{"secret":"harness state"}\n', root);
+  }
+
+  it('AC-009 THE PRE-FIX REPRODUCTION: the OLD step 5 really does exit non-zero when .factory is ignored', () => {
+    git(project.dir, 'init', '-q');
+    write('src/a.ts', 'export const a = 1;\n');
+    write('.gitignore', '.factory/\n');
+    git(project.dir, 'add', '.');
+    git(project.dir, 'commit', '-q', '-m', 'base');
+    withFactoryState();
+
+    // Exactly the call the harness used to make, in a snapshot-shaped temporary index.
+    const tmp = mkdtempSync(join(tmpdir(), SNAPSHOT_TMP_PREFIX));
+    try {
+      const old = harnessGit(project.dir, 'add', ['-A', '--', '.', ':(exclude).factory'], { GIT_INDEX_FILE: join(tmp, 'index') });
+
+      // The premise of R8a. If this ever stops failing, the fix is no longer load-bearing and
+      // AC-009 would be untestable — which the brief says to escalate rather than paper over.
+      expect(old.ok).toBe(false);
+      // The error text observed on git 2.39.5, recorded here as the evidence for OQ-1.
+      expect((old as { ok: false; error: string }).error).toContain('ignored by one of your .gitignore files');
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('AC-009 the NEW step 5 succeeds on exactly that project', async () => {
+    git(project.dir, 'init', '-q');
+    write('src/a.ts', 'export const a = 1;\n');
+    write('.gitignore', '.factory/\n');
+    git(project.dir, 'add', '.');
+    git(project.dir, 'commit', '-q', '-m', 'base');
+    withFactoryState();
+
+    const tree = await treeId();
+
+    expect(treePaths(tree)).toEqual(['.gitignore', 'src/a.ts']);
+  });
+
+  it('AC-009 CONTENT EQUIVALENCE: the same project gives the SAME TREE ID with and without .factory/ ignored, and it equals the PRE-CHANGE tree', async () => {
+    /**
+     * Build a BYTE-IDENTICAL project in `root`. Whether `.factory/` is ignored is varied through
+     * `.git/info/exclude` — a local, untracked git-ignore mechanism (and the very one R8b uses) —
+     * rather than through `.gitignore`, which is itself a TRACKED file: adding a line to it would
+     * change a blob in the tree and make the two trees differ for a reason that has nothing to do
+     * with the mechanism under test. AC-009 names "other git-ignore mechanism" explicitly.
+     */
+    const build = (root: string, ignoreFactory: boolean) => {
+      git(root, 'init', '-q');
+      write('src/a.ts', 'export const a = 1;\n', root);
+      write('src/nested/deep.ts', 'export const d = 1;\n', root);
+      write('README.md', '# p\n', root);
+      write('.gitignore', '*.log\nbuild/\n', root);
+      write('build/out.o', 'obj\n', root);
+      write('build/keep.txt', 'tracked but ignored\n', root);
+      write('noise.log', 'ignored\n', root);
+      write('doomed.txt', 'about to go\n', root);
+      git(root, 'add', '.');
+      git(root, 'add', '-f', '--', 'build/keep.txt');
+      git(root, 'commit', '-q', '-m', 'base');
+      if (ignoreFactory) writeFileSync(join(root, '.git', 'info', 'exclude'), '.factory/\n');
+      // A deleted tracked file and an untracked non-ignored file, so `-A` semantics are in play.
+      rmSync(join(root, 'doomed.txt'));
+      write('untracked.txt', 'new\n', root);
+      withFactoryState(root);
+    };
+
+    const other = mkdtempSync(join(tmpdir(), 'ff-equiv-'));
+    try {
+      build(project.dir, true);
+      build(other, false);
+
+      const ignored = await treeId(project.dir);
+      const notIgnored = await treeId(other);
+
+      // The whole of R8 in one assertion: robustness changed, captured content did not.
+      expect(ignored).toBe(notIgnored);
+      expect(treePaths(ignored)).toEqual(['.gitignore', 'README.md', 'build/keep.txt', 'src/a.ts', 'src/nested/deep.ts', 'untracked.txt']);
+      // The deleted tracked file is gone and the ignored objects were never added.
+      expect(treePaths(ignored)).not.toContain('doomed.txt');
+      expect(treePaths(ignored)).not.toContain('build/out.o');
+      expect(treePaths(ignored)).not.toContain('noise.log');
+
+      // ...and it equals THE PRE-CHANGE TREE: the OLD step 5, run on the project where `.factory`
+      // is NOT ignored, which is the only project the old mechanism could still handle. This is
+      // the proof that the new step 5 reproduces today's content exactly, rather than merely
+      // agreeing with itself.
+      const tmp = mkdtempSync(join(tmpdir(), SNAPSHOT_TMP_PREFIX));
+      try {
+        const index = { GIT_INDEX_FILE: join(tmp, 'index') };
+        expect(harnessGit(other, 'add', ['-A', '--', '.', ':(exclude).factory'], index).ok).toBe(true);
+        const trackedIgnored = harnessGit(other, 'ls-files', ['--cached', '-i', '--exclude-standard', '-z', '--', '.', ':(exclude).factory']);
+        expect(trackedIgnored.ok).toBe(true);
+        for (const path of (trackedIgnored as { ok: true; stdout: string }).stdout.split('\0').filter(p => p.length > 0)) {
+          expect(harnessGit(other, 'add', ['-f', '--', path], { ...index, GIT_LITERAL_PATHSPECS: '1' }).ok).toBe(true);
+        }
+        const preChange = harnessGit(other, 'write-tree', [], index);
+        expect(preChange.ok).toBe(true);
+        expect((preChange as { ok: true; stdout: string }).stdout.trim()).toBe(ignored);
+      } finally {
+        rmSync(tmp, { recursive: true, force: true });
+      }
+    } finally {
+      rmSync(other, { recursive: true, force: true });
+    }
+  });
+});
+
+/**
+ * All four combinations of `.factory` being git-TRACKED x git-IGNORED (AC-009). `.factory/` must
+ * stay out of the tree in every one of them (R8-3): it is excluded by NEVER BEING NAMED, so no
+ * combination of ignore rules and index entries can let it in.
+ */
+describe('R8a .factory/ stays out in all four tracked x ignored combinations (AC-009)', () => {
+  let restoreEnv: () => void;
+
+  beforeEach(() => {
+    restoreEnv = isolateHarnessGit();
+  });
+
+  afterEach(() => {
+    restoreEnv();
+  });
+
+  async function treeOf(): Promise<string[]> {
+    const result = await DEFAULT_CHANGE_TRACKER.workingTreeId(project.dir);
+    expect(result.kind).toBe('tree');
+    const tree = (result as { kind: 'tree'; tree: string }).tree;
+    return git(project.dir, 'ls-tree', '-r', '--name-only', tree)
+      .split('\n')
+      .filter(line => line.length > 0)
+      .sort();
+  }
+
+  /** A repository with `src/a.ts`, plus whatever the combination needs. */
+  function base(ignoreFactory: boolean): void {
+    git(project.dir, 'init', '-q');
+    write('src/a.ts', 'export const a = 1;\n');
+    write('.gitignore', ignoreFactory ? '.factory/\n' : '# nothing\n');
+    git(project.dir, 'add', '.');
+  }
+
+  it('AC-009 untracked and NOT ignored: .factory/ is absent from the tree', async () => {
+    base(false);
+    git(project.dir, 'commit', '-q', '-m', 'base');
+    write('.factory/run1/state.json', '{}\n');
+
+    expect(await treeOf()).toEqual(['.gitignore', 'src/a.ts']);
+  });
+
+  it('AC-009 untracked and IGNORED: .factory/ is absent from the tree', async () => {
+    base(true);
+    git(project.dir, 'commit', '-q', '-m', 'base');
+    write('.factory/run1/state.json', '{}\n');
+
+    expect(await treeOf()).toEqual(['.gitignore', 'src/a.ts']);
+  });
+
+  it('AC-009 TRACKED and not ignored: .factory/ is absent from the tree', async () => {
+    base(false);
+    write('.factory/tracked.json', '{"was":"committed"}\n');
+    git(project.dir, 'add', '--', '.factory/tracked.json');
+    git(project.dir, 'commit', '-q', '-m', 'base');
+
+    expect(await treeOf()).toEqual(['.gitignore', 'src/a.ts']);
+  });
+
+  it('AC-009 TRACKED AND IGNORED — the story\'s named hazard — .factory/ is STILL absent from the tree', async () => {
+    // This is the case that rejects mechanism (a): `-A` stages tracked files regardless of ignore
+    // rules, so merely dropping the `:(exclude)` pathspec would have leaked harness state into the
+    // snapshot and into the CHECKPOINT 3 change.
+    base(true);
+    write('.factory/tracked.json', '{"was":"committed"}\n');
+    git(project.dir, 'add', '-f', '--', '.factory/tracked.json');
+    git(project.dir, 'commit', '-q', '-m', 'base');
+    // ...and the harness is writing in there right now, as it would be during a real run.
+    write('.factory/run1/state.json', '{"secret":"harness state"}\n');
+
+    const paths = await treeOf();
+
+    expect(paths).toEqual(['.gitignore', 'src/a.ts']);
+    expect(paths.filter(path => path.startsWith('.factory'))).toEqual([]);
+  });
+});
+
+/** Top-level names are now argv, so they must be inert as pathspecs and as options (AC-009). */
+describe('R8a hostile top-level filenames (AC-009)', () => {
+  let restoreEnv: () => void;
+
+  beforeEach(() => {
+    restoreEnv = isolateHarnessGit();
+  });
+
+  afterEach(() => {
+    restoreEnv();
+  });
+
+  it('AC-009 a top-level file called -f, --, :(glob)x, :x or *.log is captured as the literal file it is', async () => {
+    git(project.dir, 'init', '-q');
+    write('src/a.ts', 'export const a = 1;\n');
+    write('.gitignore', '.factory/\n');
+    // `--` and `GIT_LITERAL_PATHSPECS=1` are the only reasons this works: without the separator
+    // `-f` is an OPTION (and would force-add every ignored file), and without literal pathspecs
+    // `:(glob)x`, `:x` and `*.log` are pathspec MAGIC rather than filenames.
+    const hostile = ['-f', '--', ':(glob)x', ':x', '*.log', '-A', ':(exclude)src'];
+    for (const name of hostile) write(name, `content of ${name}\n`);
+    git(project.dir, 'add', '-A', '--', '.');
+    git(project.dir, 'commit', '-q', '-m', 'base');
+    write('.factory/run1/state.json', '{}\n');
+
+    const result = await DEFAULT_CHANGE_TRACKER.workingTreeId(project.dir);
+    expect(result.kind).toBe('tree');
+    const paths = git(project.dir, 'ls-tree', '-r', '--name-only', (result as { kind: 'tree'; tree: string }).tree)
+      .split('\n')
+      .filter(line => line.length > 0);
+
+    for (const name of hostile) expect(paths).toContain(name);
+    expect(paths).toContain('src/a.ts');
+    // `-f` was a filename, never a flag: nothing ignored was forced in.
+    expect(paths.filter(path => path.startsWith('.factory'))).toEqual([]);
+  });
+});
+
+/** `-A` still does the walking, so its semantics must be exactly what they were (AC-009). */
+describe('R8a `-A` semantics are preserved (AC-009)', () => {
+  let restoreEnv: () => void;
+
+  beforeEach(() => {
+    restoreEnv = isolateHarnessGit();
+  });
+
+  afterEach(() => {
+    restoreEnv();
+  });
+
+  async function treeOf(): Promise<string[]> {
+    const result = await DEFAULT_CHANGE_TRACKER.workingTreeId(project.dir);
+    expect(result.kind).toBe('tree');
+    return git(project.dir, 'ls-tree', '-r', '--name-only', (result as { kind: 'tree'; tree: string }).tree)
+      .split('\n')
+      .filter(line => line.length > 0)
+      .sort();
+  }
+
+  it('AC-009 a DELETED tracked file is absent from the tree, as a deletion', async () => {
+    git(project.dir, 'init', '-q');
+    write('keep.txt', 'keep\n');
+    write('doomed.txt', 'gone\n');
+    write('.gitignore', '.factory/\n');
+    git(project.dir, 'add', '.');
+    git(project.dir, 'commit', '-q', '-m', 'base');
+    rmSync(join(project.dir, 'doomed.txt'));
+
+    const paths = await treeOf();
+
+    expect(paths).toContain('keep.txt');
+    expect(paths).not.toContain('doomed.txt');
+  });
+
+  it('AC-009 a TRACKED file inside a fully-ignored top-level directory is still in the tree (step 6 recovers it)', async () => {
+    // The top-level entry `build` is dropped from step 5 because it is ignored; this proves
+    // nothing is lost by that, because the force-add in step 6 brings its tracked file back.
+    git(project.dir, 'init', '-q');
+    write('src/a.ts', 'export const a = 1;\n');
+    write('.gitignore', 'build/\n.factory/\n');
+    write('build/keep.txt', 'tracked but ignored\n');
+    write('build/out.o', 'never captured\n');
+    git(project.dir, 'add', '.');
+    git(project.dir, 'add', '-f', '--', 'build/keep.txt');
+    git(project.dir, 'commit', '-q', '-m', 'base');
+    write('.factory/run1/state.json', '{}\n');
+
+    const paths = await treeOf();
+
+    expect(paths).toContain('build/keep.txt');
+    expect(paths).not.toContain('build/out.o');
+    expect(paths.filter(path => path.startsWith('.factory'))).toEqual([]);
+  });
+
+  it('AC-009 a non-ignored top-level directory holding a tracked-and-ignored file keeps ALL of its files', async () => {
+    // The regression this guards: dropping a top-level entry because something NESTED inside it
+    // is ignored would silently lose every other file in that directory.
+    git(project.dir, 'init', '-q');
+    write('mixed/keep.ts', 'export const k = 1;\n');
+    write('mixed/thing.log', 'tracked but ignored\n');
+    write('.gitignore', 'mixed/thing.log\n.factory/\n');
+    git(project.dir, 'add', '.');
+    git(project.dir, 'add', '-f', '--', 'mixed/thing.log');
+    git(project.dir, 'commit', '-q', '-m', 'base');
+
+    const paths = await treeOf();
+
+    expect(paths).toContain('mixed/keep.ts');
+    expect(paths).toContain('mixed/thing.log');
+  });
+});
+
+/** Degenerate projects must reach the empty tree, never a failure (AC-009). */
+describe('R8a degenerate projects (AC-009)', () => {
+  let restoreEnv: () => void;
+
+  beforeEach(() => {
+    restoreEnv = isolateHarnessGit();
+  });
+
+  afterEach(() => {
+    restoreEnv();
+  });
+
+  const EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
+
+  it('AC-009 an EMPTY project reaches the empty tree rather than failing', async () => {
+    git(project.dir, 'init', '-q');
+
+    expect(await DEFAULT_CHANGE_TRACKER.workingTreeId(project.dir)).toEqual({ kind: 'tree', tree: EMPTY_TREE });
+  });
+
+  it('AC-009 a project where EVERY top-level entry is ignored reaches the empty tree rather than failing', async () => {
+    git(project.dir, 'init', '-q');
+    // Even `.gitignore` itself is ignored, so the list of names to add is empty.
+    write('.gitignore', '*\n');
+    write('noise.log', 'ignored\n');
+    write('build/out.o', 'ignored\n');
+    write('.factory/run1/state.json', '{}\n');
+
+    expect(await DEFAULT_CHANGE_TRACKER.workingTreeId(project.dir)).toEqual({ kind: 'tree', tree: EMPTY_TREE });
+  });
+
+  it('AC-009 a project holding ONLY .factory/ reaches the empty tree', async () => {
+    git(project.dir, 'init', '-q');
+    write('.factory/run1/state.json', '{}\n');
+
+    expect(await DEFAULT_CHANGE_TRACKER.workingTreeId(project.dir)).toEqual({ kind: 'tree', tree: EMPTY_TREE });
+  });
+});
+
+/**
+ * AC-009 + AC-010 TOGETHER — the regression guard for R8-1, and the test that would have caught
+ * shipping the two halves apart. R8b guarantees R8a's failure condition: once `.factory/` is in
+ * `.git/info/exclude`, `.factory` is ignored in EVERY project, so the old `add` would have failed
+ * on every run rather than on an unlucky few.
+ */
+describe('R8a + R8b together (AC-009, AC-010, R8-1)', () => {
+  let restoreEnv: () => void;
+
+  beforeEach(() => {
+    restoreEnv = isolateHarnessGit();
+  });
+
+  afterEach(() => {
+    restoreEnv();
+  });
+
+  it('AC-009 AC-010 hiding .factory/ and THEN snapshotting succeeds on a project that did not ignore it', async () => {
+    git(project.dir, 'init', '-q', '-b', 'main');
+    write('src/a.ts', 'export const a = 1;\n');
+    write('.gitignore', '*.log\n');
+    git(project.dir, 'add', '.');
+    git(project.dir, 'commit', '-q', '-m', 'base');
+    const before = await DEFAULT_CHANGE_TRACKER.workingTreeId(project.dir);
+
+    // The pre-flight step, exactly as the orchestrator runs it...
+    expect(await DEFAULT_CHANGE_TRACKER.hideFactoryFromGit(project.dir)).toEqual({ kind: 'added' });
+    // ...which now makes `.factory` ignored, the very condition that used to break the snapshot.
+    write('.factory/run1/state.json', '{}\n');
+
+    const base: ChangeBase = { kind: 'git', commit: git(project.dir, 'rev-parse', 'HEAD').trim(), branch: 'refs/heads/main', preExisting: [] };
+    const result = await DEFAULT_CHANGE_TRACKER.snapshot(project.dir, base, 'r8-combined', 1);
+
+    expect(result.kind).toBe('written');
+    const written = result as { kind: 'written'; tree: string };
+    // And the captured content is the same as before `.factory/` became ignored.
+    expect(written.tree).toBe((before as { kind: 'tree'; tree: string }).tree);
+    expect(git(project.dir, 'ls-tree', '-r', '--name-only', written.tree).split('\n').filter(l => l.length > 0).sort()).toEqual([
+      '.gitignore',
+      'src/a.ts'
+    ]);
+  });
+});

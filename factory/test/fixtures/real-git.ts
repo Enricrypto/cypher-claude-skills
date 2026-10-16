@@ -4,9 +4,9 @@
  */
 
 import { execFileSync } from 'child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
-import { join } from 'path';
+import { dirname, join } from 'path';
 
 /**
  * Run git in `cwd` for test SETUP, isolated from the user's and the caller's git configuration,
@@ -58,4 +58,38 @@ export function isolateHarnessGit(): () => void {
     }
     rmSync(dir, { recursive: true, force: true });
   };
+}
+
+/**
+ * Write `lines` as the project's `.gitignore` and track it (PR R-1, R8a / AC-009). A trailing
+ * newline on every line, so the last pattern is never joined to whatever is appended later.
+ */
+export function gitignore(cwd: string, lines: string[]): void {
+  writeFileSync(join(cwd, '.gitignore'), lines.map(line => `${line}\n`).join(''));
+  setupGit(cwd, ['add', '.gitignore']);
+}
+
+/**
+ * Make `path` both git-TRACKED and git-IGNORED (PR R-1, R8a / AC-009 — the story's named hazard).
+ * `-f` is the only way into the index for an ignored path, which is exactly why the snapshot needs
+ * its own force-add step to get such a file back out again.
+ */
+export function trackIgnored(cwd: string, path: string, content: string): void {
+  const absolute = join(cwd, path);
+  mkdirSync(dirname(absolute), { recursive: true });
+  writeFileSync(absolute, content);
+  setupGit(cwd, ['add', '-f', '--', path]);
+}
+
+/**
+ * A linked worktree of `repo` at a fresh temp directory, whose `.git` is a FILE, not a directory
+ * (PR R-1, R8b / AC-010 — risk R8-4). Returns its path and the path of the git directory
+ * `info/exclude` really lives in (the COMMON one, which is `repo`'s).
+ */
+export function linkedWorktree(repo: string, branch = 'ff-linked'): { dir: string; commonGitDir: string } {
+  const dir = mkdtempSync(join(tmpdir(), 'ff-linked-worktree-'));
+  // mkdtemp already made it, and `git worktree add` wants to create it itself.
+  rmSync(dir, { recursive: true, force: true });
+  setupGit(repo, ['worktree', 'add', '-b', branch, dir]);
+  return { dir, commonGitDir: join(repo, '.git') };
 }

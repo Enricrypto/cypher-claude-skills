@@ -416,9 +416,15 @@ describe('AC-134 a skeptic that does not answer', () => {
     [
       'throws',
       () => {
-        throw new Error('SDK error: 529 overloaded');
+        // PR R-1 (R3): this placeholder used to read 'SDK error: 529 overloaded', which R3's
+        // classifier now — correctly, per AC-006 — reads as a transient HTTP 529 and retries
+        // once, so BOTH skeptics were invoked twice and the count of two below failed. This case
+        // is about a skeptic that THROWS escalating without its issue being treated as disproved,
+        // not about retry classification, so the placeholder is now an error the allow-list does
+        // not recognise. A transient throw on skeptic A is covered by transient-retry.test.ts.
+        throw new Error('SDK error: malformed response envelope');
       },
-      { agent: 'orchestrator', reason: 'MANUAL', message: /^Orchestration error: SDK error: 529 overloaded$/ }
+      { agent: 'orchestrator', reason: 'MANUAL', message: /^Orchestration error: SDK error: malformed response envelope$/ }
     ],
     [
       'returns ESCALATE',

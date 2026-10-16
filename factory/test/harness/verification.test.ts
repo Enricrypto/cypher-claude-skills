@@ -413,14 +413,22 @@ describe('AC-124 one parallel agent fails while the other runs', () => {
       {
         ...passingScript(),
         [TV]: () => {
-          throw new Error('SDK error: 529 overloaded\nretry later');
+          // PR R-1 (R3): this placeholder used to read 'SDK error: 529 overloaded', which R3's
+          // classifier now — correctly, per AC-006 — reads as a transient HTTP 529 and retries
+          // once, giving this agent a second invocation record and breaking the count below.
+          // This case is about an agent that THROWS being waited for and escalated, not about
+          // retry classification, so the placeholder is now an error the allow-list does not
+          // recognise. A transient throw inside this very parallel section is covered by
+          // transient-retry.test.ts's AC-008 tests instead. The second line still exercises the
+          // first-line-only truncation of `error`.
+          throw new Error('SDK error: malformed response envelope\nretry later');
         }
       },
       state => {
         expect(state.escalations.map(e => [e.agent, e.reason])).toEqual([['orchestrator', 'MANUAL']]);
-        expect(state.escalations[0].context.message).toBe('Orchestration error: SDK error: 529 overloaded\nretry later');
+        expect(state.escalations[0].context.message).toBe('Orchestration error: SDK error: malformed response envelope\nretry later');
         const threw = state.agentInvocations!.find(i => i.agent === TV)!;
-        expect(threw).toMatchObject({ outcome: 'threw', error: 'SDK error: 529 overloaded', evaluation: 1 });
+        expect(threw).toMatchObject({ outcome: 'threw', error: 'SDK error: malformed response envelope', evaluation: 1 });
       }
     ]
   ];
@@ -1065,7 +1073,13 @@ describe('IMPORTANT-1 IMPORTANT-2 the Test Verifier is measured against a baseli
     [
       'throws',
       () => {
-        throw new Error('SDK error: 529 overloaded');
+        // PR R-1 (R3): this placeholder used to read 'SDK error: 529 overloaded', which R3's
+        // classifier now — correctly, per AC-006 — reads as a transient HTTP 529 and retries
+        // once, so this agent would silently get a second invocation and a second record. This
+        // case is about the N-3 escalation a Test Verifier that WROTE OUTSIDE A TEST PATH earns,
+        // not about retry classification, so the placeholder is now an error the allow-list does
+        // not recognise (same reading as the AC-124 / AC-134 placeholders above).
+        throw new Error('SDK error: malformed response envelope');
       }
     ]
   ])('IMPORTANT-1 a Test Verifier that %s after writing outside a test path escalates N-3 in that evaluation, naming the file', async (_label, answer) => {

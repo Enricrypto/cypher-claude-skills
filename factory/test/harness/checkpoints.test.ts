@@ -21,7 +21,7 @@ import { runFeatureFactory } from '../../feature/workflows/feature-factory-orche
 import { closeRun } from '../../harness/run-directory';
 import { AgentInvocation } from '../../runner/invoke-agent';
 import { backend, placeholder, researcher, spec, story } from '../fixtures/agent-outputs';
-import { scriptedInvoker, tempProject, TempProject } from '../fixtures/harness-run';
+import { NO_OP_KEEP_AWAKE, scriptedInvoker, tempProject, TempProject } from '../fixtures/harness-run';
 import { fakeChangeTracker } from '../fixtures/changes';
 
 let project: TempProject;
@@ -53,6 +53,7 @@ describe('the three human checkpoints', () => {
     const seen: string[] = [];
 
     const state = await runFeatureFactory({
+      keepAwake: NO_OP_KEEP_AWAKE,
       featureName: 'no-approver',
       featureDescription: 'add 2FA',
       cwd: projectDir,
@@ -75,6 +76,7 @@ describe('the three human checkpoints', () => {
     const seen: string[] = [];
 
     const state = await runFeatureFactory({
+      keepAwake: NO_OP_KEEP_AWAKE,
       featureName: 'rejected',
       featureDescription: 'add 2FA',
       cwd: projectDir,
@@ -94,6 +96,7 @@ describe('the three human checkpoints', () => {
     const asked: string[] = [];
 
     await runFeatureFactory({
+      keepAwake: NO_OP_KEEP_AWAKE,
       featureName: 'approved',
       featureDescription: 'add 2FA',
       cwd: projectDir,
@@ -114,6 +117,7 @@ describe('the three human checkpoints', () => {
     let shown = '';
 
     await runFeatureFactory({
+      keepAwake: NO_OP_KEEP_AWAKE,
       featureName: 'summary',
       featureDescription: 'add 2FA',
       cwd: projectDir,
@@ -151,6 +155,7 @@ describe('the workspace the agents read', () => {
     writeFileSync(join(projectDir, '.factory', 'an-older-run', 'TECHNICAL_BRIEF.md'), olderBrief);
 
     const state = await runFeatureFactory({
+      keepAwake: NO_OP_KEEP_AWAKE,
       featureName: 'clean-workspace',
       featureDescription: 'add 2FA',
       cwd: projectDir,
@@ -174,6 +179,7 @@ describe('the workspace the agents read', () => {
     // reporting ESCALATE and had written no code whatsoever. agentDeclaredBlocked() was wired
     // for the read-only agents and never for the builders.
     const state = await runFeatureFactory({
+      keepAwake: NO_OP_KEEP_AWAKE,
       featureName: 'builder-refuses',
       featureDescription: 'add 2FA',
       cwd: projectDir,
@@ -213,6 +219,7 @@ describe('artifact persistence and sequencing', () => {
     let featureId = '';
 
     const state = await runFeatureFactory({
+      keepAwake: NO_OP_KEEP_AWAKE,
       featureName: 'sequencing',
       featureDescription: 'add 2FA',
       cwd: projectDir,
@@ -240,6 +247,7 @@ describe('artifact persistence and sequencing', () => {
   it('namespaces artifacts per run, so one feature never stomps another', async () => {
     const run = () =>
       runFeatureFactory({
+        keepAwake: NO_OP_KEEP_AWAKE,
         featureName: 'namespaced',
         featureDescription: 'add 2FA',
         cwd: projectDir,

@@ -42,13 +42,22 @@ describe('orchestrator gates', () => {
     const invoker = scriptedInvoker(passingScript(), { cwd: project.dir });
     const recorded = recordingGates();
 
-    const state = await runToEnd({ cwd: project.dir, invoke: invoker.invoke, gates: recorded.gates });
+    // PR R-1, R1 / AC-003: the keep-awake seam is named EXPLICITLY here rather than inherited,
+    // so this test says out loud which double keeps the assertion below true. `jest.spyOn` with
+    // no implementation calls through, so the real `caffeinate` would otherwise be spawned.
+    const state = await runToEnd({
+      cwd: project.dir,
+      invoke: invoker.invoke,
+      gates: recorded.gates,
+      keepAwake: () => ({ held: false, reason: 'test double' })
+    });
 
     expect(state.completionStatus).toBe('SUCCESS');
     expect(recorded.calls).toEqual([
       { gate: 'auditInfrastructure', cwd: project.dir },
       { gate: 'auditExecution', cwd: project.dir }
     ]);
+    // R1, R3 and R8b add no gate call: the recorded-gates array is unchanged.
     for (const spy of spawned) expect(spy).not.toHaveBeenCalled();
   });
 

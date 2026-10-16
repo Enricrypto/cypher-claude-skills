@@ -2,7 +2,7 @@
 
 A 10-agent chain that takes a feature description to tested, validated code, behind gates that
 are code rather than prose. This document describes what the program does in this version
-(Phase B, PR B-2). Where the code and this file disagree, the code is right and this file is a
+(Phase R, PR R-1). Where the code and this file disagree, the code is right and this file is a
 bug: `factory/test/contracts/doc-drift.test.ts` checks the claims below against the code. What
 comes next is in [docs/ROADMAP.md](../../docs/ROADMAP.md).
 
@@ -134,7 +134,7 @@ Feature description
 ```
 
 **SUCCESS means: the Stage 4 gate passed and CHECKPOINT 3 was approved.** The run stays in
-Stage 4. The factory never touches your branch, index or working tree, never pushes, and writes git objects only under `refs/factory/<id>/`.
+Stage 4. The factory never touches your branch, index or working tree, never pushes, and writes git objects only under `refs/factory/<id>/`; the one file it writes inside `.git/` is `info/exclude`, where it adds `.factory/` locally so git ignores the harness's own directory.
 Those objects are its own snapshots (see [Snapshots after Stage 3](#snapshots-after-stage-3)).
 What happens to an approved change next (a commit on your branch, a push, a review) is yours to
 do; the factory does none of it.
@@ -244,6 +244,12 @@ commit at `refs/factory/<id>/stage3-<n>`, with `n` counting from 1 in each run.
   them, if they still exist), with `.factory/` excluded. The tree's root is the project directory
   (the run's cwd), also when that is a subdirectory of the repository. Its parent is HEAD; on a
   branch with no commit yet it is a root commit. Files outside a sparse checkout are absent.
+- **Whether the project ignores `.factory/` makes no difference.** The `add` names the project's
+  non-ignored top-level entries explicitly — never `.factory`, and never an ignored entry, because
+  naming an ignored path is what made git refuse the whole `add` (it exited non-zero on git 2.39
+  as soon as `.factory/` was ignored). `-A` still does the walking, so deletions, sparse checkouts
+  and skip-worktree entries behave as they always did, and the tree's content is the same either
+  way. `.factory/` stays out whether it is tracked, ignored, both or neither.
 - **How it is written:** with git plumbing only. `add` and `write-tree` build the tree in a
   temporary index in its own temporary directory outside the repository, never `.git/index`;
   `commit-tree` makes the commit and a compare-and-swap `update-ref` moves the ref. Every git call
@@ -462,6 +468,21 @@ A fresh start needs a feature description: a missing or blank one is refused
 `DESCRIPTION_REQUIRED` ("A new run needs a feature description (--feature).") before anything is
 written.
 
+Once every refusal above has passed — so nothing is held for a run that does not run — two things
+happen before the run's base is captured. On macOS the harness holds the machine awake for as long
+as the orchestrator process lives, by spawning `caffeinate -dims -w <pid>` from its one
+allow-listed spawn site; the hold releases itself when that process ends, so there is nothing to
+clean up, and on every other platform nothing is spawned at all. Either way the run logs one line
+and a hold that could not be taken is never an error: idle sleep is a reason runs used to stop, not
+a requirement for one to start.
+
+Then, on a fresh start and a resume alike, the harness adds `.factory/` to the project's
+`.git/info/exclude`, so git ignores its own run directory. The write is local, never committed, and
+idempotent: it appends one line only when no line already names `.factory/` or `.factory`, leaving
+your own entries byte for byte as they were. It never stops a run — outside a git work tree, or
+when the file cannot be written, the run logs the reason and goes on. It happens before the base
+snapshot so the base is captured with `.factory/` already excluded.
+
 A fresh start then moves every finished run directory (SUCCESS, MANUAL_STOP, and old directories
 with no `state.json`), contents intact, into `.factory/_archive/<id>/`. It then refuses to start
 while any ACTIVE, PAUSED or ESCALATED run exists, naming each one with its resume and close
@@ -594,6 +615,23 @@ evaluation and the skeptic instance), and added to `metrics.timePerStage`. The a
 carries the same real start and end. An invocation that throws (an SDK or API error) is recorded
 too, with `outcome: 'threw'` and the first line of the error (at most 500 characters), saved
 before the error escalates the run; with two agents running in parallel, both are on record.
+
+Every agent runs with `CLAUDE_CODE_MAX_OUTPUT_TOKENS` set to `64000`, on top of the environment the
+agent already needs rather than in place of it. It is a ceiling, not a target: a reply that fitted
+under the old default is unchanged, and only a reply that would have been truncated behaves
+differently.
+
+An invocation that fails with a transient signal is retried **once**, and only once: the harness
+waits 30 seconds and re-invokes the same call with the same prompt. Transient means `Connection
+closed`, HTTP 429, HTTP 529, any other 5xx, or a socket reset (`ECONNRESET`, `EPIPE`). A max-turns
+error, an output-token-limit error and a schema or structured-output error are **never** retried —
+they would fail the same way — and so is anything the list does not recognise, which escalates
+exactly as it did before. **Both** attempts are recorded in `agentInvocations`, each with its own
+real start and duration, and the failed one is saved before the wait begins; they carry
+`invocationAttempt` 1 and 2, and the first also carries the `transientSignal` that matched. A
+transport retry is not a builder attempt: the builder's own `attempt`, phase and round are
+identical on both records, so a dropped connection never costs a builder one of its tries. See also
+[Loop-back rules](#loop-back-rules) — this retry is bounded at one and is not configurable.
 
 ---
 

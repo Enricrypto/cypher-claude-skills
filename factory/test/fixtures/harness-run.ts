@@ -52,6 +52,32 @@ export interface TempProject {
 }
 
 /**
+ * The two no-op doubles every whole-run test needs (PR R-1), defined here ONCE so there is a
+ * single place to change and no test invents its own.
+ */
+const WHOLE_RUN_DOUBLES: Pick<OrchestrationOptions, 'keepAwake' | 'waitBeforeRetry'> = {
+  // R1 / AC-003: without it every whole-run test really spawns `caffeinate`, which both fails
+  // AC-1 and holds the Jest worker's machine awake for real.
+  keepAwake: () => ({ held: false, reason: 'test double' }),
+  // R3-1: without it every transient-retry test would sleep 30 REAL seconds, which `barriers.ts`
+  // forbids ("never a sleep").
+  waitBeforeRetry: async () => {}
+};
+
+/**
+ * The ONE keep-awake double the whole suite shares (R1 / AC-003).
+ *
+ * `runToEnd` defaults to it, and every test that calls `runFeatureFactory` DIRECTLY passes it:
+ * the orchestrator resolves `options.keepAwake ?? realKeepAwake`, so a direct call that omitted it
+ * would spawn a real `caffeinate -dims -w <jest worker pid>` on a maintainer's Mac and hold the
+ * machine awake until that worker exited (risk R1-1).
+ *
+ * It reports `{held:false}` — the quieter branch of the orchestrator's one log line, and the shape
+ * a non-macOS machine really produces.
+ */
+export const NO_OP_KEEP_AWAKE = WHOLE_RUN_DOUBLES.keepAwake!;
+
+/**
  * Remove `path` and everything below it, also when it holds a sealed (read-only) review copy
  * (PR B-2 D-3): every directory below it is made writable first. Symlinks are never followed.
  */
@@ -207,9 +233,10 @@ export function passingScript(): InvokerScript {
 /**
  * Run the orchestrator with test defaults: silent logger, an approver that approves every
  * checkpoint, passing recorded gates, a fake change tracker (so no test but change-diff's runs
- * git), the non-durable state writer (AC-104: same file and bytes, no fsync) and the review root
- * `<cwd>-review` (PR B-2 D-20). Anything in
- * `overrides` wins, `stateWriter` included. Tests that call runFeatureFactory directly stay durable.
+ * git), the non-durable state writer (AC-104: same file and bytes, no fsync), the review root
+ * `<cwd>-review` (PR B-2 D-20), a no-op keep-awake hold and a zero-delay retry wait (PR R-1).
+ * Anything in `overrides` wins, `stateWriter` included. Tests that call runFeatureFactory directly
+ * stay durable — and must pass `NO_OP_KEEP_AWAKE` themselves, since they inherit none of this.
  */
 export function runToEnd(
   overrides: Partial<OrchestrationOptions> & Pick<OrchestrationOptions, 'cwd' | 'invoke'>
@@ -224,6 +251,8 @@ export function runToEnd(
     stateWriter: nonDurableStateWriter,
     // PR B-2 D-20: review copies go beside the project, outside it, and tempProject removes them.
     reviewRoot: `${overrides.cwd}-review`,
+    // PR R-1: the EXPLICIT no-op hold (R1 / AC-003) and the zero-delay retry wait (R3-1).
+    ...WHOLE_RUN_DOUBLES,
     ...overrides
   });
 }

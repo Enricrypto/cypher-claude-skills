@@ -22,7 +22,7 @@ import { acceptFeatureSpec, buildOrder, parallelBatches } from '../../contracts/
 import { runFeatureFactory } from '../../feature/workflows/feature-factory-orchestrator';
 import { AgentInvocation } from '../../runner/invoke-agent';
 import { featureSpec, placeholder } from '../fixtures/agent-outputs';
-import { tempProject, TempProject } from '../fixtures/harness-run';
+import { NO_OP_KEEP_AWAKE, tempProject, TempProject } from '../fixtures/harness-run';
 import { fakeChangeTracker } from '../fixtures/changes';
 
 let project: TempProject;
@@ -179,6 +179,7 @@ describe('runFeatureFactory — Tier 1 is optional', () => {
     const invoke = recordingInvoker(invoked);
 
     await runFeatureFactory({
+      keepAwake: NO_OP_KEEP_AWAKE,
       featureName: 'standalone',
       featureDescription: 'add a health check endpoint',
       cwd: projectDir,
@@ -196,6 +197,7 @@ describe('runFeatureFactory — Tier 1 is optional', () => {
     const invoke = recordingInvoker(invoked);
 
     await runFeatureFactory({
+      keepAwake: NO_OP_KEEP_AWAKE,
       featureName: 'add-2fa',
       featureDescription: 'Let a user enable 2FA',
       cwd: projectDir,
@@ -219,6 +221,7 @@ describe('runFeatureFactory — Tier 1 is optional', () => {
     const prompts: string[] = [];
 
     const state = await runFeatureFactory({
+      keepAwake: NO_OP_KEEP_AWAKE,
       featureName: 'add-2fa',
       featureDescription: 'Let a user enable 2FA',
       cwd: projectDir,
@@ -253,6 +256,7 @@ describe('runFeatureFactory — Tier 1 is optional', () => {
     spec.story.details.artifacts[0].content = '# User Story\n\nIt should just work, really.';
 
     const state = await runFeatureFactory({
+      keepAwake: NO_OP_KEEP_AWAKE,
       featureName: 'add-2fa',
       featureDescription: 'Let a user enable 2FA',
       cwd: projectDir,
