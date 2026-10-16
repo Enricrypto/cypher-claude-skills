@@ -257,7 +257,8 @@ describe('AC-001 on macOS the run holds caffeinate -dims -w <orchestrator pid> f
       expect(args).toEqual([...CAFFEINATE_FLAGS, '-w', String(process.pid)]);
       expect(args).toEqual(['-dims', '-w', String(process.pid)]);
       expect(options).toMatchObject({ detached: true, stdio: 'ignore' });
-      expect(options).not.toHaveProperty('shell', true);
+      // No shell in any form: `shell: '/bin/sh'` would word-split the argv just as `true` would.
+      expect(options).not.toHaveProperty('shell');
 
       // The two details without which this "reliability" fix would break every run: unref, or the
       // orchestrator could never exit; an 'error' listener, or an ENOENT is an uncaught exception.
@@ -346,6 +347,8 @@ describe('AC-002 off macOS the keep-awake behaviour is a no-op', () => {
       // The control: the same run, same script, with the keep-awake seam doing nothing at all.
       const control = scriptedInvoker(passingScript(), { cwd: project.dir });
       const expected = await runToEnd({ cwd: project.dir, invoke: control.invoke });
+      // Pin the control first, so two runs that escalated the same way cannot pass as "identical".
+      expect(expected.completionStatus).toBe('SUCCESS');
 
       const other = tempProject('ff-accept-r1-nonmac-');
       try {
