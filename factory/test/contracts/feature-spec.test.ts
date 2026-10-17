@@ -118,6 +118,25 @@ describe('acceptFeatureSpec — the gate IS the contract', () => {
     expect(acceptance.accepted).toBe(false);
     expect(existsSync(join(projectDir, 'USER_STORY.md'))).toBe(false);
   });
+
+  /**
+   * I-3 (R9, C-3). acceptFeatureSpec runs validateOutputSchema over a PRE-SUPPLIED spec and turns
+   * every error into a blocker, short-circuiting before the documents are written. `briefItems` is
+   * therefore required by the SDK schema only and optional in the harness: a spec written before
+   * R-9 has no such field and must still be accepted.
+   */
+  it('I-3 accepts a pre-supplied spec that predates briefItems: no blocker, documents still written', async () => {
+    const supplied = featureSpec();
+    delete supplied.spec.details.briefItems;
+
+    const acceptance = await acceptFeatureSpec(supplied, projectDir);
+
+    expect(supplied.spec.details.briefItems).toBeUndefined();
+    expect(acceptance.blockers).toEqual([]);
+    expect(acceptance.accepted).toBe(true);
+    expect(existsSync(join(projectDir, 'TECHNICAL_BRIEF.md'))).toBe(true);
+    expect(existsSync(join(projectDir, 'FILE_LIST.md'))).toBe(true);
+  });
 });
 
 describe('I-14 a pre-supplied spec must carry its documents', () => {

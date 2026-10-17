@@ -35,6 +35,10 @@ how often an agent runs out of turns; usage per changed file.
 
 ## After R9
 
+The row below is prepared, not measured. R-9 ships the labels and the Ponytail rules but is
+itself the last run made **without** them, so there is nothing yet to record: **the first
+post-R9 run fills this row**, and each run after it adds its own. No number here is invented.
+
 | Run | What | Early stops | Checkpoint rejections | Crashed / out-of-turns calls | Builder out of turns | Agent minutes | Priced usage | Source lines | Test lines | Test per code line |
 |---|---|---|---|---|---|---|---|---|---|---|
-| | | | | | | | | | | |
+| _first run after R-9 (PR #n) — to be filled_ | | | | | | | | | | |

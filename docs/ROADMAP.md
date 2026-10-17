@@ -80,12 +80,24 @@ checkpoint. Items R1–R10, binding decisions in
   in `agentInvocations`, never spending a builder attempt on a dropped connection; R8 names the
   project's non-ignored top-level entries in the snapshot `add` instead of a `:(exclude)`
   pathspec, which git 2.39 refused once `.factory/` was ignored.
-- **R-9 (next):** R9 proportionate effort (tidy-up / behaviour change / new feature) with the
-  Ponytail rules for builders and the Test Verifier. Moved ahead of R-2 so later runs can be
-  measured against the baseline in
+- **R-9 (done, PR #n):** R9 proportionate effort with the Ponytail rules. The Spec Writer now
+  declares `briefItems`, one entry per unit of work, each labelled `tidy-up`, `behaviour change`
+  or `new feature` — a field its SDK output schema requires, so the model is retried until every
+  item carries one — and mirrors those labels in `TECHNICAL_BRIEF.md`'s prose, which is how they
+  reach CHECKPOINT 2, the Test Verifier and the Validator, none of which receive structured
+  output. The harness fails closed: a missing or unrecognised label reads as `new feature`, full
+  depth, and a missing or unmirrored label is one IMPORTANT finding, `Effort Labels Declared`,
+  that never blocks the stage — the enforcement stays the human at CHECKPOINT 2. Contracts 04 and
+  05 carry the smallest-complete-change ladder, the never-cut list (trust-boundary validation,
+  data-loss error handling, security, accessibility), the `shortcut: <the limit>, <when to
+  upgrade>` comment form and the summary-ends-with-what-was-skipped rule; 06 carries the
+  label→test-depth table and the one-small-test rule; 07 judges depth against the label, accepts
+  a documented shortcut, and treats a cut to any never-cut item as Critical whatever the label.
+  All five documents credit Ponytail by Dietrich Gebert (MIT) by absolute URL; the skill itself is
+  not vendored. Moved ahead of R-2 so later runs can be measured against the baseline in
   [R_MEASUREMENTS.md](factory-runs/phase-r/R_MEASUREMENTS.md).
-- **R-2:** R4 `maxTurns` scaled to the file list, R5 a size warning at CHECKPOINT 2. R4 may shrink
-  or be dropped if R-9's measurements show agents finishing within their turns.
+- **R-2 (next):** R4 `maxTurns` scaled to the file list, R5 a size warning at CHECKPOINT 2. R4 may
+  shrink or be dropped if R-9's measurements show agents finishing within their turns.
 - **R-3:** R6 the story gate counts structured and document ACs, R7 invisible characters block in
   the brief and file list, R10 a clear usage-limit message.
 

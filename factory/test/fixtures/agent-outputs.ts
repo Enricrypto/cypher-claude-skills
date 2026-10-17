@@ -13,6 +13,7 @@
 
 import {
   BackendBuilderOutput,
+  BriefItem,
   FeatureConsolidatorOutput,
   FeatureFactoryAgentOutput,
   FrontendBuilderOutput,
@@ -122,15 +123,31 @@ export const ALL_SURFACES_PRESENT: Readonly<SecuritySurfaceDeclaration> = Object
 });
 
 /**
+ * One labelled brief item (R9): enough for the Stage 2 `Effort Labels Declared` criterion to pass.
+ * Its label is mirrored in the default TECHNICAL_BRIEF.md content below, because the criterion
+ * checks the mirror as well as the label.
+ */
+export const DEFAULT_BRIEF_ITEMS: ReadonlyArray<Readonly<BriefItem>> = Object.freeze([
+  Object.freeze({ item: 'Add TOTP via speakeasy', label: 'new feature' as const, reason: 'Behaviour that was not there before.' })
+]);
+
+/**
  * A technical brief. `files` become the FILE_LIST (all CREATE). `ui: true` adds a UI component,
  * which is what makes the orchestrator run the Frontend Builder; the default is backend-only.
  * `securitySurface` defaults to every surface PRESENT, the fail-closed declaration.
+ * `briefItems` defaults to one labelled item, mirrored in the brief's own text.
  */
 export function spec({
   files = ['src/a.ts'],
   ui = false,
-  securitySurface = ALL_SURFACES_PRESENT
-}: { files?: string[]; ui?: boolean; securitySurface?: SecuritySurfaceDeclaration } = {}): SpecWriterOutput {
+  securitySurface = ALL_SURFACES_PRESENT,
+  briefItems = DEFAULT_BRIEF_ITEMS
+}: {
+  files?: string[];
+  ui?: boolean;
+  securitySurface?: SecuritySurfaceDeclaration;
+  briefItems?: ReadonlyArray<Readonly<BriefItem>>;
+} = {}): SpecWriterOutput {
   return {
     stage: 2,
     agent: '03-spec-writer',
@@ -139,7 +156,21 @@ export function spec({
     details: {
       summary: 'Technical brief.',
       artifacts: [
-        { name: 'TECHNICAL_BRIEF.md', path: 'TECHNICAL_BRIEF.md', description: 'Brief', content: '# Technical Brief\n\nTOTP via speakeasy.' },
+        {
+          name: 'TECHNICAL_BRIEF.md',
+          path: 'TECHNICAL_BRIEF.md',
+          description: 'Brief',
+          // The effort labels are mirrored here on purpose: the Stage 2 criterion reads the document.
+          content: [
+            '# Technical Brief',
+            '',
+            'TOTP via speakeasy.',
+            '',
+            '## Effort labels',
+            '',
+            ...briefItems.map(i => `- ${i.item} — **${i.label}** — ${i.reason}`)
+          ].join('\n')
+        },
         {
           name: 'FILE_LIST.md',
           path: 'FILE_LIST.md',
@@ -152,6 +183,7 @@ export function spec({
       uiComponents: ui ? [{ name: 'TwoFactorForm', description: 'Enable 2FA form' }] : [],
       fileList: files.map(path => ({ path, type: 'CREATE' as const, reason: 'core', complexity: 'SIMPLE' as const })),
       testStrategy: { unitTests: [], integrationTests: [], e2eTests: [] },
+      briefItems: briefItems.map(i => ({ ...i })),
       securitySurface: { ...securitySurface }
     }
   };

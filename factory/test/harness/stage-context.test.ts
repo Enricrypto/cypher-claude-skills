@@ -32,7 +32,9 @@ import { canAdvanceStage, stageContracts } from '../../harness/stage-gates';
 import {
   ResearcherOutput,
   StoryWriterOutput,
-  SpecWriterOutput
+  SpecWriterOutput,
+  DEFAULT_EFFORT_LABEL,
+  EFFORT_LABELS
 } from '../../harness/agent-output-schema';
 
 let projectDir: string;
@@ -126,7 +128,10 @@ function specOutput(): SpecWriterOutput {
       fileList: [
         { path: 'src/auth/totp.ts', type: 'CREATE', reason: 'TOTP', complexity: 'MODERATE' }
       ],
-      testStrategy: { unitTests: [], integrationTests: [], e2eTests: [] }
+      testStrategy: { unitTests: [], integrationTests: [], e2eTests: [] },
+      // R9, C-6: this fixture is cast `as SpecWriterOutput`, so omitting a new field produces no
+      // compile error. The label is set deliberately, not by accident — the Stage 2 block reads it.
+      briefItems: [{ item: 'TOTP enrolment', label: 'new feature', reason: 'Behaviour that was not there.' }]
     }
   } as SpecWriterOutput;
 }
@@ -929,5 +934,95 @@ describe('the follow-up and skeptic documents are persisted by the harness (AC-1
     expect(readFileSync(join(projectDir, RUN_DIR, 'VALIDATION_REPORT.md'), 'utf-8')).toBe('# Validation Report\n\nNo critical issues.');
     expect(readFileSync(join(projectDir, RUN_DIR, 'VALIDATION_FOLLOWUP.md'), 'utf-8')).toMatch(/^# Validation Follow-up/);
     expect(readFileSync(join(projectDir, RUN_DIR, 'SKEPTIC_REVIEW.md'), 'utf-8')).toMatch(/^# Skeptic Review/);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// R9: the Stage 2 metadata block. There was no Stage 2 block in buildStageContext before this —
+// outputs.spec was read only behind Stage 3/4 guards — so every branch here is new.
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+describe('Stage 2 metadata — the effort labels the Spec Writer declared (R9)', () => {
+  /** A spec whose briefItems is exactly `items`, whatever shape that is. */
+  const specWithItems = (items: unknown): SpecWriterOutput => {
+    const output = specOutput();
+    (output.details as { briefItems?: unknown }).briefItems = items;
+    return output;
+  };
+
+  it('U-5 counts the declared items and records each resolved label in order', () => {
+    const context = buildStageContext({
+      stage: 2,
+      cwd: projectDir,
+      outputs: {
+        spec: specWithItems([
+          { item: 'one', label: 'tidy-up', reason: 'no behaviour change' },
+          { item: 'two', label: 'behaviour change', reason: 'one behaviour moves' },
+          { item: 'three', label: 'new feature', reason: 'new behaviour' }
+        ])
+      }
+    });
+
+    expect(context.metadata.briefItemsDeclared).toEqual(3);
+    expect(context.metadata.briefItemLabels).toEqual([...EFFORT_LABELS]);
+    expect(context.metadata.briefItemsUnlabelled).toEqual(0);
+  });
+
+  it('U-6 an absent field declares nothing and is not an error', () => {
+    const output = specOutput();
+    delete (output.details as { briefItems?: unknown }).briefItems;
+
+    const context = buildStageContext({ stage: 2, cwd: projectDir, outputs: { spec: output } });
+
+    expect(context.metadata.briefItemsDeclared).toEqual(0);
+    expect(context.metadata.briefItemLabels).toEqual([]);
+    expect(context.metadata.briefItemsUnlabelled).toEqual(0);
+  });
+
+  it('U-6 a briefItems that is not an array is read as no items, without throwing', () => {
+    for (const notAnArray of [null, 'tidy-up', 42, {}, true]) {
+      let context: ReturnType<typeof buildStageContext> | undefined;
+
+      expect(() => {
+        context = buildStageContext({ stage: 2, cwd: projectDir, outputs: { spec: specWithItems(notAnArray) } });
+      }).not.toThrow();
+
+      expect(context!.metadata.briefItemsDeclared).toEqual(0);
+      expect(context!.metadata.briefItemLabels).toEqual([]);
+    }
+  });
+
+  it('U-6 every unusable label resolves to new feature and is counted as unlabelled', () => {
+    const context = buildStageContext({
+      stage: 2,
+      cwd: projectDir,
+      outputs: {
+        spec: specWithItems([
+          { item: 'good', label: 'tidy-up', reason: 'no behaviour change' },
+          { item: 'unrecognised', label: 'TIDY-UP', reason: 'wrong case' },
+          { item: 'missing', reason: 'no label at all' },
+          { item: 'wrong type', label: 7, reason: 'a number' },
+          null
+        ])
+      }
+    });
+
+    expect(context.metadata.briefItemsDeclared).toEqual(5);
+    expect(context.metadata.briefItemLabels).toEqual([
+      'tidy-up',
+      DEFAULT_EFFORT_LABEL,
+      DEFAULT_EFFORT_LABEL,
+      DEFAULT_EFFORT_LABEL,
+      DEFAULT_EFFORT_LABEL
+    ]);
+    expect(context.metadata.briefItemsUnlabelled).toEqual(4);
+    expect(DEFAULT_EFFORT_LABEL).toEqual('new feature');
+  });
+
+  it('U-6 no spec output at all leaves the keys unset, so the criterion falls back to its own defaults', () => {
+    const context = buildStageContext({ stage: 2, cwd: projectDir, outputs: {} });
+
+    expect(context.metadata.briefItemsDeclared).toBeUndefined();
+    expect(context.metadata.briefItemLabels).toBeUndefined();
   });
 });

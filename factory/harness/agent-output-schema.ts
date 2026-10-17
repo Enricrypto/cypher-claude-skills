@@ -107,6 +107,39 @@ export const SECURITY_CHECK_SURFACE: Readonly<Record<SecurityCheckName, Security
 export type SecuritySurfaceDeclaration = Record<SecuritySurfaceName, 'PRESENT' | 'ABSENT'> & { notes?: string };
 
 // ============================================================================
+// EFFORT: the three labels a brief item carries (R9)
+// ============================================================================
+
+/**
+ * How much implementation and test depth a brief item calls for. The Spec Writer labels every
+ * item; the builders, the Test Verifier and the Validator follow the label.
+ */
+export const EFFORT_LABELS = ['tidy-up', 'behaviour change', 'new feature'] as const;
+export type EffortLabel = typeof EFFORT_LABELS[number];
+
+/**
+ * Fail closed: an item with no label, or one outside the enum, gets the deepest treatment.
+ * Never the cheapest — a missing label must not buy a free pass.
+ */
+export const DEFAULT_EFFORT_LABEL: EffortLabel = 'new feature';
+
+/** One unit of work in the brief, independent of the file list. */
+export interface BriefItem {
+  /** What the unit of work is, in one line. */
+  item: string;
+  label: EffortLabel;
+  /** Why that label, in one line. This is what a human reads at CHECKPOINT 2 to catch a mislabel. */
+  reason: string;
+}
+
+/** The label an item really carries. Anything unusable is DEFAULT_EFFORT_LABEL (fail closed). */
+export function resolveEffortLabel(label: unknown): EffortLabel {
+  return (EFFORT_LABELS as readonly string[]).includes(label as string)
+    ? (label as EffortLabel)
+    : DEFAULT_EFFORT_LABEL;
+}
+
+// ============================================================================
 // STAGE 1: RESEARCHER OUTPUT
 // ============================================================================
 
@@ -269,6 +302,14 @@ export interface SpecWriterOutput extends FeatureFactoryAgentOutput {
       integrationTests: string[];
       e2eTests: string[];
     };
+
+    /**
+     * One entry per unit of work, each with exactly one effort label. Required by the SDK schema;
+     * optional here so an older or hand-built spec still type-checks. Absent, empty, or carrying a
+     * label outside the enum means `new feature` / full depth (fail closed) — see
+     * resolveEffortLabel.
+     */
+    briefItems?: BriefItem[];
 
     /**
      * Which security surfaces the feature has. Required by the SDK schema; optional here so an

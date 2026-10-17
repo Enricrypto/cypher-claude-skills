@@ -19,6 +19,7 @@
 
 import { isReadOnly, FeatureFactoryAgent, AGENT_STAGE, REQUIRED_ARTIFACTS, returnsOnlyReviewDocuments } from './agent-registry';
 import {
+  EFFORT_LABELS,
   SECURITY_CHECKS,
   SECURITY_CHECK_SURFACE,
   SECURITY_SURFACES,
@@ -252,6 +253,20 @@ const DETAILS_BY_AGENT: Record<FeatureFactoryAgent, { properties: Record<string,
         { unitTests: arrayOf(str('Test'), 'Unit'), integrationTests: arrayOf(str('Test'), 'Integration'), e2eTests: arrayOf(str('Test'), 'E2E') },
         ['unitTests', 'integrationTests', 'e2eTests']
       ),
+      briefItems: arrayOf(
+        object(
+          {
+            item: str('The unit of work, in one line'),
+            label: { type: 'string', enum: [...EFFORT_LABELS] },
+            reason: str('Why this label and not a deeper or shallower one, in one line')
+          },
+          ['item', 'label', 'reason']
+        ),
+        'One entry per unit of work. Every entry in "Files That Will Change" and every entry in ' +
+          '"Tests Required" must be covered by exactly one item. Mirror these labels in ' +
+          'TECHNICAL_BRIEF.md: the Test Verifier and the Validator read the document, not this field.',
+        1
+      ),
       securitySurface: object(
         {
           auth: surfaceDeclaration('Does the feature add or change anything behind an auth boundary (endpoints, roles, sessions)?'),
@@ -264,7 +279,7 @@ const DETAILS_BY_AGENT: Record<FeatureFactoryAgent, { properties: Record<string,
         [...SECURITY_SURFACES]
       )
     },
-    required: ['dataModel', 'apiContract', 'uiComponents', 'fileList', 'testStrategy', 'securitySurface']
+    required: ['dataModel', 'apiContract', 'uiComponents', 'fileList', 'testStrategy', 'briefItems', 'securitySurface']
   },
 
   '04-backend-builder': builderDetails(),

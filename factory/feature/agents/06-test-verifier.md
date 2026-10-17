@@ -42,6 +42,29 @@ One acceptance test file that covers every acceptance criterion from the user st
 - Do not mark a criterion as covered if the test doesn't actually verify it
 - Each test must be independently runnable (no hidden order dependencies)
 
+## Effort Labels and Test Depth
+
+Adapted from [Ponytail](https://github.com/DietrichGebert/ponytail) by Dietrich Gebert (MIT).
+
+The approved brief labels every item **tidy-up**, **behaviour change** or **new feature**. Read
+the label before deciding how deep to go. An item with no label, or one you cannot match to a
+label, is a **new feature**.
+
+| Label | What the item needs |
+|---|---|
+| tidy-up | The tests that already exist stay green. Write no new test for this item. |
+| behaviour change | One focused test per changed behaviour. |
+| new feature | Full depth: every acceptance criterion, every happy path, every failure path. |
+
+Independent of the label: new non-trivial logic — a branch, a loop, a parser, or code handling
+money or security — gets at least one small test. A genuinely trivial change gets none.
+
+**"No new tests" is not "fewer tests".** A tidy-up never justifies deleting, skipping or
+weakening a test that already exists. Nor does it exempt the item from the acceptance-criteria
+accounting: every criterion in the story is still either covered by a test — one that already
+exists counts — or explicitly reported as ⚠️ Not coverable, with a reason. The totals you report
+still cover the whole story.
+
 ## For Each Criterion
 Either:
 - ✅ **Covered** — test written, passes

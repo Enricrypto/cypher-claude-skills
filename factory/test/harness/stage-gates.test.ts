@@ -19,6 +19,7 @@ import {
   Stage4Metadata
 } from '../../harness/stage-gates';
 import { createFeatureState, recordImportantFindings } from '../../harness/state-tracker';
+import { DEFAULT_EFFORT_LABEL, EFFORT_LABELS } from '../../harness/agent-output-schema';
 import { MAX_BUILDER_ATTEMPTS } from '../../harness/loop-rules';
 
 describe('Stage Gates', () => {
@@ -639,11 +640,14 @@ describe('the split Stage 2 gate (C-9, A-2 step 4)', () => {
     expect(STAGE2_STORY_CONTRACT.artifacts.required).toEqual(['USER_STORY.md']);
   });
 
-  it('AC-78 STAGE2_SPEC_CONTRACT judges the brief alone: Technical Brief Complete (CRITICAL), File List Documented (IMPORTANT), both documents required', () => {
+  it('AC-78 STAGE2_SPEC_CONTRACT judges the brief alone: Technical Brief Complete (CRITICAL), File List Documented and Effort Labels Declared (IMPORTANT), both documents required', () => {
     expect(STAGE2_SPEC_CONTRACT.stage).toBe(2);
+    // R9 appended a third criterion. Technical Brief Complete is still the only CRITICAL one, so
+    // the brief part still blocks on exactly what it blocked on before.
     expect(criteria(STAGE2_SPEC_CONTRACT)).toEqual([
       ['Technical Brief Complete', 'CRITICAL'],
-      ['File List Documented', 'IMPORTANT']
+      ['File List Documented', 'IMPORTANT'],
+      ['Effort Labels Declared', 'IMPORTANT']
     ]);
     expect(STAGE2_SPEC_CONTRACT.artifacts.required).toEqual(['TECHNICAL_BRIEF.md', 'FILE_LIST.md']);
   });
@@ -714,5 +718,123 @@ describe('the Stage 5 contract (D-10, A-2 step 5)', () => {
 
     expect(decision.canAdvance).toBe(false);
     expect(decision.blockers.join('\n')).toContain(missing);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// R9: the `Effort Labels Declared` criterion. IMPORTANT, never CRITICAL — the decision's
+// enforcement is a human catching a mislabel at CHECKPOINT 2, not a gate.
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+describe('the Effort Labels Declared criterion (R9)', () => {
+  /** The criterion as the contract exposes it — the only way a gate ever reaches its validator. */
+  const criterion = STAGE2_SPEC_CONTRACT.acceptance.criteria.find(c => c.name === 'Effort Labels Declared')!;
+
+  const context = (artifacts: Record<string, string>, metadata: Record<string, unknown> = {}): StageContext => ({
+    cwd: process.cwd(),
+    stageDir: '',
+    artifacts,
+    metadata
+  });
+
+  /** A brief whose prose mirrors every label, which is what makes the labels readable at all. */
+  const mirroringBrief = ['# Technical Brief', '', ...EFFORT_LABELS.map(l => `- an item — **${l}**`)].join('\n');
+
+  it('U-7 passes when every item is labelled and every distinct label appears in the brief', async () => {
+    const result = await criterion.validator(
+      context(
+        { 'TECHNICAL_BRIEF.md': mirroringBrief },
+        { briefItemsDeclared: 3, briefItemLabels: [...EFFORT_LABELS], briefItemsUnlabelled: 0 }
+      )
+    );
+
+    expect(result.passed).toBe(true);
+    expect(result.score).toBe(100);
+    expect(result.details).toContain('3 brief item(s)');
+  });
+
+  it('U-8 fails naming the cause when nothing was declared', async () => {
+    const result = await criterion.validator(
+      context({ 'TECHNICAL_BRIEF.md': mirroringBrief }, { briefItemsDeclared: 0, briefItemLabels: [], briefItemsUnlabelled: 0 })
+    );
+
+    expect(result.passed).toBe(false);
+    expect(result.details).toContain('no brief items were declared');
+    expect(result.details).toContain(DEFAULT_EFFORT_LABEL);
+    // The IMPORTANT path drops result.blockers, so everything a human needs is in details.
+    expect(result.blockers).toEqual([]);
+  });
+
+  it('U-8 fails naming the cause when an item carried no usable label', async () => {
+    const result = await criterion.validator(
+      context(
+        { 'TECHNICAL_BRIEF.md': mirroringBrief },
+        { briefItemsDeclared: 2, briefItemLabels: ['tidy-up', DEFAULT_EFFORT_LABEL], briefItemsUnlabelled: 1 }
+      )
+    );
+
+    expect(result.passed).toBe(false);
+    expect(result.details).toContain('1 item(s) carried no usable label');
+    expect(result.blockers).toEqual([]);
+  });
+
+  it('U-8 fails naming each declared label the brief does not mirror', async () => {
+    const result = await criterion.validator(
+      context(
+        { 'TECHNICAL_BRIEF.md': '# Technical Brief\n\nNo labels written here.' },
+        { briefItemsDeclared: 2, briefItemLabels: ['tidy-up', 'tidy-up'], briefItemsUnlabelled: 0 }
+      )
+    );
+
+    expect(result.passed).toBe(false);
+    expect(result.details).toContain('does not mention the declared label(s): tidy-up');
+    // Each distinct label is named once, not once per item.
+    expect(result.details.match(/tidy-up/g)).toEqual(['tidy-up']);
+  });
+
+  it('U-9 never throws on a malformed context — a throwing criterion blocks whatever its severity', async () => {
+    const malformed: Array<Record<string, unknown>> = [
+      {},
+      { briefItemsDeclared: 'three', briefItemLabels: 'tidy-up', briefItemsUnlabelled: null },
+      { briefItemLabels: 42 },
+      { briefItemsDeclared: 1, briefItemLabels: [undefined, null] }
+    ];
+
+    for (const metadata of malformed) {
+      // No TECHNICAL_BRIEF.md artifact either: the `?? ''` guard is part of being total.
+      let result: Awaited<ReturnType<typeof criterion.validator>> | undefined;
+
+      await expect(
+        (async () => {
+          result = await criterion.validator(context({}, metadata));
+        })()
+      ).resolves.toBeUndefined();
+
+      expect(typeof result!.passed).toBe('boolean');
+      expect(typeof result!.details).toBe('string');
+    }
+  });
+
+  it('I-1 a failing criterion is an IMPORTANT finding and the stage still advances', async () => {
+    const decision = await canAdvanceStage(
+      2,
+      STAGE2_SPEC_CONTRACT,
+      context(
+        { 'TECHNICAL_BRIEF.md': '# Technical Brief\n\nNo labels.', 'FILE_LIST.md': '# Files\n\n- src/a.ts' },
+        { briefItemsDeclared: 0, briefItemLabels: [], briefItemsUnlabelled: 0 }
+      )
+    );
+
+    expect(decision.canAdvance).toBe(true);
+    expect(decision.importantFindings.some(f => f.startsWith('[Stage 2] Effort Labels Declared: '))).toBe(true);
+    expect(decision.blockers).toEqual([]);
+  });
+
+  it('I-2 the criterion added no required document and no second CRITICAL', () => {
+    expect(STAGE2_SPEC_CONTRACT.artifacts.required).toEqual(['TECHNICAL_BRIEF.md', 'FILE_LIST.md']);
+    expect(
+      STAGE2_SPEC_CONTRACT.acceptance.criteria.filter(c => c.severity === 'CRITICAL').map(c => c.name)
+    ).toEqual(['Technical Brief Complete']);
+    expect(criterion.severity).toBe('IMPORTANT');
   });
 });

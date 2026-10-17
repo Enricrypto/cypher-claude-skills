@@ -19,7 +19,7 @@ import { agentOutputSchema } from '../../runner/output-schemas';
 import { REQUIRED_ARTIFACTS, REVIEW_DOCUMENTS, AGENT_TOOLS, FeatureFactoryAgent } from '../../runner/agent-registry';
 import { stageContracts } from '../../harness/stage-gates';
 import { HARNESS_RENDERED_ARTIFACTS } from '../../harness/harness-documents';
-import { SECURITY_CHECKS, SKEPTIC_VERDICTS } from '../../harness/agent-output-schema';
+import { EFFORT_LABELS, SECURITY_CHECKS, SKEPTIC_VERDICTS } from '../../harness/agent-output-schema';
 
 /**
  * Every exact filename the gates demand: the literal `ctx.artifacts['…']` lookups scraped from
@@ -94,6 +94,21 @@ describe('security schemas (AC-67, AC-68)', () => {
     for (const name of surfaces) {
       expect(surface.properties[name].enum).toEqual(['PRESENT', 'ABSENT']);
     }
+  });
+
+  // U-4 (R9). The SDK schema is where "validated by its output schema" lives: the SDK retries the
+  // model until every item carries a label from the enum. Asserted against the imported constant
+  // so the schema and the type cannot drift.
+  it('the Spec Writer must declare at least one brief item, each with one label from EFFORT_LABELS', () => {
+    const schema: any = agentOutputSchema('03-spec-writer');
+    const details = schema.properties.details;
+    const briefItems = details.properties.briefItems;
+
+    expect(details.required).toContain('briefItems');
+    expect(briefItems.type).toBe('array');
+    expect(briefItems.minItems).toBe(1);
+    expect(briefItems.items.required).toEqual(['item', 'label', 'reason']);
+    expect(briefItems.items.properties.label.enum).toEqual([...EFFORT_LABELS]);
   });
 });
 

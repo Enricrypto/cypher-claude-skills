@@ -45,7 +45,8 @@ import {
   ValidatorOutput,
   ValidatorFollowupOutput,
   SkepticOutput,
-  FeatureConsolidatorOutput
+  FeatureConsolidatorOutput,
+  resolveEffortLabel
 } from './agent-output-schema';
 
 export interface StageOutputs {
@@ -410,6 +411,18 @@ export function buildStageContext(input: BuildStageContextInput): StageContext {
     metadata.filesIdentified = details.filesIdentified?.length ?? 0;
     metadata.patternsFound = details.existingPatterns?.length ?? 0;
     metadata.risksIdentified = details.risks ?? [];
+  }
+
+  // --- Stage 2: the effort labels the Spec Writer declared (R9) -------------------------
+  // Fail closed: an item with no usable label is `new feature`. A missing field is not an error
+  // here — it is an IMPORTANT finding in the spec gate, never a block.
+  if (outputs.spec) {
+    const declared = Array.isArray(outputs.spec.details.briefItems) ? outputs.spec.details.briefItems : [];
+    metadata.briefItemsDeclared = declared.length;
+    metadata.briefItemLabels = declared.map(item => resolveEffortLabel((item as { label?: unknown })?.label));
+    metadata.briefItemsUnlabelled = declared.filter(
+      item => resolveEffortLabel((item as { label?: unknown })?.label) !== (item as { label?: unknown })?.label
+    ).length;
   }
 
   // --- Stage 3: what the builders actually wrote ---------------------------------------
