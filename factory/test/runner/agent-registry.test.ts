@@ -148,7 +148,10 @@ describe('the Stage 4 follow-up and skeptic agents (AC-127, AC-132)', () => {
   });
 
   it('AC-127 both run on the Validator model at high effort, with fewer turns than the Validator', () => {
-    expect(AGENT_COST[FOLLOWUP]).toEqual({ model: 'claude-opus-5', effort: 'high', maxTurns: 20 });
-    expect(AGENT_COST[SKEPTIC]).toEqual({ model: 'claude-opus-5', effort: 'high', maxTurns: 15 });
+    expect(AGENT_COST[FOLLOWUP]).toEqual({ model: 'claude-opus-5', effort: 'high', maxTurns: 40 });
+    expect(AGENT_COST[SKEPTIC]).toEqual({ model: 'claude-opus-5', effort: 'high', maxTurns: 30 });
+    // "fewer turns than the Validator" stays true after the 2026-10-17 doubling.
+    expect(AGENT_COST[FOLLOWUP].maxTurns).toBeLessThan(AGENT_COST['07-validator'].maxTurns);
+    expect(AGENT_COST[SKEPTIC].maxTurns).toBeLessThan(AGENT_COST['07-validator'].maxTurns);
   });
 });

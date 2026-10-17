@@ -79,14 +79,17 @@ export interface AgentCost {
 export const AGENT_COST: Record<FeatureFactoryAgent, AgentCost> = {
   // Reads an unfamiliar codebase and every later stage inherits its mistakes. Most expensive
   // on purpose: an error here is not caught until the Validator, five agents downstream.
-  '01-researcher': { model: 'claude-opus-5', effort: 'high', maxTurns: 40 },
+  // Every turn below was doubled on 2026-10-17 (Researcher 40, Story Writer 15, Spec Writer 30,
+  // follow-up 20, skeptic 15): a run loses an agent's whole reply when it runs out, and the
+  // Researcher ran out at 40 on a large codebase (rebroker-201). Interim, like PR #9.
+  '01-researcher': { model: 'claude-opus-5', effort: 'high', maxTurns: 80 },
 
   // Transforms a report it is GIVEN into acceptance criteria. No codebase reading, one tool.
-  '02-story-writer': { model: 'claude-sonnet-5', effort: 'medium', maxTurns: 15 },
+  '02-story-writer': { model: 'claude-sonnet-5', effort: 'medium', maxTurns: 30 },
 
   // Turns the story into an API contract and file list the builders are bound by. Cheaper than
   // the Researcher (the hard reading is done) but still a design job the builders cannot undo.
-  '03-spec-writer': { model: 'claude-opus-5', effort: 'high', maxTurns: 30 },
+  '03-spec-writer': { model: 'claude-opus-5', effort: 'high', maxTurns: 60 },
 
   // Write real code against a real schema, run tests, and self-correct. The expensive ones, and
   // the only agents where a loop-back costs a whole extra invocation. Raised from 40 to 80: every
@@ -104,8 +107,8 @@ export const AGENT_COST: Record<FeatureFactoryAgent, AgentCost> = {
   // The follow-up reviews only the test files the Test Verifier changed; a skeptic judges one
   // CRITICAL issue. Narrower jobs than the Validator's, so fewer turns, but the same model and
   // effort: a wrong DISPROVED drops a real CRITICAL to IMPORTANT.
-  '07b-validator-followup': { model: 'claude-opus-5', effort: 'high', maxTurns: 20 },
-  '07c-validator-skeptic': { model: 'claude-opus-5', effort: 'high', maxTurns: 15 },
+  '07b-validator-followup': { model: 'claude-opus-5', effort: 'high', maxTurns: 40 },
+  '07c-validator-skeptic': { model: 'claude-opus-5', effort: 'high', maxTurns: 30 },
 
   // Reads memories after the fact and extracts patterns. Nothing depends on it within the run.
   '08-feature-consolidator': { model: 'claude-haiku-4-5-20251001', effort: 'low', maxTurns: 15 }
