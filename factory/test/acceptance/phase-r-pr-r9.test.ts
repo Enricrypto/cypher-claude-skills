@@ -558,8 +558,9 @@ describe('AC-010 the documents of record move with the code, and nothing out of 
     const skill = read('factory/feature/SKILL.md');
     const intro = skill.split('\n---')[0];
 
-    // The version line names this PR, and the retired one is gone from the intro.
-    expect(intro).toContain('(Phase R, PR R-9)');
+    // The version-line assertion that stood here was retired by PR R-2, which moved the line to
+    // `(Phase R, PR R-2)`. Each PR's acceptance file asserts its own version line exactly once;
+    // R-2's lives in phase-r-pr-r2.test.ts under AC-007. This one is still true, so it stays.
     expect(intro).not.toContain('PR R-1');
 
     // SKILL.md describes the three labels and the Ponytail rules, not just the version bump. Read
@@ -571,10 +572,11 @@ describe('AC-010 the documents of record move with the code, and nothing out of 
       expect({ claim, stated: skillText.includes(claim) }).toEqual({ claim, stated: true });
     }
 
-    // doc-drift's pins moved in the same change, so prose and code cannot disagree.
+    // doc-drift's pins moved in the same change, so prose and code cannot disagree. The two that
+    // pinned the `Phase R, PR R-9` version literal and its regex were retired by PR R-2, which
+    // moved them to R-2 and asserts them in phase-r-pr-r2.test.ts under AC-007. The claim
+    // literals R-9 added are pinned there still, and are asserted below.
     const docDrift = read('factory/test/contracts/doc-drift.test.ts');
-    expect(docDrift).toContain("'Phase R, PR R-9'");
-    expect(docDrift).toContain('/\\(Phase R, PR R-9\\)/');
     expect(docDrift).not.toContain("'Phase R, PR R-1'");
     for (const literal of [...EFFORT_LABELS, 'briefItems', 'shortcut:', 'Effort Labels Declared', PONYTAIL_URL]) {
       expect({ literal, pinned: docDrift.includes(`'${literal}'`) }).toEqual({ literal, pinned: true });
@@ -589,9 +591,9 @@ describe('AC-010 the documents of record move with the code, and nothing out of 
 
   it('AC-010 the ROADMAP and the measurements table moved too, and no out-of-scope file did', () => {
     const roadmap = read('docs/ROADMAP.md');
-    // R-9 is done with a summary of what shipped, and R-2 is next.
+    // R-9 is done with a summary of what shipped. The assertion that R-2 was next was retired by
+    // PR R-2, which shipped it and made R-3 next; phase-r-pr-r2.test.ts asserts that under AC-007.
     expect(roadmap).toMatch(/- \*\*R-9 \(done[^)]*\):\*\*/);
-    expect(roadmap).toContain('- **R-2 (next):**');
     expect(roadmap).not.toContain('- **R-9 (next):**');
     expect(EFFORT_LABELS.filter(label => !roadmap.includes(label))).toEqual([]);
 

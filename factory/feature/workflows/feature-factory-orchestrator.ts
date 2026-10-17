@@ -134,6 +134,7 @@ import { AgentInvocation, AgentInvoker } from '../../runner/invoke-agent';
 import { classifyInvocationError, TRANSIENT_RETRY_WAIT_MS } from '../../runner/transient-errors';
 import { KeepAwake, keepAwake as realKeepAwake } from '../../harness/keep-awake';
 import { REQUIRED_ARTIFACTS } from '../../runner/agent-registry';
+import { briefFileCount, scaledMaxTurns } from '../../harness/brief-size';
 import {
   buildStageContext,
   BuildStageContextInput,
@@ -895,6 +896,15 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
         ...(retry?.transientSignal !== undefined ? { transientSignal: retry.transientSignal } : {})
       });
 
+    // R4 (PR R-2): the ONE place the cap is computed, because this is the one call site of the
+    // invoker. Computed at invocation time from the approved file list, so a resume computes the
+    // same number (rebuildOutputs restores outputs.spec before any Stage 3 or Stage 4 agent runs),
+    // and computed HERE rather than inside the retry loop, so R3's one transient retry re-invokes
+    // with the same cap and the same prompt. `undefined` for every agent the decision names no
+    // base for, and the call then goes through untouched — no new key on an unscaled call.
+    const turnCap = scaledMaxTurns(call.agent, briefFileCount(outputs.spec?.details.fileList));
+    const invocation: AgentInvocation = turnCap === undefined ? call : { ...call, maxTurns: turnCap };
+
     // R3 / AC-006: at most two attempts at this ONE invocation. The bound is 1 and is NOT
     // configurable — no flag, no env var, no state field. The retry is in-memory, so nothing
     // resumes "into" it: a run killed mid-wait resumes with the failed attempt on record and
@@ -906,7 +916,7 @@ export async function runFeatureFactory(options: OrchestrationOptions): Promise<
       let output: unknown;
 
       try {
-        output = await invokeAgent(call);
+        output = await invokeAgent(invocation);
       } catch (error) {
         const verdict = classifyInvocationError(error);
         const willRetry = invocationAttempt === 1 && verdict.kind === 'transient';

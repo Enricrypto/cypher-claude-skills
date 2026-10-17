@@ -9,6 +9,7 @@
  */
 
 import { ArtifactRef, verifyArtifactMaterialization, DEFAULT_EFFORT_LABEL } from './agent-output-schema';
+import { briefSizeWarning } from './brief-size';
 import { testsRan } from './regression-baseline';
 import { MAX_BUILDER_ATTEMPTS } from './loop-rules';
 
@@ -166,6 +167,12 @@ export const STAGE2_SPEC_CONTRACT: StageContract = {
         name: 'Effort Labels Declared',
         description: 'Every brief item carries one effort label, mirrored in TECHNICAL_BRIEF.md',
         validator: async (ctx) => validateEffortLabels(ctx),
+        severity: 'IMPORTANT'
+      },
+      {
+        name: 'Brief Size Within Limits',
+        description: 'At most 12 acceptance criteria in the story and 30 files in the list',
+        validator: async (ctx) => validateBriefSize(ctx),
         severity: 'IMPORTANT'
       }
     ]
@@ -573,6 +580,34 @@ async function validateEffortLabels(ctx: StageContext): Promise<CriterionResult>
     return { passed: false, score: 50, details: problems.join('; '), blockers: [] };
   }
   return { passed: true, score: 100, details: `${declared} brief item(s), each labelled and mirrored in the brief` };
+}
+
+/** A metadata value this criterion is willing to compare: anything else is a count we do not have. */
+const finiteOrZero = (value: unknown): number =>
+  typeof value === 'number' && Number.isFinite(value) ? value : 0;
+
+/**
+ * R5 (PR R-2). IMPORTANT, never CRITICAL: the enforcement is the human at CHECKPOINT 2, not a
+ * gate — a warning that blocked would be the thing the decision forbids. Total by construction: a
+ * criterion that throws blocks whatever its severity, so this one never trusts the shape of what
+ * it reads, and both counts come from metadata the harness derived, never from the filesystem.
+ *
+ * A count that cannot be read is 0, which PASSES. That is deliberate and is the one place where
+ * "fail closed" means "pass": a count we do not have is not evidence of an oversized brief, and
+ * inventing a warning from a missing number would put a meaningless line above the approval prompt.
+ */
+async function validateBriefSize(ctx: StageContext): Promise<CriterionResult> {
+  const acCount = finiteOrZero(ctx.metadata.storyAcceptanceCriteriaCount);
+  const fileCount = finiteOrZero(ctx.metadata.briefFileCount);
+
+  const warning = briefSizeWarning({ acceptanceCriteria: acCount, files: fileCount });
+  if (warning) return { passed: false, score: 50, details: warning, blockers: [] };
+
+  return {
+    passed: true,
+    score: 100,
+    details: `${acCount} acceptance criteria and ${fileCount} file(s): within the limits`
+  };
 }
 
 async function validateACTestable(ctx: StageContext): Promise<CriterionResult> {

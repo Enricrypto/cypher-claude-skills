@@ -96,10 +96,24 @@ checkpoint. Items R1–R10, binding decisions in
   All five documents credit Ponytail by Dietrich Gebert (MIT) by absolute URL; the skill itself is
   not vendored. Moved ahead of R-2 so later runs can be measured against the baseline in
   [R_MEASUREMENTS.md](factory-runs/phase-r/R_MEASUREMENTS.md).
-- **R-2 (next):** R4 `maxTurns` scaled to the file list, R5 a size warning at CHECKPOINT 2. R4 may
-  shrink or be dropped if R-9's measurements show agents finishing within their turns.
-- **R-3:** R6 the story gate counts structured and document ACs, R7 invisible characters block in
-  the brief and file list, R10 a clear usage-limit message.
+- **R-2 (done, 2026-10-17):** R4 `maxTurns` scaled to the approved file list, R5 a size warning at
+  CHECKPOINT 2. Each of the two builders, the Test Verifier and the Validator (04, 05, 06, 07) is
+  now invoked with `min(150, max(base, 40 + 2 × files))`, computed fresh at invocation time in
+  `factory/harness/brief-size.ts` from the Spec Writer's structured `fileList` — every entry, a
+  `DELETE` included — and carried on the call as `AgentInvocation.maxTurns`, which
+  `createSdkInvoker` resolves as `config.maxTurns ?? call.maxTurns ?? cost.maxTurns`. The one
+  computation site is the orchestrator's `timedInvoke`, the one call site of the invoker, so a
+  transient retry re-invokes with the same cap and a resume computes the same number. Every other
+  agent keeps its `AGENT_COST` value, 07b and 08 included: `40 + 2 × files` does not depend on
+  `base`, so scaling them would erase the narrower budgets their jobs are given on purpose. No
+  value in `AGENT_COST` changed — the table is read-only input to the computation. R5 is a third
+  IMPORTANT criterion in the Stage 2 spec gate, `Brief Size Within Limits`: more than 12 acceptance
+  criteria or more than 30 files records one finding suggesting a split, logged immediately above
+  the CHECKPOINT 2 prompt and shown again in CHECKPOINT 3's findings. Exactly 12 and exactly 30 do
+  not warn, a count that cannot be read is 0 and passes, and nothing was added to what CHECKPOINT 2
+  presents or hashes.
+- **R-3 (next):** R6 the story gate counts structured and document ACs, R7 invisible characters
+  block in the brief and file list, R10 a clear usage-limit message.
 
 Interim, merged in PR #9: `maxTurns` raised for the builders, Test Verifier and Validator.
 

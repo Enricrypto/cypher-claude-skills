@@ -495,10 +495,10 @@ describe('doc drift: PR B-1 docs (AC-91, AC-93, AC-111 to AC-115)', () => {
     expect(stage5).toMatch(/only via `?--consolidate <id>`? on a SUCCESS run/);
   });
 
-  test('AC-115 SKILL.md carries the current version line (Phase R, PR R-9) and documents PR B-1: snapshots, the AC-45 sentence, instructed-not-enforced tests, Gate 2 fixes, .Factory, description refusals, MINOR-8, and the invisible-character rules', () => {
+  test('AC-115 SKILL.md carries the current version line (Phase R, PR R-2) and documents PR B-1: snapshots, the AC-45 sentence, instructed-not-enforced tests, Gate 2 fixes, .Factory, description refusals, MINOR-8, and the invisible-character rules', () => {
     const text = collapsed(skill);
     const required = [
-      'Phase R, PR R-9',
+      'Phase R, PR R-2',
       'refs/factory/<id>/stage3-<n>',
       'HEAD_MOVED',
       'SNAPSHOT_FAILED',
@@ -538,14 +538,22 @@ describe('doc drift: PR B-1 docs (AC-91, AC-93, AC-111 to AC-115)', () => {
       'briefItems',
       'shortcut:',
       'Effort Labels Declared',
-      'https://github.com/DietrichGebert/ponytail'
+      'https://github.com/DietrichGebert/ponytail',
+      // PR R-2: one literal per behaviour this PR adds. R4's formula verbatim (it sits on one
+      // source line in SKILL.md, because `collapsed()` joins hard-wrapped lines), R5's criterion
+      // name, and the two thresholds. R-1's and R-9's literals above stay — SKILL.md still makes
+      // those claims.
+      'maxTurns = min(150, max(base, 40 + 2 × files))',
+      'Brief Size Within Limits',
+      '12 acceptance criteria',
+      '30 files'
     ];
     const missing = required.filter(phrase => !text.includes(phrase));
     expect(missing).toEqual([]);
 
     // The version line names this PR, not the last one.
     const intro = collapsed(skill.split('\n---')[0]);
-    expect(intro).toMatch(/\(Phase R, PR R-9\)/);
+    expect(intro).toMatch(/\(Phase R, PR R-2\)/);
     expect(intro).not.toMatch(/PR R-1/);
   });
 
