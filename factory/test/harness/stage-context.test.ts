@@ -1026,3 +1026,76 @@ describe('Stage 2 metadata — the effort labels the Spec Writer declared (R9)',
     expect(context.metadata.briefItemLabels).toBeUndefined();
   });
 });
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// R5 (PR R-2): `metadata.briefFileCount`, the size of the approved list as R4 and R5 both count
+// it. Deliberately a SEPARATE field from `expectedFiles`, which drops DELETE entries — reusing it
+// would silently under-count every brief that deletes a file.
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+describe('Stage 2 metadata — the size of the approved file list (R5)', () => {
+  /** A spec whose fileList is exactly `list`, whatever shape that is. */
+  const specWithFileList = (list: unknown): SpecWriterOutput => {
+    const output = spec();
+    (output.details as { fileList?: unknown }).fileList = list;
+    return output;
+  };
+
+  const entry = (path: string, type: 'CREATE' | 'MODIFY' | 'DELETE') => ({
+    path,
+    type,
+    reason: 'core',
+    complexity: 'SIMPLE' as const
+  });
+
+  it('U-12 counts every entry including DELETE, while expectedFiles still excludes them', () => {
+    const list = [
+      entry('src/created.ts', 'CREATE'),
+      entry('src/changed.ts', 'MODIFY'),
+      entry('src/removed.ts', 'DELETE')
+    ];
+
+    const context = buildStageContext({
+      stage: 3,
+      cwd: projectDir,
+      // A builder output is needed for the Stage 3 block that derives expectedFiles at all.
+      outputs: { spec: specWithFileList(list), backend: backend({ files: ['src/created.ts'] }) }
+    });
+
+    // R4/R5's count: a deletion is still work a builder spends turns on.
+    expect(context.metadata.briefFileCount).toBe(3);
+    // The Stage 3 gate's set is unchanged: a deleted file cannot appear in filesModified.
+    expect(context.metadata.expectedFiles).toEqual(['src/created.ts', 'src/changed.ts']);
+    expect(context.metadata.filesExpected).toBe(2);
+  });
+
+  it('U-12 the two numbers agree when the brief deletes nothing', () => {
+    const list = [entry('src/a.ts', 'CREATE'), entry('src/b.ts', 'MODIFY')];
+
+    const context = buildStageContext({
+      stage: 2,
+      cwd: projectDir,
+      outputs: { spec: specWithFileList(list) }
+    });
+
+    expect(context.metadata.briefFileCount).toBe(2);
+  });
+
+  it('U-12 an unusable fileList counts 0 without throwing, so the criterion reads a number', () => {
+    for (const unusable of [undefined, null, 'src/a.ts', 42, {}, true]) {
+      let context: ReturnType<typeof buildStageContext> | undefined;
+
+      expect(() => {
+        context = buildStageContext({ stage: 2, cwd: projectDir, outputs: { spec: specWithFileList(unusable) } });
+      }).not.toThrow();
+
+      expect({ unusable, count: context!.metadata.briefFileCount }).toEqual({ unusable, count: 0 });
+    }
+  });
+
+  it('U-13 with no spec output the field is absent, and the criterion then reads 0', () => {
+    const context = buildStageContext({ stage: 2, cwd: projectDir, outputs: {} });
+
+    expect(context.metadata.briefFileCount).toBeUndefined();
+  });
+});

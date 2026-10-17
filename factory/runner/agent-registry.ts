@@ -94,7 +94,9 @@ export const AGENT_COST: Record<FeatureFactoryAgent, AgentCost> = {
   // Write real code against a real schema, run tests, and self-correct. The expensive ones, and
   // the only agents where a loop-back costs a whole extra invocation. Raised from 40 to 80: every
   // read, edit and test run costs a turn, and 40 ran out on a 15-file cleanup (cypher-agents,
-  // 2026-10-16). A bound scaled to FILE_LIST size is the planned replacement.
+  // 2026-10-16). The bound scaled to FILE_LIST size shipped in PR R-2 (R4): every value below is
+  // now the `base` of min(150, max(base, 40 + 2 × files)), computed per invocation in
+  // `factory/harness/brief-size.ts` for 04, 05, 06 and 07. This table is read-only input to it.
   '04-backend-builder': { model: 'claude-opus-5', effort: 'high', maxTurns: 80 },
   '05-frontend-builder': { model: 'claude-opus-5', effort: 'high', maxTurns: 80 },
   '06-test-verifier': { model: 'claude-opus-5', effort: 'high', maxTurns: 80 },

@@ -2,7 +2,7 @@
 
 A 10-agent chain that takes a feature description to tested, validated code, behind gates that
 are code rather than prose. This document describes what the program does in this version
-(Phase R, PR R-9). Where the code and this file disagree, the code is right and this file is a
+(Phase R, PR R-2). Where the code and this file disagree, the code is right and this file is a
 bug: `factory/test/contracts/doc-drift.test.ts` checks the claims below against the code. What
 comes next is in [docs/ROADMAP.md](../../docs/ROADMAP.md).
 
@@ -168,6 +168,18 @@ A checkpoint presents whole documents, never an agent's summary of them, and an 
 recorded, and saved before the next agent runs, with the SHA-256 of the exact text presented. A
 document that cannot be presented (missing, empty, a symlink) escalates the run without asking
 anyone. A story or brief that fails its part of the Stage 2 gate is never presented.
+
+**An unusually large brief is warned about, never blocked.** When the approved story has more than
+12 acceptance criteria, or the approved file list more than 30 files, the spec gate — which runs
+immediately before CHECKPOINT 2 — records one IMPORTANT finding,
+`Brief Size Within Limits`,
+naming each count that is over and suggesting the brief be split into more than one PR. It is
+logged as `⚠️  [stage-gate] …` directly above the approval prompt and shown again in CHECKPOINT 3's
+IMPORTANT findings. Exactly 12 and exactly 30 are the limits, not the threshold: neither warns. The
+counts come from the Story Writer's and Spec Writer's structured output, never from a parse of the
+documents, and a count the harness cannot read is read as 0, so a missing number never invents a
+warning. **Nothing is added to what CHECKPOINT 2 presents or hashes**, so a run paused before this
+version approves exactly as it did.
 
 **Invisible characters in what is presented.** A checkpoint is built from parts: its documents
 (`USER_STORY.md`, `TECHNICAL_BRIEF.md`, `FILE_LIST.md`, `VALIDATION_REPORT.md`,
@@ -659,6 +671,22 @@ agent already needs rather than in place of it. It is a ceiling, not a target: a
 under the old default is unchanged, and only a reply that would have been truncated behaves
 differently.
 
+**The turn cap scales with the approved brief.** Each of the two builders, the Test Verifier and the
+Validator (04, 05, 06, 07) is invoked with
+`maxTurns = min(150, max(base, 40 + 2 × files))`,
+where `base` is that agent's own value in `AGENT_COST` and `files` is the number of entries in the
+approved file list — the Spec Writer's structured list, which `FILE_LIST.md` mirrors, counting
+**every** entry including a `DELETE`, because a deleted file is still work a builder spends turns
+on. The numbers live in `factory/harness/brief-size.ts`, and the cap is computed fresh at
+invocation time from the list in `state.json`, so a resume computes the same number and no value in
+`AGENT_COST` changes. The `min` caps the result, so a `base` above 150 would be lowered; none is
+today, the highest being 80. Every other agent — the Researcher, the Story Writer, the Spec Writer,
+the follow-up reviewer, the skeptics and the Consolidator — is invoked with its `AGENT_COST` value
+exactly as before, even where it does receive `FILE_LIST.md`: `40 + 2 × files` does not depend on
+`base`, so scaling them would erase the narrower budgets their jobs are given on purpose. A
+`--model`-style forced per-run cap still wins over the computed one, because it is documented as
+forcing one value for every agent.
+
 An invocation that fails with a transient signal is retried **once**, and only once: the harness
 waits 30 seconds and re-invokes the same call with the same prompt. Transient means `Connection
 closed`, HTTP 429, HTTP 529, any other 5xx, or a socket reset (`ECONNRESET`, `EPIPE`). A max-turns
@@ -689,7 +717,7 @@ Each stage has a contract: criteria tagged CRITICAL or IMPORTANT, plus required 
 | Stage | CRITICAL | IMPORTANT | Required documents |
 |---|---|---|---|
 | 1 Discover | Researcher Report Complete, Files Identified | Patterns Found, Risks Flagged | `RESEARCHER_REPORT.md` |
-| 2 Plan | User Story Complete, Technical Brief Complete, AC Testable | File List Documented | `USER_STORY.md`, `TECHNICAL_BRIEF.md`, `FILE_LIST.md` |
+| 2 Plan | User Story Complete, Technical Brief Complete, AC Testable | File List Documented, Effort Labels Declared, Brief Size Within Limits | `USER_STORY.md`, `TECHNICAL_BRIEF.md`, `FILE_LIST.md` |
 | 3 Execute | All Files Modified, Unit Tests Pass, Loop Count Within Limits, Artifacts Materialized | Code Follows Patterns, No Abandoned TODOs | none |
 | 4 Verify | Acceptance Tests Complete, Validation Passed, Security Audit Passed, No Regressions | none | `TEST_REPORT.md`, `VALIDATION_REPORT.md` |
 | 5 Deliver | Consolidation Complete, Patterns Extracted | none | `CONSOLIDATION_REPORT.md`, `PATTERNS.md` |

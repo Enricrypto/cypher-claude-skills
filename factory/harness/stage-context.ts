@@ -24,6 +24,7 @@
 import { existsSync, readFileSync, readdirSync, statSync } from 'fs';
 import { basename, isAbsolute, join, relative, resolve, sep } from 'path';
 
+import { briefFileCount } from './brief-size';
 import { ExecutionMeasurement, Stage4Metadata, StageContext } from './stage-gates';
 import type { ValidationVerdict } from './state-tracker';
 import { evaluateSecurityChecks } from './security-checks';
@@ -423,6 +424,12 @@ export function buildStageContext(input: BuildStageContextInput): StageContext {
     metadata.briefItemsUnlabelled = declared.filter(
       item => resolveEffortLabel((item as { label?: unknown })?.label) !== (item as { label?: unknown })?.label
     ).length;
+
+    // R4/R5 (PR R-2) both count the approved list the same way: every entry, DELETE included — a
+    // deletion is still work a builder spends turns on, and still brief size. Deliberately NOT
+    // metadata.expectedFiles, which drops DELETE because a deleted file cannot appear in
+    // filesModified; reusing it would under-count every brief that deletes a file.
+    metadata.briefFileCount = briefFileCount(outputs.spec.details.fileList);
   }
 
   // --- Stage 3: what the builders actually wrote ---------------------------------------

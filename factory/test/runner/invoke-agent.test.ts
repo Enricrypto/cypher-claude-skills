@@ -188,3 +188,78 @@ describe('createSdkInvoker output-token ceiling (R2)', () => {
     expect(options.effort).toBe(AGENT_COST['04-backend-builder'].effort);
   });
 });
+
+/**
+ * R4: the computed per-call turn cap (Phase R, PR R-2).
+ *
+ * `AgentInvocation.maxTurns` is the SECOND call-level override, after `cwd` (D-4), and resolves the
+ * same way: the call's value when it carries one, the registry's otherwise. The orchestrator
+ * computes it from the approved file list; this module only enforces it.
+ *
+ * AC-005's assertion above is NOT edited: a call carrying no cap must still behave byte-identically,
+ * which is what makes U11 of the brief a test of this PR rather than a leftover.
+ */
+describe('createSdkInvoker per-call turn cap (R4)', () => {
+  /** The options of the one recorded query call, for an invocation with `extra` on the call. */
+  async function optionsFor(
+    extra: { maxTurns?: number },
+    config: { maxTurns?: number } = {}
+  ): Promise<Record<string, unknown>> {
+    const invoke = createSdkInvoker({ cwd: '/project', ...config });
+    await invoke({ stage: 3, agent: '04-backend-builder', prompt: 'build', ...extra });
+    expect(mockQueryCalls).toHaveLength(1);
+    return mockQueryCalls[0].options;
+  }
+
+  it('U9 a call carrying maxTurns: 102 makes options.maxTurns 102, with the option-key set unchanged', async () => {
+    await assertFakeSdk();
+
+    const options = await optionsFor({ maxTurns: 102 });
+
+    expect(options.maxTurns).toBe(102);
+    // The same eleven keys AC-005 pins: the cap changes a VALUE, never the shape of the options.
+    expect(Object.keys(options).sort()).toEqual([
+      'allowedTools',
+      'cwd',
+      'disallowedTools',
+      'effort',
+      'env',
+      'maxTurns',
+      'model',
+      'outputFormat',
+      'permissionMode',
+      'settingSources',
+      'systemPrompt'
+    ]);
+    // And nothing else moved with it.
+    expect(options.model).toBe(AGENT_COST['04-backend-builder'].model);
+    expect(options.effort).toBe(AGENT_COST['04-backend-builder'].effort);
+    expect(options.cwd).toBe('/project');
+  });
+
+  it('U10 config.maxTurns beats call.maxTurns, which beats the registry', async () => {
+    await assertFakeSdk();
+    const registryBase = AGENT_COST['04-backend-builder'].maxTurns;
+
+    // A forced per-run override (`--model`-style) is documented as forcing one value for EVERY
+    // agent, so it still wins over the computed one.
+    expect((await optionsFor({ maxTurns: 102 }, { maxTurns: 7 })).maxTurns).toBe(7);
+
+    mockQueryCalls.length = 0;
+    // The computed cap wins over the registry...
+    expect((await optionsFor({ maxTurns: 102 })).maxTurns).toBe(102);
+
+    mockQueryCalls.length = 0;
+    // ...and with neither, the registry's base is what it always was.
+    expect((await optionsFor({})).maxTurns).toBe(registryBase);
+  });
+
+  it('U10 a cap of 0 is still the call\'s value: `??` guards undefined, not falsiness', async () => {
+    await assertFakeSdk();
+
+    // `||` here would silently fall through to the registry. Nothing computes 0 today
+    // (turnCap's floor is TURN_ALLOWANCE_BASE), but the operator that reads the field must not
+    // be the kind that cannot express it.
+    expect((await optionsFor({ maxTurns: 0 })).maxTurns).toBe(0);
+  });
+});

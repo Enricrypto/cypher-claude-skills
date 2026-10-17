@@ -640,14 +640,15 @@ describe('the split Stage 2 gate (C-9, A-2 step 4)', () => {
     expect(STAGE2_STORY_CONTRACT.artifacts.required).toEqual(['USER_STORY.md']);
   });
 
-  it('AC-78 STAGE2_SPEC_CONTRACT judges the brief alone: Technical Brief Complete (CRITICAL), File List Documented and Effort Labels Declared (IMPORTANT), both documents required', () => {
+  it('AC-78 U-14 STAGE2_SPEC_CONTRACT judges the brief alone: Technical Brief Complete (CRITICAL), File List Documented, Effort Labels Declared and Brief Size Within Limits (IMPORTANT), both documents required', () => {
     expect(STAGE2_SPEC_CONTRACT.stage).toBe(2);
-    // R9 appended a third criterion. Technical Brief Complete is still the only CRITICAL one, so
-    // the brief part still blocks on exactly what it blocked on before.
+    // R9 appended a third criterion and R5 (PR R-2) a fourth. Technical Brief Complete is still the
+    // only CRITICAL one, so the brief part still blocks on exactly what it blocked on before.
     expect(criteria(STAGE2_SPEC_CONTRACT)).toEqual([
       ['Technical Brief Complete', 'CRITICAL'],
       ['File List Documented', 'IMPORTANT'],
-      ['Effort Labels Declared', 'IMPORTANT']
+      ['Effort Labels Declared', 'IMPORTANT'],
+      ['Brief Size Within Limits', 'IMPORTANT']
     ]);
     expect(STAGE2_SPEC_CONTRACT.artifacts.required).toEqual(['TECHNICAL_BRIEF.md', 'FILE_LIST.md']);
   });
@@ -831,6 +832,135 @@ describe('the Effort Labels Declared criterion (R9)', () => {
   });
 
   it('I-2 the criterion added no required document and no second CRITICAL', () => {
+    expect(STAGE2_SPEC_CONTRACT.artifacts.required).toEqual(['TECHNICAL_BRIEF.md', 'FILE_LIST.md']);
+    expect(
+      STAGE2_SPEC_CONTRACT.acceptance.criteria.filter(c => c.severity === 'CRITICAL').map(c => c.name)
+    ).toEqual(['Technical Brief Complete']);
+    expect(criterion.severity).toBe('IMPORTANT');
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// R5 (PR R-2): the `Brief Size Within Limits` criterion. IMPORTANT, never CRITICAL — the
+// enforcement is the human at CHECKPOINT 2, and a warning that blocked would be the thing the
+// decision forbids.
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+describe('the Brief Size Within Limits criterion (R5)', () => {
+  /** The criterion as the contract exposes it — the only way a gate ever reaches its validator. */
+  const criterion = STAGE2_SPEC_CONTRACT.acceptance.criteria.find(c => c.name === 'Brief Size Within Limits')!;
+
+  const context = (metadata: Record<string, unknown> = {}): StageContext => ({
+    cwd: process.cwd(),
+    stageDir: '',
+    artifacts: {},
+    metadata
+  });
+
+  /** The counts as `buildStageContext` names them. */
+  const counts = (acceptanceCriteria: unknown, files: unknown) => ({
+    storyAcceptanceCriteriaCount: acceptanceCriteria,
+    briefFileCount: files
+  });
+
+  it('U-15 warns above 12 acceptance criteria, naming the count and suggesting a split', async () => {
+    const result = await criterion.validator(context(counts(13, 0)));
+
+    expect(result.passed).toBe(false);
+    expect(result.score).toBe(50);
+    expect(result.details).toContain('13 acceptance criteria');
+    expect(result.details).toMatch(/split/i);
+    // The IMPORTANT path drops result.blockers, so one empty array keeps the finding to one line.
+    expect(result.blockers).toEqual([]);
+  });
+
+  it('U-15 warns above 30 files, naming the count and suggesting a split', async () => {
+    const result = await criterion.validator(context(counts(0, 31)));
+
+    expect(result.passed).toBe(false);
+    expect(result.score).toBe(50);
+    expect(result.details).toContain('31 files');
+    expect(result.details).toMatch(/split/i);
+    expect(result.blockers).toEqual([]);
+  });
+
+  it('U-15 warns ONCE, with both clauses, when both limits are exceeded', async () => {
+    const result = await criterion.validator(context(counts(13, 31)));
+
+    expect(result.passed).toBe(false);
+    expect(result.details).toContain('13 acceptance criteria');
+    expect(result.details).toContain('31 files');
+    // One criterion, one finding, one suggestion — not one per clause.
+    expect(result.details.match(/suggest splitting/g)).toHaveLength(1);
+  });
+
+  it('U-16 passes at exactly 12 acceptance criteria and exactly 30 files: those are the limits', async () => {
+    const result = await criterion.validator(context(counts(12, 30)));
+
+    expect(result.passed).toBe(true);
+    expect(result.score).toBe(100);
+    expect(result.details).toContain('12 acceptance criteria');
+    expect(result.details).toContain('30 file(s)');
+    expect(result.details).toMatch(/within the limits/);
+  });
+
+  it('U-17 passes and never throws when a count is absent, NaN, a string or an object', async () => {
+    const malformed: Array<Record<string, unknown>> = [
+      {},
+      counts(undefined, undefined),
+      counts(Number.NaN, Number.NaN),
+      counts('thirteen', 'thirty-one'),
+      counts({ length: 13 }, [1, 2, 3]),
+      counts(null, null),
+      counts(-13, -31)
+    ];
+
+    for (const metadata of malformed) {
+      let result: Awaited<ReturnType<typeof criterion.validator>> | undefined;
+
+      await expect(
+        (async () => {
+          result = await criterion.validator(context(metadata));
+        })()
+      ).resolves.toBeUndefined();
+
+      // A count we do not have is not evidence of an oversized brief: inventing a warning from a
+      // missing number would put a meaningless line above the approval prompt. This is the one
+      // place where "fail closed" means "pass", because the criterion's failure IS the warning.
+      expect({ metadata, passed: result!.passed }).toEqual({ metadata, passed: true });
+      expect(typeof result!.details).toBe('string');
+      expect(result!.details).not.toMatch(/NaN/);
+    }
+  });
+
+  it('U-18 a failing criterion is an IMPORTANT finding and the stage still advances', async () => {
+    const full: StageContext = {
+      cwd: process.cwd(),
+      stageDir: '',
+      artifacts: {
+        'TECHNICAL_BRIEF.md': ['# Technical Brief', '', ...EFFORT_LABELS.map(l => `- an item — **${l}**`)].join('\n'),
+        'FILE_LIST.md': '# Files\n\n- src/a.ts'
+      },
+      metadata: {
+        briefItemsDeclared: 3,
+        briefItemLabels: [...EFFORT_LABELS],
+        briefItemsUnlabelled: 0,
+        ...counts(13, 31)
+      }
+    };
+
+    const decision = await canAdvanceStage(2, STAGE2_SPEC_CONTRACT, full);
+
+    expect(decision.canAdvance).toBe(true);
+    expect(decision.blockers).toEqual([]);
+    const findings = decision.importantFindings.filter(f => f.startsWith('[Stage 2] Brief Size Within Limits: '));
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toMatch(/split/i);
+    // Only this criterion failed: the effort-labels one is satisfied by the same context.
+    expect(decision.importantFindings.filter(f => f.includes('Effort Labels Declared'))).toEqual([]);
+  });
+
+  it('U-18 the criterion added no required document and no second CRITICAL', () => {
     expect(STAGE2_SPEC_CONTRACT.artifacts.required).toEqual(['TECHNICAL_BRIEF.md', 'FILE_LIST.md']);
     expect(
       STAGE2_SPEC_CONTRACT.acceptance.criteria.filter(c => c.severity === 'CRITICAL').map(c => c.name)

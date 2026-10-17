@@ -41,6 +41,15 @@ export interface AgentInvocation {
    * Validator and its skeptics are pointed at the read-only review copy this way.
    */
   cwd?: string;
+  /**
+   * The turn cap computed for THIS invocation from the approved file list (R4, PR R-2); omitted =
+   * the agent's value from AGENT_COST, exactly as before this PR. The second call-level override,
+   * after `cwd`, and resolved the same way.
+   *
+   * Computed in the orchestrator's `timedInvoke`, not here: the number varies per run, and that is
+   * the one place that can see the Spec Writer's output.
+   */
+  maxTurns?: number;
 }
 
 export type AgentInvoker = (call: AgentInvocation) => Promise<any>;
@@ -223,7 +232,10 @@ export function createSdkInvoker(config: SdkInvokerConfig): AgentInvoker {
     const cost = AGENT_COST[agent] ?? FALLBACK_COST;
     const model = config.model ?? cost.model;
     const effort = config.effort ?? cost.effort;
-    const maxTurns = config.maxTurns ?? cost.maxTurns;
+    // R4: the computed per-call cap sits BETWEEN the two, because a forced `config.maxTurns` is
+    // documented as forcing one value for every agent — so it still wins over the computed one.
+    // A call that carries none behaves byte-identically to before PR R-2 (AC-005).
+    const maxTurns = config.maxTurns ?? call.maxTurns ?? cost.maxTurns;
     // R2 / AC-004: the reply ceiling, plus the whole inherited environment it must never replace.
     const env = agentEnvironment();
 
