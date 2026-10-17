@@ -14,7 +14,10 @@ import { join } from 'path';
 import {
   validateOutputSchema,
   getValidationErrorMessage,
-  verifyArtifactMaterialization
+  verifyArtifactMaterialization,
+  DEFAULT_EFFORT_LABEL,
+  EFFORT_LABELS,
+  resolveEffortLabel
 } from '../../harness/agent-output-schema';
 import { tempProject } from '../fixtures/harness-run';
 import {
@@ -522,6 +525,42 @@ describe('Agent Output Schema', () => {
       } finally {
         project.cleanup();
       }
+    });
+  });
+
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+  // R9: the effort labels. resolveEffortLabel is the one fail-closed seam — every consumer goes
+  // through it, and nothing compares a label string directly.
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+
+  describe('resolveEffortLabel fails closed (R9)', () => {
+    it('U-1 every member of EFFORT_LABELS round-trips unchanged', () => {
+      for (const label of EFFORT_LABELS) {
+        expect(resolveEffortLabel(label)).toEqual(label);
+      }
+    });
+
+    it('U-2 anything unusable becomes DEFAULT_EFFORT_LABEL, which is the deepest label and never the cheapest', () => {
+      // A near-miss, a case variant and a wrong type all fail closed: a missing label must not
+      // buy a free pass.
+      for (const unusable of [undefined, null, '', 'tidyup', 'TIDY-UP', 42, {}, [], true]) {
+        expect(resolveEffortLabel(unusable)).toEqual(DEFAULT_EFFORT_LABEL);
+      }
+
+      expect(DEFAULT_EFFORT_LABEL).toEqual('new feature');
+      expect(DEFAULT_EFFORT_LABEL).not.toEqual('tidy-up');
+      // The enum has exactly three members, so no fourth label is reachable.
+      expect([...EFFORT_LABELS]).toEqual(['tidy-up', 'behaviour change', 'new feature']);
+    });
+
+    it('U-3 the harness arm did not become stricter: a spec validates with briefItems and without it', () => {
+      expect(validateOutputSchema(2, '03-spec-writer', spec())).toEqual({ valid: true, errors: [] });
+
+      // A pre-supplied or older spec has no briefItems at all. It must still validate — a
+      // harness-side requirement would reject every one of them (C-3).
+      const withoutField = spec();
+      delete withoutField.details.briefItems;
+      expect(validateOutputSchema(2, '03-spec-writer', withoutField)).toEqual({ valid: true, errors: [] });
     });
   });
 });

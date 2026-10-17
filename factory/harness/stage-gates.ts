@@ -8,7 +8,7 @@
  * Specialized for: Feature Factory stages 1-5
  */
 
-import { ArtifactRef, verifyArtifactMaterialization } from './agent-output-schema';
+import { ArtifactRef, verifyArtifactMaterialization, DEFAULT_EFFORT_LABEL } from './agent-output-schema';
 import { testsRan } from './regression-baseline';
 import { MAX_BUILDER_ATTEMPTS } from './loop-rules';
 
@@ -160,6 +160,12 @@ export const STAGE2_SPEC_CONTRACT: StageContract = {
         name: 'File List Documented',
         description: 'Every file to be changed listed with reason',
         validator: async (ctx) => validateFileListDocumented(ctx),
+        severity: 'IMPORTANT'
+      },
+      {
+        name: 'Effort Labels Declared',
+        description: 'Every brief item carries one effort label, mirrored in TECHNICAL_BRIEF.md',
+        validator: async (ctx) => validateEffortLabels(ctx),
         severity: 'IMPORTANT'
       }
     ]
@@ -537,6 +543,36 @@ async function validateFileListDocumented(ctx: StageContext): Promise<CriterionR
     };
   }
   return { passed: true, score: 100, details: 'All files documented with reasons' };
+}
+
+/**
+ * R9. IMPORTANT, never CRITICAL: the decision's enforcement is a human catching a mislabel at
+ * CHECKPOINT 2, not a gate. Total by construction — a criterion that throws blocks whatever its
+ * severity, so this one never trusts the shape of what it reads.
+ */
+async function validateEffortLabels(ctx: StageContext): Promise<CriterionResult> {
+  const declared: number = ctx.metadata.briefItemsDeclared ?? 0;
+  const unlabelled: number = ctx.metadata.briefItemsUnlabelled ?? 0;
+  const labels: string[] = Array.isArray(ctx.metadata.briefItemLabels) ? ctx.metadata.briefItemLabels : [];
+  const brief = ctx.artifacts['TECHNICAL_BRIEF.md'] ?? '';
+
+  const problems: string[] = [];
+  if (declared === 0) {
+    problems.push(`no brief items were declared, so every item is treated as ${DEFAULT_EFFORT_LABEL}`);
+  }
+  if (unlabelled > 0) {
+    problems.push(`${unlabelled} item(s) carried no usable label and were read as ${DEFAULT_EFFORT_LABEL}`);
+  }
+  // The mirror is how the Test Verifier, the Validator and CHECKPOINT 2 see the labels at all.
+  const unmirrored = [...new Set(labels)].filter(label => !brief.includes(label));
+  if (unmirrored.length > 0) {
+    problems.push(`TECHNICAL_BRIEF.md does not mention the declared label(s): ${unmirrored.join(', ')}`);
+  }
+
+  if (problems.length > 0) {
+    return { passed: false, score: 50, details: problems.join('; '), blockers: [] };
+  }
+  return { passed: true, score: 100, details: `${declared} brief item(s), each labelled and mirrored in the brief` };
 }
 
 async function validateACTestable(ctx: StageContext): Promise<CriterionResult> {

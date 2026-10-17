@@ -67,6 +67,26 @@ List every test that must exist when this feature is complete:
 ### Files That Will Change
 A complete list: path + reason for change. Nothing should surprise the builders.
 
+### Effort labels
+
+List every unit of work in this brief, one entry each, and give each exactly one label:
+
+| Label | Use it when the item… |
+|---|---|
+| `tidy-up` | changes no behaviour: the tests that already exist must still pass, and no new test is needed |
+| `behaviour change` | changes existing behaviour: one focused test per changed behaviour |
+| `new feature` | adds behaviour that was not there: full test depth |
+
+Every entry in "Files That Will Change" and every entry in "Tests Required" must be covered by
+exactly one labelled item. Give a one-line reason for each label — that reason is what a human
+reads at CHECKPOINT 2 to catch a mislabel. When in doubt, it is `new feature`.
+
+Return the same declaration in the structured `briefItems` field of your output. **The structured
+field is authoritative**; this section is its human-readable copy. The Test Verifier and the
+Validator read this document and never your structured output, so a label that is not written
+here reaches neither of them — and an item with no usable label is read as `new feature`, full
+depth.
+
 ### Security surface
 Declare, for each of these five surfaces, whether the feature has it — `PRESENT` or `ABSENT`:
 

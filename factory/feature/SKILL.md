@@ -2,7 +2,7 @@
 
 A 10-agent chain that takes a feature description to tested, validated code, behind gates that
 are code rather than prose. This document describes what the program does in this version
-(Phase R, PR R-1). Where the code and this file disagree, the code is right and this file is a
+(Phase R, PR R-9). Where the code and this file disagree, the code is right and this file is a
 bug: `factory/test/contracts/doc-drift.test.ts` checks the claims below against the code. What
 comes next is in [docs/ROADMAP.md](../../docs/ROADMAP.md).
 
@@ -444,6 +444,44 @@ the CHECKPOINT 3 rework cycle (0 before any rework) and the validator round, and
 - **A re-extracted copy:** the directory it replaces stays on the evaluation's record. The main
   Validator's absolute paths into it are still mapped to project paths (for the merge, the keys,
   the routing and the findings), and Gate 1 still refuses a builder claim inside it.
+
+---
+
+## Proportionate effort
+
+Adapted from [Ponytail](https://github.com/DietrichGebert/ponytail) by Dietrich Gebert (MIT).
+
+The Spec Writer labels every item of the brief **tidy-up**, **behaviour change** or **new
+feature**, in `briefItems`, a field its output schema requires: the SDK retries the model until
+every item carries one. The brief mirrors the labels in its own prose, which is how they reach
+CHECKPOINT 2, the Test Verifier and the Validator — all three read documents, and the two agents
+never receive the structured output. Nothing about how CHECKPOINT 2 is assembled changed, so a
+run paused before this version approves exactly as it did.
+
+A label the harness cannot read is **new feature**, full depth: an item with none, or one outside
+the three, is never treated as the cheapest. A missing or unmirrored label is one IMPORTANT
+finding, `Effort Labels Declared`, and never blocks the stage. The enforcement is the human at
+CHECKPOINT 2, where a mislabel is caught.
+
+**What each label asks of the Test Verifier and the Validator:** a tidy-up needs the tests that
+already exist to stay green and no new test; a behaviour change needs one focused test per
+changed behaviour; a new feature needs full depth. Independent of the label, new non-trivial
+logic — a branch, a loop, a parser, or code handling money or security — gets one small test, and
+a trivial change gets none. "No new tests" is never "fewer tests": a tidy-up may not delete,
+skip or weaken an existing test, and every acceptance criterion is still covered or explicitly
+marked not coverable.
+
+**What the builder contracts ask of a builder:** take the first option that fully works — does it
+need to exist at all, is it already in this codebase, is it in the standard library or the
+platform, is it in an installed dependency, can it be one line a reader understands at a glance,
+and only then the minimum code that works. Be lazy about the solution, never about the change:
+every caller, test and fixture the change breaks is finished. Validation at a trust boundary,
+error handling that prevents data loss, security and accessibility are never cut, whatever the
+label. A deliberate shortcut with a known limit carries a `shortcut: <the limit>, <when to
+upgrade>` comment, which the Validator accepts as intentional. A builder's summary ends with what
+it skipped or did not check, and the risk that follows.
+
+The rules live in the contracts, not in the program's prompts, so a by-hand run follows them too.
 
 ---
 

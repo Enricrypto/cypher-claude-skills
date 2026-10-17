@@ -40,6 +40,35 @@ Your prompt lists this run's upstream documents by absolute path — only those 
 - Every edge case marked in scope — is it tested?
 - Any acceptance criterion without a corresponding test?
 
+### Effort Labels (proportionate depth)
+
+Adapted from [Ponytail](https://github.com/DietrichGebert/ponytail) by Dietrich Gebert (MIT).
+
+The approved brief labels every item **tidy-up**, **behaviour change** or **new feature**. Judge
+test depth against the item's label, not against one fixed bar:
+
+- **tidy-up** — the tests that already exist still pass and no new test was needed. The absence of
+  a new test is not a finding. Deleting, skipping or weakening an existing test **is** a finding.
+- **behaviour change** — one focused test per changed behaviour.
+- **new feature** — full depth.
+
+An item with no label, or one you cannot match to a label, is a **new feature**.
+
+Independent of the label: new non-trivial logic — a branch, a loop, a parser, or code handling
+money or security — with no test at all is a finding.
+
+A deliberate shortcut carrying a `shortcut: <the limit>, <when to upgrade>` comment is an
+intentional, bounded choice: accept it, and do not report it as an omission. A shortcut with no
+such comment, or one whose stated limit does not match what the code actually does, is a finding.
+
+**No label and no `shortcut:` comment excuses any of these.** A cut to any one of them is
+**Critical**, whatever the item's label says:
+
+- validation at a trust boundary
+- error handling that prevents data loss
+- security
+- accessibility
+
 ### Security
 - Missing auth checks (any endpoint accessible without the required role?)
 - Tenant isolation gaps (can one tenant access another's data?)
@@ -67,7 +96,9 @@ Never report `true` for a surface you did not check. List each concrete security
 - Retry logic / idempotency gaps flagged by the Researcher
 
 ## Severity Levels
-- **Critical** — must fix before merge (security hole, data loss risk, auth gap, failing acceptance criterion)
+- **Critical** — must fix before merge (security hole, data loss risk, auth gap, failing
+  acceptance criterion). A cut to validation at a trust boundary, to error handling that prevents
+  data loss, to security or to accessibility is Critical whatever label the brief item carries.
 - **Important** — should fix before merge (missing test coverage, pattern violation, scope creep)
 - **Minor** — reviewer's call (style preference, naming, refactor opportunity)
 

@@ -1475,12 +1475,9 @@ describe('AC-010 the factory adds .factory/ to the project\'s .git/info/exclude 
 // ═════════════════════════════════════════════════════════════════════════════════════════════
 
 describe('AC-011 SKILL.md and its pinned claims match the behaviour this PR ships', () => {
-  it('AC-011 the version line names this PR, and the retired one is gone from the intro', () => {
-    const intro = read('factory/feature/SKILL.md').split('\n---')[0];
-
-    expect(intro).toContain('(Phase R, PR R-1)');
-    expect(intro).not.toContain('PR B-2');
-  });
+  // The version-line assertion that stood here was retired by PR R-9, which moved the line to
+  // `(Phase R, PR R-9)`. Each PR's acceptance file asserts its own version line exactly once;
+  // R-9's lives in phase-r-pr-r9.test.ts under AC-010. R-1's content claims below are still true.
 
   it('AC-011 the sentence about writing inside .git/ is true again, now that the factory writes info/exclude', () => {
     const skill = skillMd();
@@ -1543,8 +1540,8 @@ describe('AC-011 SKILL.md and its pinned claims match the behaviour this PR ship
     const pinned = read('factory/test/contracts/doc-drift.test.ts');
 
     // The claim list is what makes SKILL.md's promises enforceable; it must require this PR's
-    // literals, not the previous PR's.
-    expect(pinned).toContain('Phase R, PR R-1');
+    // literals. (The version-line literal itself moved to R-9's file; these five pin claims
+    // SKILL.md still makes.)
     for (const literal of ['caffeinate', MAX_OUTPUT_TOKENS_VAR, MAX_OUTPUT_TOKENS_VALUE, 'info/exclude', 'Connection closed']) {
       expect(pinned).toContain(literal);
     }

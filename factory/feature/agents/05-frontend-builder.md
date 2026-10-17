@@ -65,6 +65,40 @@ For each attempt, note what you tried, the result (still failing / fixed) and th
 
 If a backend change is needed to fix a mismatch, note it clearly — do not make the change yourself.
 
+## Smallest Complete Change
+
+Adapted from [Ponytail](https://github.com/DietrichGebert/ponytail) by Dietrich Gebert (MIT).
+
+Take the first option that fully works:
+
+1. **Does it need to exist?** Skip what nobody asked for, and name it in one line.
+2. **Already in this codebase** (a helper, a fixture, a pattern)? Use it the way the code around it does.
+3. **Standard library or a platform feature?** Use it.
+4. **An installed dependency?** Use it. Never add a dependency for a few lines.
+5. **Can it be one line a reader understands at a glance?** One line.
+6. **Only then:** the minimum code that works.
+
+Be lazy about the solution, never about the change: finish every caller, test and fixture the
+change breaks.
+
+**Never cut these, whatever label the brief item carries:**
+- validation at a trust boundary
+- error handling that prevents data loss
+- security
+- accessibility
+
+A deliberate shortcut with a known limit carries a comment in the code:
+
+```
+shortcut: <the limit>, <when to upgrade>
+```
+
+The brief labels every item **tidy-up**, **behaviour change** or **new feature**. The label sets
+how much is expected of the item. It never decides whether the four above are done — they always
+are. An item you cannot match to a label is a **new feature**.
+
+Your summary ends with what you skipped or did not check, and the risk that follows from it.
+
 ## Before Declaring Done
 Run (in order):
 1. Type check: use the project's typecheck command from `CLAUDE.md`
