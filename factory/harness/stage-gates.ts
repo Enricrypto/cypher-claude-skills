@@ -504,6 +504,24 @@ async function validateRisksIdentified(ctx: StageContext): Promise<CriterionResu
   return { passed: true, score: 100, details: `${risks.length} risks/unknowns identified` };
 }
 
+/**
+ * The story gate reads the criteria, not their typography: "**Given** … **when** … **then** …"
+ * is as testable as the capitalised form, and both blocked real stories before this (R-9, R-2).
+ * The count is the larger of the distinct AC-N ids and the "given" clauses, so a story counts
+ * whether or not it numbers its criteria. Deliberately lenient: R6 replaces it with the
+ * structured count.
+ */
+const GIVEN = /\bgiven\b/gi;
+const WHEN = /\bwhen\b/i;
+const THEN = /\bthen\b/i;
+const AC_ID = /\bAC-\d+\b/gi;
+
+export function countAcceptanceCriteria(story: string): number {
+  const ids = new Set((story.match(AC_ID) ?? []).map(id => id.toUpperCase()));
+  const givens = (story.match(GIVEN) ?? []).length;
+  return Math.max(ids.size, givens);
+}
+
 async function validateUserStory(ctx: StageContext): Promise<CriterionResult> {
   const story = ctx.artifacts['USER_STORY.md'];
   if (!story) {
@@ -514,16 +532,16 @@ async function validateUserStory(ctx: StageContext): Promise<CriterionResult> {
       blockers: ['Run 02-Story Writer agent']
     };
   }
-  const acCount = (story.match(/Given|When|Then/g) || []).length / 3; // Rough count
+  const acCount = countAcceptanceCriteria(story);
   if (acCount < 3) {
     return {
       passed: false,
       score: 50,
-      details: `Only ${Math.floor(acCount)} acceptance criteria found (need 3+)`,
+      details: `Only ${acCount} acceptance criteria found (need 3+)`,
       blockers: ['Expand story with more acceptance criteria']
     };
   }
-  return { passed: true, score: 100, details: `User story with ${Math.floor(acCount)} acceptance criteria` };
+  return { passed: true, score: 100, details: `User story with ${acCount} acceptance criteria` };
 }
 
 async function validateTechnicalBrief(ctx: StageContext): Promise<CriterionResult> {
@@ -612,7 +630,7 @@ async function validateBriefSize(ctx: StageContext): Promise<CriterionResult> {
 
 async function validateACTestable(ctx: StageContext): Promise<CriterionResult> {
   const story = ctx.artifacts['USER_STORY.md'];
-  if (!story || !story.includes('Given') || !story.includes('When') || !story.includes('Then')) {
+  if (!story || !/\bgiven\b/i.test(story) || !WHEN.test(story) || !THEN.test(story)) {
     return {
       passed: false,
       score: 0,

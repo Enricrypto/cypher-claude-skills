@@ -12,6 +12,7 @@ import { describe, it, expect, beforeEach } from '@jest/globals';
 import {
   stageContracts,
   canAdvanceStage,
+  countAcceptanceCriteria,
   STAGE2_SPEC_CONTRACT,
   STAGE2_STORY_CONTRACT,
   StageContext,
@@ -685,6 +686,55 @@ describe('the split Stage 2 gate (C-9, A-2 step 4)', () => {
     const story = await canAdvanceStage(2, STAGE2_STORY_CONTRACT, context({ 'USER_STORY.md': '# Story\nIt should work.' }));
     expect(story.canAdvance).toBe(false);
     expect(story.blockers.join('\n')).toMatch(/Given\/When\/Then/);
+  });
+});
+
+describe('the story gate reads the criteria, not their capitalisation', () => {
+  const context = (story: string): StageContext => ({
+    cwd: process.cwd(),
+    stageDir: '',
+    artifacts: { 'USER_STORY.md': story },
+    metadata: {}
+  });
+
+  // The two shapes that blocked runs R-9 and R-2: lower-case "when"/"then" in a table row, and
+  // a labelled list with "Given" capitalised but "when"/"then" not.
+  const tableStory = [
+    '# Story',
+    '| # | Criterion |',
+    '|---|---|',
+    ...[1, 2, 3, 4].map(i => `| AC-00${i} | **Given** a brief, **when** it runs, **then** case ${i} holds. |`)
+  ].join('\n');
+  const listStory = [
+    '# Story',
+    ...[1, 2, 3, 4, 5, 6, 7].map(i => `${i}. **AC-00${i} (MUST).** Given input ${i}, when it runs, then output ${i} follows.`)
+  ].join('\n');
+
+  it('passes a story whose "when" and "then" are lower case', async () => {
+    for (const story of [tableStory, listStory]) {
+      const result = await canAdvanceStage(2, STAGE2_STORY_CONTRACT, context(story));
+      expect(result.blockers).toEqual([]);
+      expect(result.canAdvance).toBe(true);
+    }
+  });
+
+  it('counts criteria by their AC ids, or by their "given" clauses when they have none', () => {
+    expect(countAcceptanceCriteria(tableStory)).toBe(4);
+    expect(countAcceptanceCriteria(listStory)).toBe(7);
+    // An id mentioned twice is one criterion.
+    expect(countAcceptanceCriteria('AC-001 given a, AC-001 again, AC-002 given b')).toBe(2);
+    expect(countAcceptanceCriteria(['given a', 'GIVEN b', 'Given c'].join('\n'))).toBe(3);
+    expect(countAcceptanceCriteria('It should work.')).toBe(0);
+  });
+
+  it('still blocks a story with fewer than three criteria, and one with no given/when/then at all', async () => {
+    const short = await canAdvanceStage(2, STAGE2_STORY_CONTRACT, context('AC-1: given a, when b, then c.\nAC-2: given d, when e, then f.'));
+    expect(short.canAdvance).toBe(false);
+    expect(short.blockers.join('\n')).toMatch(/Only 2 acceptance criteria found/);
+
+    const prose = await canAdvanceStage(2, STAGE2_STORY_CONTRACT, context('# Story\nIt should work.'));
+    expect(prose.canAdvance).toBe(false);
+    expect(prose.blockers.join('\n')).toMatch(/Given\/When\/Then/);
   });
 });
 
