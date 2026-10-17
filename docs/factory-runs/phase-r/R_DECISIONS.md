@@ -29,9 +29,13 @@ Interim, already merged: PR #9 raised `maxTurns` (builders and Test Verifier 40 
 
 - **Placement:** Phase R runs **before B-3**. These items block real use of the factory; B-3 (cost
   per agent, budget cap, builder sandboxing, parallel builders) does not.
-- **Three PRs**, each merged before the next starts, each kept to about 10 acceptance criteria:
-  - **R-1:** R1, R2, R3, R8. First, because it removes most of the stops.
-  - **R-2:** R4, R5, R9.
+- **PRs**, each merged before the next starts, each kept to about 10 acceptance criteria:
+  - **R-1 (done, PR #12):** R1, R2, R3, R8. First, because it removes most of the stops.
+  - **R-9:** R9 on its own, with the Ponytail rules below. **Moved ahead of R-2 on 2026-10-17** so
+    that every later run measures its effect against the baseline in
+    [R_MEASUREMENTS.md](R_MEASUREMENTS.md).
+  - **R-2:** R4, R5. If R-9 makes agents finish within their turns, R4 may shrink or be dropped;
+    decide from the measurements.
   - **R-3:** R6, R7, R10.
 
 ## Items
@@ -46,5 +50,34 @@ Interim, already merged: PR #9 raised `maxTurns` (builders and Test Verifier 40 
 | **R6** | Story gate reads the structured ACs | The story gate counts acceptance criteria in the Story Writer's structured output **and** in `USER_STORY.md`, and **blocks when the two counts disagree**. |
 | **R7** | No invisible characters in documents meant to be copied into code | (a) The output contract tells agents to spell an escape by its parts in prose and never to write the escape itself. (b) The existing `document-check` finding becomes **CRITICAL** for `TECHNICAL_BRIEF.md` and `FILE_LIST.md` and stays IMPORTANT for every other document. |
 | **R8** | Snapshots work when `.factory/` is ignored; the factory hides `.factory/` itself | (a) The Stage 3 snapshot succeeds whether or not the project ignores `.factory/` (today `git add -A -- . ':(exclude).factory'` exits 1 on git 2.39 when `.factory` is ignored). (b) At run start the factory adds `.factory/` to the project's `.git/info/exclude` (local only, never committed). Moving run state out of the project was rejected as too large a redesign. |
-| **R9** | Proportionate effort | The Spec Writer labels every brief item **tidy-up** (no behaviour change: existing tests must still pass, no new tests), **behaviour change** (one focused test per changed behaviour) or **new feature** (full depth). The Test Verifier and the Validator follow the label. The labels are shown at CHECKPOINT 2, where a mislabel is caught. |
+| **R9** | Proportionate effort | The Spec Writer labels every brief item **tidy-up** (no behaviour change: existing tests must still pass, no new tests), **behaviour change** (one focused test per changed behaviour) or **new feature** (full depth). The Test Verifier and the Validator follow the label. The labels are shown at CHECKPOINT 2, where a mislabel is caught. **Plus the Ponytail rules** (see below), written into the builder and Test Verifier contracts. |
 | **R10** | Clear message when the usage limit stops an agent | When an agent exits with a usage-limit message, or with code 1 and no message, the escalation says the plan's usage limit is the likely cause and that the run can be resumed once it resets. |
+
+## R9 — the Ponytail rules (added 2026-10-17)
+
+Adapted from [Ponytail](https://github.com/DietrichGebert/ponytail) by Dietrich Gebert (MIT),
+`skills/ponytail/SKILL.md`. The SDK loads no user skills in program mode, so the rules go into the
+agent contracts as text, not as a plugin. Evidence: the author's benchmark reports −53% code and
+−26% cost; JetBrains' independent test of an earlier version measured −15% code and −10.3% cost
+with no difference in quality. Expect the smaller figure.
+
+**Builders (04, 05)** take the first option that fully works:
+
+1. Does it need to exist? Skip what nobody asked for, and name it in one line.
+2. Already in this codebase (a helper, a fixture, a pattern)? Use it the way the code around it does.
+3. Standard library or a platform feature? Use it.
+4. An installed dependency? Use it. Never add a dependency for a few lines.
+5. Can it be one line a reader understands at a glance? One line.
+6. Only then: the minimum code that works.
+
+- Be lazy about the solution, never about the change: finish every caller, test and fixture the
+  change breaks.
+- Never cut validation at trust boundaries, error handling that prevents data loss, security or
+  accessibility.
+- A deliberate shortcut with a known limit carries a comment `shortcut: <the limit>, <when to upgrade>`.
+- The builder's summary ends with what it skipped or did not check, and any risk.
+
+**Test Verifier (06):** new non-trivial logic (a branch, a loop, a parser, money or security) gets
+one small test; a trivial change gets none. This is how the R9 labels are applied: a **tidy-up**
+needs the existing suite to stay green, a **behaviour change** gets one focused test per changed
+behaviour, a **new feature** gets full depth.

@@ -80,8 +80,12 @@ checkpoint. Items R1–R10, binding decisions in
   in `agentInvocations`, never spending a builder attempt on a dropped connection; R8 names the
   project's non-ignored top-level entries in the snapshot `add` instead of a `:(exclude)`
   pathspec, which git 2.39 refused once `.factory/` was ignored.
-- **R-2:** R4 `maxTurns` scaled to the file list, R5 a size warning at CHECKPOINT 2, R9
-  proportionate effort (tidy-up / behaviour change / new feature).
+- **R-9 (next):** R9 proportionate effort (tidy-up / behaviour change / new feature) with the
+  Ponytail rules for builders and the Test Verifier. Moved ahead of R-2 so later runs can be
+  measured against the baseline in
+  [R_MEASUREMENTS.md](factory-runs/phase-r/R_MEASUREMENTS.md).
+- **R-2:** R4 `maxTurns` scaled to the file list, R5 a size warning at CHECKPOINT 2. R4 may shrink
+  or be dropped if R-9's measurements show agents finishing within their turns.
 - **R-3:** R6 the story gate counts structured and document ACs, R7 invisible characters block in
   the brief and file list, R10 a clear usage-limit message.
 
