@@ -22,6 +22,7 @@
 | cypher-agents 0a-1 `dd9a5d9d` | 43 new files | 4 | 1 | 3 of 11 | 2 | 149 | ≈ $37 | 2,639 | 4,244 | 1.6 |
 | cypher-agents cleanup `284f06fa` | Small fixes, 15 files | 4 | 1 | 4 of 12 | 2 | 87 | ≈ $25 | 235 | 1,321 | **5.6** |
 | factory R-1 `94eaf6b1` | R1, R2, R3, R8; 33 files | 6 | 1 | 2 of 16 | 2 | 217 | ≈ $73 | 723 | 3,531 | **4.9** |
+| factory R-9 `7f47ec54` | R9 labels + Ponytail rules; 21 files. **First run with R-1's fixes** (no manual `caffeinate` or reply limit), still without R9's own rules | 2 | 0 | 1 of 9 | 1 | 73 | ≈ $31 | 111 code + 212 contract prose | 1,001 | 3.1 (code + prose) |
 
 Causes of the early stops, before R-1 shipped: Mac idle sleep and dropped connections (3), replies
 over 32,000 tokens (2), `maxTurns` exhausted (builder in all three building runs; Test Verifier and
@@ -29,6 +30,10 @@ Validator once), the story gate counting 1 AC (1), `.factory` ignored breaking t
 unexplained "exit code 1" (1). In R-1 itself: builder out of turns (2), the Frontend Builder run on
 a UI-less brief (1), Gate 2 failing on two hygiene rules in the Test Verifier's file and on
 `execution-gates` timing under load (2), and a `git pull` by another session moving HEAD (1).
+
+R-9's two stops were the story gate's case-sensitive Given/When/Then check (R6) and the builder
+running out of its 80 turns once. No stop came from sleep, reply size, a dropped connection or
+`.factory`: the causes R-1 removed did not recur.
 
 **What R9 should move:** test lines per code line, above all on small changes (5.6 and 4.9 today);
 how often an agent runs out of turns; usage per changed file.
