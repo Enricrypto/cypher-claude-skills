@@ -46,4 +46,15 @@ post-R9 run fills this row**, and each run after it adds its own. No number here
 
 | Run | What | Early stops | Checkpoint rejections | Crashed / out-of-turns calls | Builder out of turns | Agent minutes | Priced usage | Source lines | Test lines | Test per code line |
 |---|---|---|---|---|---|---|---|---|---|---|
-| _first run after R-9 (PR #n) — to be filled_ | | | | | | | | | | |
+| factory R-2 `7a2333f1` | R4 + R5; 15 files. **First run under R9's labels and Ponytail rules** | 2 | 0 | 1 of 9 | 1 | 69 | ≈ $27 | 187 | 1,715 | **9.2** |
+| _next run — to be filled_ | | | | | | | | | | |
+
+**R-2, read honestly.** The plan was leaner (15 files, no "new feature" item, 6 behaviour changes
+and 2 tidy-ups), no checkpoint was rejected, and on its resume the Validator ran under R4's own cap
+(70 for 15 files) and used 56 turns, past the old 50. But test volume did **not** fall: the Test
+Verifier wrote a second, 682-line acceptance file beside the builder's 503-line one, so test lines
+per code line rose to 9.2. The builder still ran out of 80 turns once, and R4 would not have helped
+it: for 15 files the formula gives 70, below the base. The two stops were the story gate's
+case-sensitive count (fixed in PR #17, ahead of R6) and that builder overrun. Next to watch: whether
+the Test Verifier writes its own acceptance file when the builder already wrote one, and how the
+builder spends its turns.
