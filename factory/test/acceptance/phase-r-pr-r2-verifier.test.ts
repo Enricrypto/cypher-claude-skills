@@ -29,6 +29,7 @@ import { join, resolve } from 'path';
 import { createSdkInvoker } from '../../runner/invoke-agent';
 import type { AgentInvocation } from '../../runner/invoke-agent';
 import { AGENT_COST } from '../../runner/agent-registry';
+import { turnCap } from '../../harness/brief-size';
 import { backend, followup, frontend, spec, story, testVerifier } from '../fixtures/agent-outputs';
 import { fakeChangeTracker } from '../fixtures/changes';
 import {
@@ -258,6 +259,8 @@ describe('AC-001 a large approved list raises the cap to 40 + 2 × files', () =>
       // Had DELETE entries been dropped (as metadata.expectedFiles drops them) the count would be
       // 25 and the cap 90, not 102 — which is exactly the under-count the story rules out.
       expect(40 + 2 * 25).toBe(90);
+      // Some scaled agent must have run, or the per-agent equality below passes on empty arrays.
+      expect(SCALED.flatMap(agent => capsFor(calls, agent)).length).toBeGreaterThan(0);
       for (const agent of SCALED) {
         expect({ agent, caps: capsFor(calls, agent) }).toEqual({
           agent,
@@ -360,6 +363,8 @@ describe('AC-003 the cap is 150, whatever the base or the file count', () => {
 
       expect(state.completionStatus).toBe('SUCCESS');
 
+      // Some scaled agent must have run, or the per-agent equality below passes on empty arrays.
+      expect(SCALED.flatMap(agent => capsFor(calls, agent)).length).toBeGreaterThan(0);
       for (const agent of SCALED) {
         expect({ agent, caps: capsFor(calls, agent) }).toEqual({
           agent,
@@ -381,6 +386,8 @@ describe('AC-003 the cap is 150, whatever the base or the file count', () => {
       const { calls, state } = await wholeRun({ files: listOf(55) });
 
       expect(state.completionStatus).toBe('SUCCESS');
+      // Some scaled agent must have run, or the per-agent equality below passes on empty arrays.
+      expect(SCALED.flatMap(agent => capsFor(calls, agent)).length).toBeGreaterThan(0);
       for (const agent of SCALED) {
         expect({ agent, caps: capsFor(calls, agent) }).toEqual({
           agent,
@@ -395,6 +402,8 @@ describe('AC-003 the cap is 150, whatever the base or the file count', () => {
     // No base is above 150 today, so the min-after-max branch is proved by the formula the story
     // states, hand-written here, rather than by mutating the pinned registry.
     expect(storyFormula(200, 0)).toBe(150);
+    // And the shipped function, against the story's literal, so dropping its Math.min fails here.
+    expect(turnCap(200, 0)).toBe(150);
     expect(Math.max(...Object.values(BASE_AT_R9))).toBeLessThan(150);
     expect(Math.max(...Object.values(AGENT_COST).map(cost => cost.maxTurns))).toBeLessThan(150);
   });
